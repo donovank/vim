@@ -1,7 +1,5 @@
 " Tests for stat functions and checktime
 
-source check.vim
-
 func CheckFileTime(doSleep)
   let fnames = ['Xtest1.tmp', 'Xtest2.tmp', 'Xtest3.tmp']
   let times = []
@@ -50,6 +48,33 @@ func Test_existent_directory()
   call assert_equal('rwx', getfperm(dname)[0:2])
 endfunc
 
+func Test_getfsize_symlink()
+  if !has('unix') && !has('win32')
+    throw 'Skipped: requires Unix or Windows'
+  endif
+  call mkdir('XsizeTarget', 'R')
+  call writefile(['text'], 'XsizeTarget/file')
+  try
+    if has('win32')
+      silent !mklink /D XsizeLink XsizeTarget
+    else
+      silent !ln -s XsizeTarget XsizeLink
+    endif
+    if v:shell_error
+      throw 'Skipped: cannot create symlinks'
+    endif
+    call assert_equal(0, getfsize('XsizeLink'))
+    call assert_equal(0, getfsize('XsizeLink/'))
+    call assert_equal(5, getfsize('XsizeLink/file'))
+    call delete('XsizeTarget/file')
+    call assert_equal(-1, getfsize('XsizeLink/file'))
+    call delete('XsizeTarget', 'd')
+    call assert_equal(-1, getfsize('XsizeLink'))
+  finally
+    call delete('XsizeLink')
+  endtry
+endfunc
+
 func SleepForTimestamp()
   " FAT has a granularity of 2 seconds, otherwise it's usually 1 second
   if has('win32')
@@ -63,7 +88,7 @@ func Test_checktime()
   let fname = 'Xtest.tmp'
 
   let fl = ['Hello World!']
-  call writefile(fl, fname)
+  call writefile(fl, fname, 'D')
   set autoread
   exec 'e' fname
   call SleepForTimestamp()
@@ -72,8 +97,39 @@ func Test_checktime()
   call writefile(fl, fname)
   checktime
   call assert_equal(fl[0], getline(1))
+endfunc
 
-  call delete(fname)
+func Test_checktime_fast()
+  CheckFeature nanotime
+
+  let fname = 'Xtest.tmp'
+
+  let fl = ['Hello World!']
+  call writefile(fl, fname, 'D')
+  set autoread
+  exec 'e' fname
+  let fl = readfile(fname)
+  let fl[0] .= ' - checktime'
+  call writefile(fl, fname)
+  checktime
+  call assert_equal(fl[0], getline(1))
+endfunc
+
+func Test_autoread_fast()
+  CheckFeature nanotime
+
+  " this is timing sensitive
+  let g:test_is_flaky = 1
+
+  new Xautoread
+  setlocal autoread
+  call setline(1, 'foo')
+  w!
+  sleep 10m
+  call writefile(['bar'], 'Xautoread', 'D')
+  sleep 10m
+  checktime
+  call assert_equal('bar', trim(getline(1)))
 endfunc
 
 func Test_autoread_file_deleted()
@@ -126,6 +182,34 @@ func Test_nonexistent_file()
   call assert_equal('', getfperm(fname))
 endfunc
 
+func Test_nonexistent_file_win32()
+  CheckMSWindows
+
+  call mkdir('XstatMissing', 'R')
+  for fname in ['XstatMissing/file', 'XstatMissing/subdir/file', '']
+    call assert_equal(-1, getftime(fname), fname)
+    call assert_equal(-1, getfsize(fname), fname)
+    call assert_equal('', getftype(fname), fname)
+    call assert_equal('', getfperm(fname), fname)
+    call assert_equal([], glob(fname, 0, 1), fname)
+    call assert_equal([], glob(fname, 0, 1, 1), fname)
+  endfor
+
+  " A previous failed lookup must not hide a newly created file.
+  call mkdir('XstatMissing/subdir')
+  call writefile(['text'], 'XstatMissing/subdir/file')
+  call assert_equal(5, getfsize('XstatMissing/subdir/file'))
+  call assert_equal('file', getftype('XstatMissing/subdir/file'))
+  call delete('XstatMissing/subdir/file')
+  call assert_equal(-1, getfsize('XstatMissing/subdir/file'))
+
+  " Device names and drive roots must not be reported as missing.  The type
+  " reported for NUL depends on the C runtime.
+  call assert_notequal('', getftype('NUL'))
+  call assert_equal(0, getfsize('NUL'))
+  call assert_equal('dir', getftype($SystemDrive . '/'))
+endfunc
+
 func Test_getftype()
   call assert_equal('file', getftype(v:progpath))
   call assert_equal('dir',  getftype('.'))
@@ -134,7 +218,7 @@ func Test_getftype()
     return
   endif
 
-  silent !ln -s Xfile Xlink
+  silent !ln -s Xlinkfile Xlink
   call assert_equal('link', getftype('Xlink'))
   call delete('Xlink')
 

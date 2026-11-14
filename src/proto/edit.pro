@@ -1,13 +1,13 @@
-/* edit.c */
+// edit.c
 int edit(int cmdchar, int startln, long count);
 int ins_need_undo_get(void);
 void ins_redraw(int ready);
 void edit_putchar(int c, int highlight);
 void set_insstart(linenr_T lnum, int col);
 void edit_unputchar(void);
-void display_dollar(colnr_T col);
+void display_dollar(colnr_T col_arg);
 void undisplay_dollar(void);
-void truncate_spaces(char_u *line);
+void truncate_spaces(char_u *line, size_t len);
 void backspace_until_column(int col);
 int get_literal(int noReduceKeys);
 void insertchar(int c, int flags, int second_indent);
@@ -19,10 +19,12 @@ char_u *add_char2buf(int c, char_u *s);
 void beginline(int flags);
 int oneright(void);
 int oneleft(void);
+void cursor_up_inner(win_T *wp, long n);
 int cursor_up(long n, int upd_topline);
+void cursor_down_inner(win_T *wp, long n);
 int cursor_down(long n, int upd_topline);
 int stuff_inserted(int c, long count, int no_esc);
-char_u *get_last_insert(void);
+string_T get_last_insert(void);
 char_u *get_last_insert_save(void);
 void replace_push(int c);
 int replace_push_mb(char_u *p);
@@ -37,4 +39,4 @@ colnr_T get_nolist_virtcol(void);
 int get_can_cindent(void);
 void set_can_cindent(int val);
 int ins_apply_autocmds(event_T event);
-/* vim: set ft=c : */
+// vim: ft=c

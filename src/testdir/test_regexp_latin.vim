@@ -3,10 +3,11 @@
 set encoding=latin1
 scriptencoding latin1
 
-source check.vim
-
 func s:equivalence_test()
-  let str = "AÀÁÂÃÄÅ B C D EÈÉÊË F G H IÌÍÎÏ J K L M NÑ OÒÓÔÕÖØ P Q R S T UÙÚÛÜ V W X Yİ Z aàáâãäå b c d eèéêë f g h iìíîï j k l m nñ oòóôõöø p q r s t uùúûü v w x yıÿ z"
+  let str = 'AÀÁÂÃÄÅ B C D EÈÉÊË F G H IÌÍÎÏ J K L M NÑ OÒÓÔÕÖØ P Q R S T UÙÚÛÜ V W X Yİ Z '
+  \      .. 'aàáâãäå b c d eèéêë f g h iìíîï j k l m nñ oòóôõöø p q r s t uùúûü v w x yıÿ z '
+  \      .. "0 1 2 3 4 5 6 7 8 9 "
+  \      .. "` ~ ! ? ; : . , / \\ ' \" | < > [ ] { } ( ) @ # $ % ^ & * _ - + \b \e \f \n \r \t"
   let groups = split(str)
   for group1 in groups
       for c in split(group1, '\zs')
@@ -27,11 +28,13 @@ endfunc
 func Test_equivalence_re1()
   set re=1
   call s:equivalence_test()
+  set re=0
 endfunc
 
 func Test_equivalence_re2()
   set re=2
   call s:equivalence_test()
+  set re=0
 endfunc
 
 func Test_recursive_substitute()
@@ -64,6 +67,7 @@ func Test_eow_with_optional()
     let actual = matchlist('abc def', '\(abc\>\)\?\s*\(def\)')
     call assert_equal(expected, actual)
   endfor
+  set re=0
 endfunc
 
 func Test_backref()
@@ -86,6 +90,31 @@ func Test_multi_failure()
   call assert_fails('/a*\+', 'E871:')
   call assert_fails('/a\{a}', 'E554:')
   set re=0
+endfunc
+
+func Test_column_success_failure()
+  new
+  call setline(1, 'xbar')
+
+  set re=1
+  %s/\%>0v./A/
+  call assert_equal('Abar', getline(1))
+  call assert_fails('/\%v', 'E71:')
+  call assert_fails('/\%>v', 'E71:')
+  call assert_fails('/\%c', 'E71:')
+  call assert_fails('/\%<c', 'E71:')
+  call assert_fails('/\%l', 'E71:')
+  set re=2
+  %s/\%>0v./B/
+  call assert_equal('Bbar', getline(1))
+  call assert_fails('/\%v', 'E1273:')
+  call assert_fails('/\%>v', 'E1273:')
+  call assert_fails('/\%c', 'E1273:')
+  call assert_fails('/\%<c', 'E1273:')
+  call assert_fails('/\%l', 'E1273:')
+
+  set re=0
+  bwipe!
 endfunc
 
 func Test_recursive_addstate()
@@ -661,6 +690,55 @@ func Test_regexp_single_line_pat()
   unlet t tl e l
 endfunc
 
+" Test that the old (backtracking) engine, forced with \%#=1, turns the
+" case-independent collections into the faster \d, \D, \x, \X, \o, \O, \w,
+" \W, \h, \H, \a and \A classes, while leaving the collections it must not
+" convert untouched.
+func Test_recognize_char_class_old_engine()
+  " Collections that are converted to a character class.
+  call assert_equal('0123456789', matchstr('x0123456789x', '\%#=1[0-9]\+'))
+  call assert_equal('a;X+% ', matchstr('0a;X+% 9', '\%#=1[^0-9]\+'))
+  call assert_equal('0189abcdef', matchstr('x0189abcdefg', '\%#=1[0-9a-fA-F]\+'))
+  call assert_equal('gh;X+% ', matchstr('0agh;X+% 9', '\%#=1[^0-9a-fA-F]\+'))
+  call assert_equal('01234567', matchstr('x0123456789x', '\%#=1[0-7]\+'))
+  call assert_equal('89abX+% ', matchstr('0189abX+% 7', '\%#=1[^0-7]\+'))
+  call assert_equal('aso_SfOij', matchstr(';+aso_SfOij ', '\%#=1[a-zA-Z0-9_]\+'))
+  call assert_equal(';+% ', matchstr('a;+% 9', '\%#=1[^a-zA-Z0-9_]\+'))
+  call assert_equal('aso_SfOij', matchstr('9+aso_SfOij ', '\%#=1[a-zA-Z_]\+'))
+  " The '_' is kept by [^a-zA-Z] (\A) but dropped by [^a-zA-Z_] (\H), which is
+  " the only difference between the two negated classes.
+  call assert_equal('9;+%', matchstr('a9;+%_ z', '\%#=1[^a-zA-Z_]\+'))
+  call assert_equal('asoSfOij', matchstr(';+asoSfOij9 ', '\%#=1[a-zA-Z]\+'))
+  call assert_equal('9;+%_ ', matchstr('a9;+%_ z', '\%#=1[^a-zA-Z]\+'))
+
+  " Collections that must not be converted.
+  call assert_equal('0189abcdef', matchstr('x0189abcdefg', '\%#=1[0-9a-f]\+'))
+  call assert_equal(';X+% ', matchstr('a;X+% 9', '\%#=1[^0-9a-f]\+'))
+  call assert_equal('abcxyz', matchstr('0abcxyz1', '\%#=1[a-z]\+'))
+  call assert_equal('9888', matchstr('asfi9888u', '\%#=1[0-9\n]\+'))
+  call assert_equal('9888', matchstr('asfi9888u', '\%#=1\_[0-9]\+'))
+
+  " With 'ignorecase' the letter ranges match both cases, so they must stay
+  " collections: converting them to LOWER/UPPER would drop that behavior since
+  " the old engine has no case-insensitive class opcode.
+  set ignorecase
+  call assert_equal('abcXYZ', matchstr('0abcXYZ1', '\%#=1[a-z]\+'))
+  call assert_equal('abcXYZ', matchstr('0abcXYZ1', '\%#=1[A-Z]\+'))
+  call assert_equal('0', matchstr('0abcXYZ', '\%#=1[^a-z]\+'))
+  call assert_equal('0', matchstr('0abcXYZ', '\%#=1[^A-Z]\+'))
+  " The converted classes already contain both cases, so 'ignorecase' does not
+  " change them and the conversion stays correct.
+  call assert_equal('aso_SfOij', matchstr(';+aso_SfOij ', '\%#=1[a-zA-Z0-9_]\+'))
+  call assert_equal(';+% ', matchstr('a;+% 9', '\%#=1[^a-zA-Z0-9_]\+'))
+  call assert_equal('aso_SfOij', matchstr('9+aso_SfOij ', '\%#=1[a-zA-Z_]\+'))
+  call assert_equal('asoSfOij', matchstr(';+asoSfOij9 ', '\%#=1[a-zA-Z]\+'))
+  set noignorecase
+
+  " Converted collections followed by a multi.
+  call assert_equal('abc44482ddd', matchstr('adf abc44482ddd oijs', '\%#=1abc[0-9]*ddd'))
+  call assert_equal('123', matchstr('x123456x', '\%#=1[0-9]\{2,3}'))
+endfunc
+
 " Tests for multi-line regexp patterns without multi-byte support.
 func Test_regexp_multiline_pat()
   " tl is a List of Lists with:
@@ -796,7 +874,7 @@ func Test_matchstr_with_ze()
   bwipe!
 endfunc
 
-" Check a pattern with a look beind crossing a line boundary
+" Check a pattern with a look behind crossing a line boundary
 func Test_lookbehind_across_line()
   new
   call append(0, ['Behind:', 'asdfasd<yyy', 'xxstart1', 'asdfasd<yy',
@@ -804,6 +882,15 @@ func Test_lookbehind_across_line()
   call cursor(1, 1)
   call search('\(<\_[xy]\+\)\@3<=start')
   call assert_equal([0, 7, 3, 0], getpos('.'))
+
+  %delete _
+  call setline(1, ['abc', 'X'])
+  call cursor(1, 1)
+  call assert_equal(2, search('\%#=1\(c\n\)\@1<=X', 'cnW'))
+  call assert_equal(0, search('\%#=1\(bc\n\)\@1<=X', 'cnW'))
+  call assert_equal(2, search('\%#=1\(bc\n\)\@2<=X', 'cnW'))
+  call assert_equal(2, search('\%#=1\(bc\n\)\@1<!X', 'cnW'))
+  call assert_equal(0, search('\%#=1\(bc\n\)\@2<!X', 'cnW'))
   bwipe!
 endfunc
 
@@ -843,12 +930,26 @@ func Regex_Mark()
   %d
 endfunc
 
+" Same test as above, but use verymagic
+func Regex_Mark_Verymagic()
+  call append(0, ['', '', '', 'Marks:', 'asdfSasdfsadfEasdf', 'asdfSas',
+        \ 'dfsadfEasdf', '', '', '', '', ''])
+  call cursor(4, 1)
+  exe "normal jfSmsfEme:.-4,.+6s/\\v.%>'s.*%<'e../here/\<CR>"
+  exe "normal jfSmsj0fEme:.-4,.+6s/\\v.%>'s\\_.*%<'e../again/\<CR>"
+  call assert_equal(['', '', '', 'Marks:', 'asdfhereasdf', 'asdfagainasdf',
+        \ '', '', '', '', '', ''], getline(1, '$'))
+  %d
+endfunc
+
 func Test_matching_marks()
   new
   set regexpengine=1
   call Regex_Mark()
+  call Regex_Mark_Verymagic()
   set regexpengine=2
   call Regex_Mark()
+  call Regex_Mark_Verymagic()
   bwipe!
 endfunc
 
@@ -934,8 +1035,15 @@ func Test_regexp_error()
   call assert_fails('exe "normal /\\%#=2\\%102261126v\<CR>"',  'E951:')
   call assert_fails('exe "normal /\\%#=2\\%2147483646l\<CR>"', 'E486:')
   call assert_fails('exe "normal /\\%#=2\\%2147483646c\<CR>"', 'E486:')
-  call assert_fails('exe "normal /\\%#=2\\%102261125v\<CR>"',  'E486:')
+  call assert_fails('exe "normal /\\%#=2\\%102261125v\<CR>"',  'E951:')
+  call assert_fails('exe "normal /\\%#=2\\%71582787v\<CR>"',   'E486:')
   call assert_equal('', matchstr('abcd', '\%o181\%o142'))
+endfunc
+
+func Test_regexp_recursion_limit()
+  let nested = repeat('\%(', 20000) .. 'x' .. repeat('\)', 20000)
+  call assert_fails("call matchstr('x', '\%#=2' .. nested)", 'E74:')
+  call assert_fails("call matchstr('x', '\%#=1' .. nested)", 'E74:')
 endfunc
 
 " Test for using the last substitute string pattern (~)
@@ -1036,5 +1144,97 @@ func Test_matching_pos()
   endfor
   set re&
 endfunc
+
+func Test_using_mark_position()
+  " this was using freed memory
+  " new engine
+  new
+  norm O0
+  call assert_fails("s/\\%')", 'E486:')
+  bwipe!
+
+  " old engine
+  new
+  norm O0
+  call assert_fails("s/\\%#=1\\%')", 'E486:')
+  bwipe!
+endfunc
+
+func Test_using_visual_position()
+  " this was using freed memory
+  new
+  exe "norm 0o\<Esc>\<C-V>k\<C-X>o0"
+  /\%V
+  bwipe!
+endfunc
+
+func Test_using_invalid_visual_position()
+  " this was going beyond the end of the line
+  new
+  exe "norm 0o000\<Esc>0\<C-V>$s0"
+  /\%V
+  bwipe!
+endfunc
+
+func Test_using_two_engines_pattern()
+  new
+  call setline(1, ['foobar=0', 'foobar=1', 'foobar=2'])
+  " \%#= at the end of the pattern
+  for i in range(0, 2)
+    for j in range(0, 2)
+      exe "set re=" .. i
+      call cursor(j + 1, 7)
+      call assert_fails("%s/foobar\\%#=" .. j, 'E1281:')
+    endfor
+  endfor
+  set re=0
+
+  " \%#= at the start of the pattern
+  for i in range(0, 2)
+    call cursor(i + 1, 7)
+    exe ":%s/\\%#=" .. i .. "foobar=" .. i .. "/xx"
+  endfor
+  call assert_equal(['xx', 'xx', 'xx'], getline(1, '$'))
+  bwipe!
+endfunc
+
+func Test_recursive_substitute_expr()
+  new
+  func Repl()
+    s
+  endfunc
+  silent! s/\%')/~\=Repl()
+
+  bwipe!
+  delfunc Repl
+endfunc
+
+def Test_compare_columns()
+  # this was using a line below the last line
+  enew
+  setline(1, ['', ''])
+  prop_type_add('name', {highlight: 'ErrorMsg'})
+  prop_add(1, 1, {length: 1, type: 'name'})
+  search('\%#=1\%>.l\n.*\%<2v', 'nW')
+  search('\%#=2\%>.l\n.*\%<2v', 'nW')
+  bwipe!
+  prop_type_delete('name')
+enddef
+
+def Test_compare_column_matchstr()
+  # do some search in text to set the line number, it should be ignored in
+  # matchstr().
+  enew
+  setline(1, ['one', 'two', 'three'])
+  :3
+  :/ee
+  bwipe!
+  set re=1
+  call assert_equal('aaa', matchstr('aaaaaaaaaaaaaaaaaaaa', '.*\%<5v'))
+  set re=2
+  call assert_equal('aaa', matchstr('aaaaaaaaaaaaaaaaaaaa', '.*\%<5v'))
+  set re=0
+enddef
+
 
 " vim: shiftwidth=2 sts=2 expandtab

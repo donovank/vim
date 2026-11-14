@@ -11,11 +11,9 @@
 #include "vim.h"
 
 #ifdef __CYGWIN__
-# ifndef MSWIN
-#  include <cygwin/version.h>
-#  include <sys/cygwin.h>	// for cygwin_conv_to_posix_path() and/or
+# include <cygwin/version.h>
+# include <sys/cygwin.h>	// for cygwin_conv_to_posix_path() and/or
 				// cygwin_conv_path()
-# endif
 # include <limits.h>
 #endif
 
@@ -78,26 +76,30 @@ static char *(main_errors[]) =
 // Various parameters passed between main() and other functions.
 static mparm_T	params;
 
-#ifndef NO_VIM_MAIN	// skip this for unittests
+# ifdef _IOLBF
+static void *s_vbuf = NULL;		// buffer for setvbuf()
+# endif
+
+# ifndef NO_VIM_MAIN	// skip this for unittests
 
 static char_u *start_dir = NULL;	// current working dir on startup
 
 static int has_dash_c_arg = FALSE;
 
-# ifdef VIMDLL
+#  ifdef VIMDLL
 __declspec(dllexport)
-# endif
+#  endif
     int
-# ifdef MSWIN
+#  ifdef MSWIN
 VimMain
-# else
+#  else
 main
-# endif
+#  endif
 (int argc, char **argv)
 {
-#if defined(STARTUPTIME) || defined(CLEAN_RUNTIMEPATH)
+#  if defined(STARTUPTIME) || defined(CLEAN_RUNTIMEPATH)
     int		i;
-#endif
+#  endif
 
     /*
      * Do any system-specific initialisations.  These can NOT use IObuff or
@@ -105,13 +107,13 @@ main
      */
     mch_early_init();
 
-#ifdef MSWIN
+#  ifdef MSWIN
     /*
      * MinGW expands command line arguments, which confuses our code to
      * convert when 'encoding' changes.  Get the unexpanded arguments.
      */
     argc = get_cmd_argsW(&argv);
-#endif
+#  endif
 
     // Many variables are in "params" so that we can pass them to invoked
     // functions without a lot of arguments.  "argc" and "argv" are also
@@ -120,39 +122,53 @@ main
     params.argc = argc;
     params.argv = argv;
     params.want_full_screen = TRUE;
-#ifdef FEAT_EVAL
+#  ifdef FEAT_EVAL
     params.use_debug_break_level = -1;
-#endif
+#  endif
     params.window_count = -1;
 
-#ifdef FEAT_RUBY
+    autocmd_init();
+
+#  ifdef FEAT_RUBY
     {
 	int ruby_stack_start;
 	vim_ruby_init((void *)&ruby_stack_start);
     }
-#endif
+#  endif
 
-#ifdef FEAT_TCL
+#  ifdef FEAT_TCL
     vim_tcl_init(params.argv[0]);
-#endif
+#  endif
 
-#ifdef MEM_PROFILE
+#  ifdef MEM_PROFILE
     atexit(vim_mem_profile_dump);
-#endif
+#  endif
 
-#ifdef STARTUPTIME
-    // Need to find "--startuptime" before actually parsing arguments.
+    /*
+     * Various initialisations #1 shared with tests.
+     */
+    common_init_1();
+
+#  if defined(STARTUPTIME) || defined(FEAT_JOB_CHANNEL)
+    // Need to find "--startuptime" and "--log" before actually parsing
+    // arguments.
     for (i = 1; i < argc - 1; ++i)
-	if (STRICMP(argv[i], "--startuptime") == 0)
+    {
+#   ifdef STARTUPTIME
+	if (STRICMP(argv[i], "--startuptime") == 0 && time_fd == NULL)
 	{
 	    time_fd = mch_fopen(argv[i + 1], "a");
 	    TIME_MSG("--- VIM STARTING ---");
-	    break;
 	}
-#endif
-    starttime = time(NULL);
+#   endif
+#   ifdef FEAT_EVAL
+	if (STRICMP(argv[i], "--log") == 0)
+	    ch_logfile((char_u *)(argv[i + 1]), (char_u *)"ao");
+#   endif
+    }
+#  endif
 
-#ifdef CLEAN_RUNTIMEPATH
+#  ifdef CLEAN_RUNTIMEPATH
     // Need to find "--clean" before actually parsing arguments.
     for (i = 1; i < argc; ++i)
 	if (STRICMP(argv[i], "--clean") == 0)
@@ -160,8 +176,8 @@ main
 	    params.clean = TRUE;
 	    break;
 	}
-#endif
-#ifdef MSWIN
+#  endif
+#  ifdef MSWIN
     // Need to find "-register" and "-unregister" before loading any libraries.
     for (i = 1; i < argc; ++i)
 	if ((STRICMP(argv[i] + 1, "register") == 0
@@ -171,27 +187,27 @@ main
 	    found_register_arg = TRUE;
 	    break;
 	}
-#endif
+#  endif
 
     /*
-     * Various initialisations shared with tests.
+     * Various initialisations #2 shared with tests.
      */
-    common_init(&params);
+    common_init_2(&params);
 
-#ifdef VIMDLL
+#  ifdef VIMDLL
     // Check if the current executable file is for the GUI subsystem.
     gui.starting = mch_is_gui_executable();
-#elif defined(FEAT_GUI_MSWIN)
-    gui.starting = TRUE;
-#endif
+#  elif defined(FEAT_GUI_MSWIN)
+    gui.starting = true;
+#  endif
 
-#ifdef FEAT_CLIENTSERVER
+#  ifdef FEAT_CLIENTSERVER
     /*
      * Do the client-server stuff, unless "--servername ''" was used.
      * This may exit Vim if the command was sent to the server.
      */
     exec_on_server(&params);
-#endif
+#  endif
 
     /*
      * Figure out the way to work from the command name argv[0].
@@ -211,10 +227,10 @@ main
      * there is no terminal version, and on Windows we can't fork one off with
      * :gui.
      */
-#ifdef ALWAYS_USE_GUI
-    gui.starting = TRUE;
-#else
-# if defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK)
+#  ifdef ALWAYS_USE_GUI
+    gui.starting = true;
+#  else
+#   if defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK)
     /*
      * Check if the GUI can be started.  Reset gui.starting if not.
      * Don't know about other systems, stay on the safe side and don't check.
@@ -223,7 +239,7 @@ main
     {
 	if (gui_init_check() == FAIL)
 	{
-	    gui.starting = FALSE;
+	    gui.starting = false;
 
 	    // When running "evim" or "gvim -y" we need the menus, exit if we
 	    // don't have them.
@@ -231,12 +247,12 @@ main
 		mch_exit(1);
 	}
     }
-# endif
-#endif
+#   endif
+#  endif
 
     if (GARGCOUNT > 0)
     {
-#ifdef EXPAND_FILENAMES
+#  ifdef EXPAND_FILENAMES
 	/*
 	 * Expand wildcards in file names.
 	 */
@@ -247,26 +263,26 @@ main
 		mch_dirname(start_dir, MAXPATHL);
 	    // Temporarily add '(' and ')' to 'isfname'.  These are valid
 	    // filename characters but are excluded from 'isfname' to make
-	    // "gf" work on a file name in parenthesis (e.g.: see vim.h).
+	    // "gf" work on a file name in parentheses (e.g.: see vim.h).
 	    do_cmdline_cmd((char_u *)":set isf+=(,)");
 	    alist_expand(NULL, 0);
 	    do_cmdline_cmd((char_u *)":set isf&");
 	    if (start_dir != NULL)
 		mch_chdir((char *)start_dir);
 	}
-#endif
+#  endif
 	params.fname = alist_name(&GARGLIST[0]);
     }
 
-#ifdef MSWIN
+#  ifdef MSWIN
     {
 	// Remember the number of entries in the argument list.  If it changes
 	// we don't react on setting 'encoding'.
 	set_alist_count();
     }
-#endif
+#  endif
 
-#ifdef MSWIN
+#  ifdef MSWIN
     if (GARGCOUNT == 1 && params.full_path)
     {
 	/*
@@ -275,17 +291,18 @@ main
 	 * Hint: to avoid this when typing a command use a forward slash.
 	 * If the cd fails, it doesn't matter.
 	 */
-	(void)vim_chdirfile(params.fname, "drop");
+	if (vim_chdirfile(params.fname, "drop") == OK)
+	    last_chdir_reason = "drop";
 	if (start_dir != NULL)
 	    mch_dirname(start_dir, MAXPATHL);
     }
-#endif
+#  endif
     TIME_MSG("expanding arguments");
 
-#ifdef FEAT_DIFF
+#  ifdef FEAT_DIFF
     if (params.diff_mode && params.window_count == -1)
 	params.window_count = 0;	// open up to 3 windows
-#endif
+#  endif
 
     // Don't redraw until much later.
     ++RedrawingDisabled;
@@ -297,19 +314,19 @@ main
 	params.want_full_screen = FALSE;
 
     /*
-     * When certain to start the GUI, don't check capabilities of terminal.
+     * When certain to start the GUI, don't check terminal capabilities.
      * For GTK we can't be sure, but when started from the desktop it doesn't
      * make sense to try using a terminal.
      */
-#if defined(ALWAYS_USE_GUI) || defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK) \
+#  if defined(ALWAYS_USE_GUI) || defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK) \
 	|| defined(VIMDLL)
     if (gui.starting
-# ifdef FEAT_GUI_GTK
+#   ifdef FEAT_GUI_GTK
 	    && !isatty(2)
-# endif
+#   endif
 	    )
 	params.want_full_screen = FALSE;
-#endif
+#  endif
 
     /*
      * mch_init() sets up the terminal (window) for use.  This must be
@@ -319,7 +336,7 @@ main
     mch_init();
     TIME_MSG("shell init");
 
-#ifdef USE_XSMP
+#  ifdef USE_XSMP
     /*
      * For want of anywhere else to do it, try to connect to xsmp here.
      * Fitting it in after gui_mch_init, but before gui_init (via termcapinit).
@@ -337,19 +354,23 @@ main
 	    TIME_MSG("xsmp init");
 	}
     }
-#endif
+#  endif
 
     /*
      * Print a warning if stdout is not a terminal.
      */
     check_tty(&params);
 
-#ifdef _IOLBF
-    // Ensure output works usefully without a tty: buffer lines instead of
-    // fully buffered.
+#  ifdef _IOLBF
     if (silent_mode)
-	setvbuf(stdout, NULL, _IOLBF, 0);
-#endif
+    {
+	// Ensure output works usefully without a tty: buffer lines instead of
+	// fully buffered.
+	s_vbuf = malloc(BUFSIZ);
+	if (s_vbuf != NULL)
+	    setvbuf(stdout, s_vbuf, _IOLBF, BUFSIZ);
+    }
+#  endif
 
     // This message comes before term inits, but after setting "silent_mode"
     // when the input is not a tty. Omit the message with --not-a-term.
@@ -369,15 +390,18 @@ main
      */
     ui_get_shellsize();		// inits Rows and Columns
     win_init_size();
-#ifdef FEAT_DIFF
+#  ifdef FEAT_DIFF
     // Set the 'diff' option now, so that it can be checked for in a .vimrc
     // file.  There is no buffer yet though.
     if (params.diff_mode)
 	diff_win_options(firstwin, FALSE);
-#endif
+#  endif
 
     cmdline_row = Rows - p_ch;
+    cmdline_col_off = 0;
+    cmdline_width = (int)Columns;
     msg_row = cmdline_row;
+    msg_col = 0;
     screenalloc(FALSE);		// allocate screen buffers
     set_init_2();
     TIME_MSG("inits 2");
@@ -390,14 +414,14 @@ main
     init_highlight(TRUE, FALSE); // set the default highlight groups
     TIME_MSG("init highlight");
 
-#if defined(FEAT_TERMRESPONSE)
+#  if defined(FEAT_TERMRESPONSE)
     init_term_props(TRUE);
-#endif
+#  endif
 
-#ifdef FEAT_EVAL
+#  ifdef FEAT_EVAL
     // Set the break level after the terminal is initialized.
     debug_break_level = params.use_debug_break_level;
-#endif
+#  endif
 
     // Reset 'loadplugins' for "-u NONE" before "--cmd" arguments.
     // Allows for setting 'loadplugins' there.
@@ -412,7 +436,11 @@ main
     // Source startup scripts.
     source_startup_scripts(&params);
 
-#ifdef FEAT_MZSCHEME
+#  ifdef FEAT_EVAL
+    set_vim_var_nr(VV_VIM_DID_INIT, 1L);
+#  endif
+
+#  ifdef FEAT_MZSCHEME
     /*
      * Newer version of MzScheme (Racket) require earlier (trampolined)
      * initialisation via scheme_main_setup.
@@ -421,12 +449,42 @@ main
      * Do source startup scripts, so that 'mzschemedll' can be set.
      */
     return mzscheme_main();
-#else
+#  else
     return vim_main2();
-#endif
+#  endif
 }
-#endif // NO_VIM_MAIN
+# endif // NO_VIM_MAIN
 #endif // PROTO
+
+#if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD) && defined(FEAT_CLIPBOARD)
+/*
+ * Restore the state after a fatal X error.
+ */
+    static void
+x_restore_state(void)
+{
+    State = MODE_NORMAL;
+    VIsual_active = FALSE;
+    got_int = TRUE;
+    need_wait_return = FALSE;
+    global_busy = FALSE;
+    exmode_active = 0;
+    skip_redraw = FALSE;
+    RedrawingDisabled = 0;
+    no_wait_return = 0;
+    vgetc_busy = 0;
+# ifdef FEAT_EVAL
+    emsg_skip = 0;
+# endif
+    emsg_off = 0;
+    setmouse();
+    settmode(TMODE_RAW);
+    starttermcap();
+    scroll_start();
+    redraw_later_clear();
+    choose_clipmethod();
+}
+#endif
 
 /*
  * vim_main2() is needed for FEAT_MZSCHEME, but we define it always to keep
@@ -437,7 +495,7 @@ main
 vim_main2(void)
 {
 #ifndef NO_VIM_MAIN
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     /*
      * Read all the plugin files.
      * Only when compiled with +eval, since most plugins need it.
@@ -446,11 +504,11 @@ vim_main2(void)
     {
 	char_u *rtp_copy = NULL;
 	char_u *plugin_pattern = (char_u *)
-# if defined(VMS) || defined(AMIGA) // VMS and Amiga don't handle the "**".
+#  if defined(VMS) || defined(AMIGA) // VMS and Amiga don't handle the "**".
 		"plugin/*.vim"
-# else
+#  else
 		"plugin/**/*.vim"
-# endif
+#  endif
 		;
 
 	// First add all package directories to 'runtimepath', so that their
@@ -478,9 +536,9 @@ vim_main2(void)
 	source_runtime(plugin_pattern, DIP_ALL | DIP_AFTER);
 	TIME_MSG("loading after plugins");
     }
-#endif
+# endif
 
-#ifdef FEAT_DIFF
+# ifdef FEAT_DIFF
     // Decide about window layout for diff mode after reading vimrc.
     if (params.diff_mode && params.window_layout == 0)
     {
@@ -489,7 +547,7 @@ vim_main2(void)
 	else
 	    params.window_layout = WIN_VER;	// use vertical split
     }
-#endif
+# endif
 
     /*
      * Recovery mode without a file name: List swap files.
@@ -498,7 +556,7 @@ vim_main2(void)
      */
     if (recoverymode && params.fname == NULL)
     {
-	recover_names(NULL, TRUE, 0, NULL);
+	recover_names(NULL, TRUE, NULL, 0, NULL);
 	mch_exit(0);
     }
 
@@ -516,15 +574,15 @@ vim_main2(void)
     if (params.no_swap_file)
 	p_uc = 0;
 
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     if (gui.starting)
     {
-# if defined(UNIX) || defined(VMS)
+#  if defined(UNIX) || defined(VMS)
 	// When something caused a message from a vimrc script, need to output
 	// an extra newline before the shell prompt.
 	if (did_emsg || msg_didout)
 	    putchar('\n');
-# endif
+#  endif
 
 	gui_start(NULL);		// will set full_screen to TRUE
 	TIME_MSG("starting GUI");
@@ -533,10 +591,11 @@ vim_main2(void)
 	// don't have them.
 	if (!gui.in_use && params.evim_mode)
 	    mch_exit(1);
+	firstwin->w_prev_height = firstwin->w_height; // may have changed
     }
-#endif
+# endif
 
-#ifdef FEAT_VIMINFO
+# ifdef FEAT_VIMINFO
     /*
      * Read in registers, history etc, but not marks, from the viminfo file.
      * This is where v:oldfiles gets filled.
@@ -546,14 +605,14 @@ vim_main2(void)
 	read_viminfo(NULL, VIF_WANT_INFO | VIF_GET_OLDFILES);
 	TIME_MSG("reading viminfo");
     }
-#endif
-#ifdef FEAT_EVAL
+# endif
+# ifdef FEAT_EVAL
     // It's better to make v:oldfiles an empty list than NULL.
     if (get_vim_var_list(VV_OLDFILES) == NULL)
 	set_vim_var_list(VV_OLDFILES, list_alloc());
-#endif
+# endif
 
-#ifdef FEAT_QUICKFIX
+# ifdef FEAT_QUICKFIX
     /*
      * "-q errorfile": Load the error file now.
      * If the error file can't be read, exit before doing anything else.
@@ -574,7 +633,7 @@ vim_main2(void)
 	}
 	TIME_MSG("reading errorfile");
     }
-#endif
+# endif
 
     /*
      * Start putting things on the screen.
@@ -586,7 +645,7 @@ vim_main2(void)
     if (!exmode_active)
 	msg_scroll = FALSE;
 
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     /*
      * This seems to be required to make callbacks to be called now, instead
      * of after things have been put on the screen, which then may be deleted
@@ -599,31 +658,52 @@ vim_main2(void)
 	gui_wait_for_chars(50L, typebuf.tb_change_cnt);
 	TIME_MSG("GUI delay");
     }
-#endif
-
-#if defined(FEAT_GUI_PHOTON) && defined(FEAT_CLIPBOARD)
-    qnx_clip_init();
-#endif
-
-#if defined(MACOS_X) && defined(FEAT_CLIPBOARD)
-    clip_init(TRUE);
-#endif
-
-#ifdef FEAT_XCLIPBOARD
-    // Start using the X clipboard, unless the GUI was started.
-# ifdef FEAT_GUI
-    if (!gui.in_use)
 # endif
+
+# if defined(FEAT_GUI_PHOTON) && defined(FEAT_CLIPBOARD)
+    qnx_clip_init();
+# endif
+
+# if defined(MACOS_X) && defined(FEAT_CLIPBOARD)
+    clip_init(TRUE);
+# endif
+
+# ifdef FEAT_XCLIPBOARD
+    // Start using the X clipboard, unless the GUI was started.
+#  ifdef FEAT_GUI
+    if (!gui.in_use)
+#  endif
     {
 	setup_term_clip();
-	TIME_MSG("setup clipboard");
+	TIME_MSG("setup x11 clipboard");
     }
-#endif
+# endif
 
-#ifdef FEAT_CLIENTSERVER
+# ifdef FEAT_CLIENTSERVER
     // Prepare for being a Vim server.
     prepare_server(&params);
-#endif
+# endif
+
+# ifdef FEAT_WAYLAND
+#  ifdef FEAT_GUI
+    if (!gui.in_use)
+#  endif
+    {
+	if (wayland_init_connection(wayland_display_name) == OK)
+	{
+	    TIME_MSG("connected to Wayland display");
+
+#  ifdef FEAT_WAYLAND_CLIPBOARD
+	    if (clip_init_wayland() == OK)
+		TIME_MSG("setup Wayland clipboard");
+#  endif
+	}
+    }
+# endif
+
+# ifdef HAVE_CLIPMETHOD
+    choose_clipmethod();
+# endif
 
     /*
      * If "-" argument given: Read file from stdin.
@@ -635,16 +715,16 @@ vim_main2(void)
     if (params.edit_type == EDIT_STDIN && !recoverymode)
 	read_stdin();
 
-#if defined(UNIX) || defined(VMS)
+# if defined(UNIX) || defined(VMS)
     // When switching screens and something caused a message from a vimrc
     // script, need to output an extra newline on exit.
-    if ((did_emsg || msg_didout) && *T_TI != NUL)
+    if ((did_emsg || msg_didout) && *T_TI != NUL && params.edit_type != EDIT_STDIN)
 	newline_on_exit = TRUE;
-#endif
+# endif
 
     /*
      * When done something that is not allowed or given an error message call
-     * wait_return.  This must be done before starttermcap(), because it may
+     * wait_return().  This must be done before starttermcap(), because it may
      * switch to another screen. It must be done after settmode(TMODE_RAW),
      * because we want to react on a single key stroke.
      * Call settmode and starttermcap here, so the T_KS and T_TI may be
@@ -667,33 +747,33 @@ vim_main2(void)
 	scroll_region_reset();		// In case Rows changed
     scroll_start();	// may scroll the screen to the right position
 
-#if defined(FEAT_TITLE) && (defined(UNIX) || defined(VMS) || defined(MACOS_X))
+# if defined(UNIX) || defined(VMS) || defined(MACOS_X)
     term_push_title(SAVE_RESTORE_BOTH);
-#endif
+# endif
 
     /*
      * Don't clear the screen when starting in Ex mode, unless using the GUI.
      */
     if (exmode_active
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 			&& !gui.in_use
-#endif
+# endif
 					)
-	must_redraw = CLEAR;
+	set_must_redraw(UPD_CLEAR);
     else
     {
 	screenclear();			// clear screen
 	TIME_MSG("clearing screen");
     }
 
-#ifdef FEAT_CRYPT
+# ifdef FEAT_CRYPT
     if (params.ask_for_key)
     {
 	crypt_check_current_method();
 	(void)crypt_get_key(TRUE, TRUE);
 	TIME_MSG("getting crypt key");
     }
-#endif
+# endif
 
     no_wait_return = TRUE;
 
@@ -704,10 +784,10 @@ vim_main2(void)
     create_windows(&params);
     TIME_MSG("opening buffers");
 
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     // clear v:swapcommand
     set_vim_var_string(VV_SWAPCOMMAND, NULL, -1);
-#endif
+# endif
 
     // Ex starts at last line of the file
     if (exmode_active)
@@ -717,7 +797,7 @@ vim_main2(void)
     TIME_MSG("BufEnter autocommands");
     setpcmark();
 
-#ifdef FEAT_QUICKFIX
+# ifdef FEAT_QUICKFIX
     /*
      * When started with "-q errorfile" jump to first error now.
      */
@@ -726,7 +806,7 @@ vim_main2(void)
 	qf_jump(NULL, 0, 0, FALSE);
 	TIME_MSG("jump to first error");
     }
-#endif
+# endif
 
     /*
      * If opened more than one window, start editing files in the other
@@ -735,7 +815,7 @@ vim_main2(void)
     edit_buffers(&params, start_dir);
     vim_free(start_dir);
 
-#ifdef FEAT_DIFF
+# ifdef FEAT_DIFF
     if (params.diff_mode)
     {
 	win_T	*wp;
@@ -744,7 +824,7 @@ vim_main2(void)
 	FOR_ALL_WINDOWS(wp)
 	    diff_win_options(wp, TRUE);
     }
-#endif
+# endif
 
     /*
      * Shorten any of the filenames, but only when absolute.
@@ -768,52 +848,74 @@ vim_main2(void)
 	    getout(1);
     }
 
-    // Execute any "+", "-c" and "-S" arguments.
-    if (params.n_commands > 0)
-	exe_commands(&params);
+# if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)
+    // Temporarily set x_jump_env to here in case there is an X11 IO error,
+    // because x_jump_env is only actually set in main_loop(), before
+    // exe_commands(). May not be the best solution since commands passed via
+    // the command line can be very broad like sourcing a file, in which case
+    // an X IO error results in the command being partially done. In theory we
+    // could use SETJMP in RealWaitForChar(), but the stack frame for that may
+    // possibly exit and then LONGJMP is called on it.
+    int jump_result = SETJMP(x_jump_env);
+
+    if (jump_result == 0)
+    {
+# endif
+	// Execute any "+", "-c" and "-S" arguments.
+	if (params.n_commands > 0)
+	    exe_commands(&params);
+# if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)
+    }
+    else
+	// Restore state and continue just like what main_loop() does.
+	x_restore_state();
+# endif
 
     // Must come before the may_req_ calls.
     starting = 0;
 
-#if defined(FEAT_TERMRESPONSE)
+# if defined(FEAT_TERMRESPONSE)
     // Must be done before redrawing, puts a few characters on the screen.
     check_terminal_behavior();
-#endif
+# endif
 
     RedrawingDisabled = 0;
-    redraw_all_later(NOT_VALID);
+    redraw_all_later(UPD_NOT_VALID);
     no_wait_return = FALSE;
 
     // 'autochdir' has been postponed
     DO_AUTOCHDIR;
 
-#ifdef FEAT_TERMRESPONSE
+# ifdef FEAT_TERMRESPONSE
     // Requesting the termresponse is postponed until here, so that a "-c q"
     // argument doesn't make it appear in the shell Vim was started from.
     may_req_termresponse();
 
     may_req_bg_color();
-#endif
+# endif
+# if defined(FEAT_IMAGE) || defined(FEAT_EVAL)
+    update_cell_size();
+# endif
 
     // start in insert mode
     if (p_im)
 	need_start_insertmode = TRUE;
 
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     set_vim_var_nr(VV_VIM_DID_ENTER, 1L);
-#endif
+# endif
     apply_autocmds(EVENT_VIMENTER, NULL, NULL, FALSE, curbuf);
     TIME_MSG("VimEnter autocommands");
 
-#if defined(FEAT_EVAL) && defined(FEAT_CLIPBOARD)
+# if defined(FEAT_EVAL) && defined(FEAT_CLIPBOARD)
     // Adjust default register name for "unnamed" in 'clipboard'. Can only be
     // done after the clipboard is available and all initial commands that may
     // modify the 'clipboard' setting have run; i.e. just before entering the
     // main loop.
     reset_reg_var();
-#endif
+# endif
 
-#if defined(FEAT_DIFF)
+# if defined(FEAT_DIFF)
     // When a startup script or session file setup for diff'ing and
     // scrollbind, sync the scrollbind now.
     if (curwin->w_p_diff && curwin->w_p_scb)
@@ -822,55 +924,69 @@ vim_main2(void)
 	check_scrollbind((linenr_T)0, 0L);
 	TIME_MSG("diff scrollbinding");
     }
-#endif
-
-#if defined(MSWIN) && (!defined(FEAT_GUI_MSWIN) || defined(VIMDLL))
-# ifdef VIMDLL
-    if (!gui.in_use)
 # endif
-	mch_set_winsize_now();	    // Allow winsize changes from now on
-#endif
 
-#if defined(FEAT_GUI)
+# if defined(MSWIN) && (!defined(FEAT_GUI_MSWIN) || defined(VIMDLL))
+#  ifdef VIMDLL
+    if (!gui.in_use)
+#  endif
+	mch_set_winsize_now();	    // Allow winsize changes from now on
+# endif
+
+# if defined(FEAT_GUI)
     // When tab pages were created, may need to update the tab pages line and
     // scrollbars.  This is skipped while creating them.
-    if (first_tabpage->tp_next != NULL)
+    if (gui.in_use && first_tabpage->tp_next != NULL)
     {
 	out_flush();
 	gui_init_which_components(NULL);
 	gui_update_scrollbars(TRUE);
     }
     need_mouse_correct = TRUE;
-#endif
+# endif
 
     // If ":startinsert" command used, stuff a dummy command to be able to
     // call normal_cmd(), which will then start Insert mode.
     if (restart_edit != 0)
 	stuffcharReadbuff(K_NOP);
 
-#ifdef FEAT_NETBEANS_INTG
+# ifdef FEAT_NETBEANS_INTG
     if (netbeansArg != NULL && strncmp("-nb", netbeansArg, 3) == 0)
     {
-# ifdef FEAT_GUI
-#  if !defined(FEAT_GUI_X11) && !defined(FEAT_GUI_GTK)  \
+#  ifdef FEAT_GUI
+#   if !defined(FEAT_GUI_X11) && !defined(FEAT_GUI_GTK)  \
 		&& !defined(FEAT_GUI_MSWIN)
 	if (gui.in_use)
 	{
 	    mch_errmsg(_("netbeans is not supported with this GUI\n"));
 	    mch_exit(2);
 	}
+#   endif
 #  endif
-# endif
 	// Tell the client that it can start sending commands.
 	netbeans_open(netbeansArg + 3, TRUE);
     }
-#endif
+# endif
+
+# ifdef FEAT_IMAGE
+    init_image_state();
+# endif
 
     // Redraw at least once, also when 'lazyredraw' is set, to make sure the
     // window title gets updated.
     do_redraw = TRUE;
 
     TIME_MSG("before starting main loop");
+
+# ifdef FEAT_JOB_CHANNEL
+    if (use_stdio_channel)
+    {
+	// Serve the stdio channel instead of reading Ex commands, exit when
+	// it is closed.
+	channel_stdio_loop();
+	getout(0);
+    }
+# endif
 
     /*
      * Call the main command loop.  This never returns.
@@ -883,10 +999,10 @@ vim_main2(void)
 }
 
 /*
- * Initialisation shared by main() and some tests.
+ * Initialisation #1 shared by main() and some tests.
  */
     void
-common_init(mparm_T *paramp)
+common_init_1(void)
 {
     estack_init();
     cmdline_init();
@@ -900,9 +1016,6 @@ common_init(mparm_T *paramp)
     qnx_init();		// PhAttach() for clipboard, (and gui)
 #endif
 
-    // Init the table of Normal mode commands.
-    init_normal_cmds();
-
     /*
      * Allocate space for the generic buffers (needed for set_init_1() and
      * emsg()).
@@ -911,7 +1024,15 @@ common_init(mparm_T *paramp)
 	    || (NameBuff = alloc(MAXPATHL)) == NULL)
 	mch_exit(0);
     TIME_MSG("Allocated generic buffers");
+}
 
+
+/*
+ * Initialisation #2 shared by main() and some tests.
+ */
+    void
+common_init_2(mparm_T *paramp)
+{
 #ifdef NBDEBUG
     // Wait a moment for debugging NetBeans.  Must be after allocating
     // NameBuff.
@@ -931,7 +1052,14 @@ common_init(mparm_T *paramp)
 #endif
 
 #ifdef FEAT_GUI
-    gui.dofork = TRUE;		    // default is to use fork()
+    gui.dofork = true;		    // default is to use fork()
+#endif
+
+#ifdef FEAT_CLIENTSERVER_BACKENDS
+    /*
+     * Check the $VIM_CLIENTSERVER env before we handle the --clientserver arg
+     */
+    check_clientserver_method_env();
 #endif
 
     /*
@@ -997,13 +1125,20 @@ common_init(mparm_T *paramp)
 #ifdef FEAT_SIGNS
     init_signs();
 #endif
+
+#ifdef FEAT_QUICKFIX
+    // initialize quickfix list
+    // don't send an error message when memory allocation fails
+    // do it when the user tries to access the quickfix list
+    qf_init_stack();
+#endif
 }
 
 /*
  * Return TRUE when the --not-a-term argument was found.
  */
     int
-is_not_a_term()
+is_not_a_term(void)
 {
     return params.not_a_term;
 }
@@ -1011,8 +1146,8 @@ is_not_a_term()
 /*
  * Return TRUE when the --not-a-term argument was found or the GUI is in use.
  */
-    static int
-is_not_a_term_or_gui()
+    int
+is_not_a_term_or_gui(void)
 {
     return params.not_a_term
 #ifdef FEAT_GUI
@@ -1021,9 +1156,37 @@ is_not_a_term_or_gui()
 	;
 }
 
+#if defined(EXITFREE)
+    void
+free_vbuf(void)
+{
+# ifdef _IOLBF
+    if (s_vbuf != NULL)
+    {
+	setvbuf(stdout, NULL, _IONBF, 0);
+	free(s_vbuf);
+	s_vbuf = NULL;
+    }
+# endif
+}
+#endif
 
+#if defined(FEAT_GUI)
+/*
+ * If a --gui-dialog-file argument was given return the file name.
+ * Otherwise return NULL.
+ */
+    char_u *
+get_gui_dialog_file(void)
+{
+    return params.gui_dialog_file;
+}
+#endif
+
+#if defined(FEAT_EVAL) || defined(MESSAGE_QUEUE)
 // When TRUE in a safe state when starting to wait for a character.
 static int	was_safe = FALSE;
+#endif
 static oparg_T	*current_oap = NULL;
 
 /*
@@ -1051,11 +1214,14 @@ is_safe_now(void)
     return stuff_empty()
 	&& typebuf.tb_len == 0
 	&& scriptin[curscript] == NULL
+#ifdef FEAT_EVAL
+	&& !debug_mode
+#endif
 	&& !global_busy;
 }
 
 /*
- * Trigger SafeState if currently in s safe state, that is "safe" is TRUE and
+ * Trigger SafeState if currently in a safe state, that is "safe" is TRUE and
  * there is no typeahead.
  */
     void
@@ -1063,7 +1229,7 @@ may_trigger_safestate(int safe)
 {
     int is_safe = safe && is_safe_now();
 
-#ifdef FEAT_JOB_CHANNEL
+#ifdef FEAT_EVAL
     if (was_safe != is_safe)
 	// Only log when the state changes, otherwise it happens at nearly
 	// every key stroke.
@@ -1072,7 +1238,9 @@ may_trigger_safestate(int safe)
 #endif
     if (is_safe)
 	apply_autocmds(EVENT_SAFESTATE, NULL, NULL, FALSE, curbuf);
+#if defined(FEAT_EVAL) || defined(MESSAGE_QUEUE)
     was_safe = is_safe;
+#endif
 }
 
 /*
@@ -1083,19 +1251,24 @@ may_trigger_safestate(int safe)
     void
 state_no_longer_safe(char *reason UNUSED)
 {
-#ifdef FEAT_JOB_CHANNEL
+#ifdef FEAT_EVAL
     if (was_safe)
 	ch_log(NULL, "SafeState: reset: %s", reason);
 #endif
+#if defined(FEAT_EVAL) || defined(MESSAGE_QUEUE)
     was_safe = FALSE;
+#endif
 }
 
+#if defined(FEAT_EVAL) || defined(MESSAGE_QUEUE)
     int
 get_was_safe_state(void)
 {
     return was_safe;
 }
+#endif
 
+#if defined(MESSAGE_QUEUE)
 /*
  * Invoked when leaving code that invokes callbacks.  Then trigger
  * SafeStateAgain, if it was safe when starting to wait for a character.
@@ -1109,14 +1282,14 @@ may_trigger_safestateagain(void)
 	// of calling feedkeys(), we check if it's now safe again (all keys
 	// were consumed).
 	was_safe = is_safe_now();
-#ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_EVAL
 	if (was_safe)
 	    ch_log(NULL, "SafeState: undo reset");
-#endif
+# endif
     }
     if (was_safe)
     {
-#ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_EVAL
 	// Only do this message when another message was given, otherwise we
 	// get lots of them.
 	if ((did_repeated_msg & REPEATED_MSG_SAFESTATE) == 0)
@@ -1127,14 +1300,115 @@ may_trigger_safestateagain(void)
 		      "SafeState: back to waiting, triggering SafeStateAgain");
 	    did_repeated_msg = did | REPEATED_MSG_SAFESTATE;
 	}
-#endif
+# endif
 	apply_autocmds(EVENT_SAFESTATEAGAIN, NULL, NULL, FALSE, curbuf);
     }
-#ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_EVAL
     else
 	ch_log(NULL,
 		  "SafeState: back to waiting, not triggering SafeStateAgain");
+# endif
+}
 #endif
+
+/*
+ * Return TRUE if there is any typeahead, pending operator or command.
+ */
+    int
+work_pending(void)
+{
+    return op_pending() || !is_safe_now();
+}
+
+#ifdef FEAT_CONCEAL
+static linenr_T	conceal_old_cursor_line = 0;
+static linenr_T	conceal_new_cursor_line = 0;
+static int	conceal_update_lines = FALSE;
+#endif
+
+/*
+ * Trigger the events that are not triggered where they happen, but by
+ * comparing the current state against the state stored when they were last
+ * triggered. Also updates what depends on the cursor having moved, which is
+ * not affected by 'eventignore'.
+ * Called from the main loop and when 'eventignore(win)' changes, so that what
+ * happened with an event ignored is not reported once it is not ignored
+ * anymore.
+ */
+    void
+may_trigger_deferred_events(void)
+{
+    static bool	recursive = false;
+
+    if (recursive)
+	return;
+    recursive = true;
+
+#ifdef FEAT_CONCEAL
+    if (curwin->w_p_cole == 0)
+	conceal_update_lines = FALSE;
+#endif
+
+    // Trigger CursorMoved if the cursor moved.
+    if (!finish_op && (has_cursormoved()
+#ifdef FEAT_PROP_POPUP
+		|| popup_visible
+#endif
+#ifdef FEAT_CONCEAL
+		|| curwin->w_p_cole > 0
+#endif
+		) && !EQUAL_POS(last_cursormoved, curwin->w_cursor))
+    {
+	if (has_cursormoved())
+	    apply_autocmds(EVENT_CURSORMOVED, NULL, NULL, FALSE, curbuf);
+#ifdef FEAT_PROP_POPUP
+	if (popup_visible)
+	    popup_check_cursor_pos();
+#endif
+#ifdef FEAT_CONCEAL
+	if (curwin->w_p_cole > 0)
+	{
+	    conceal_old_cursor_line = last_cursormoved.lnum;
+	    conceal_new_cursor_line = curwin->w_cursor.lnum;
+	    conceal_update_lines = TRUE;
+	}
+#endif
+	last_cursormoved = curwin->w_cursor;
+    }
+
+#ifdef FEAT_CONCEAL
+    if (conceal_update_lines
+	    && (conceal_old_cursor_line != conceal_new_cursor_line
+		|| conceal_cursor_line(curwin)
+		|| need_cursor_line_redraw))
+    {
+	if (conceal_old_cursor_line != conceal_new_cursor_line
+		&& conceal_old_cursor_line != 0
+		&& conceal_old_cursor_line <= curbuf->b_ml.ml_line_count)
+	    redrawWinline(curwin, conceal_old_cursor_line);
+	redrawWinline(curwin, conceal_new_cursor_line);
+	curwin->w_valid &= ~VALID_CROW;
+	need_cursor_line_redraw = FALSE;
+    }
+#endif
+
+    // Trigger TextChanged if b:changedtick differs.
+    if (!finish_op && has_textchanged()
+	    && curbuf->b_last_changedtick != CHANGEDTICK(curbuf))
+    {
+	apply_autocmds(EVENT_TEXTCHANGED, NULL, NULL, FALSE, curbuf);
+	curbuf->b_last_changedtick = CHANGEDTICK(curbuf);
+    }
+
+    // Ensure curwin->w_topline and curwin->w_leftcol are up to date before
+    // triggering a WinScrolled autocommand.
+    update_topline();
+    validate_cursor();
+
+    if (!finish_op)
+	may_trigger_win_scrolled_resized();
+
+    recursive = false;
 }
 
 
@@ -1153,12 +1427,6 @@ main_loop(
     oparg_T	oa;		// operator arguments
     oparg_T	*prev_oap;	// operator arguments
     volatile int previous_got_int = FALSE;	// "got_int" was TRUE
-#ifdef FEAT_CONCEAL
-    // these are static to avoid a compiler warning
-    static linenr_T	conceal_old_cursor_line = 0;
-    static linenr_T	conceal_new_cursor_line = 0;
-    static int		conceal_update_lines = FALSE;
-#endif
 
     prev_oap = current_oap;
     current_oap = &oa;
@@ -1166,45 +1434,21 @@ main_loop(
 #if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)
     // Setup to catch a terminating error from the X server.  Just ignore
     // it, restore the state and continue.  This might not always work
-    // properly, but at least we don't exit unexpectedly when the X server
-    // exits while Vim is running in a console.
+    // properly, but at least we hopefully don't exit unexpectedly when the X
+    // server exits while Vim is running in a console.
     if (!cmdwin && !noexmode && SETJMP(x_jump_env))
-    {
-	State = NORMAL;
-	VIsual_active = FALSE;
-	got_int = TRUE;
-	need_wait_return = FALSE;
-	global_busy = FALSE;
-	exmode_active = 0;
-	skip_redraw = FALSE;
-	RedrawingDisabled = 0;
-	no_wait_return = 0;
-	vgetc_busy = 0;
-# ifdef FEAT_EVAL
-	emsg_skip = 0;
-# endif
-	emsg_off = 0;
-	setmouse();
-	settmode(TMODE_RAW);
-	starttermcap();
-	scroll_start();
-	redraw_later_clear();
-    }
+	x_restore_state();
 #endif
 
     clear_oparg(&oa);
-    while (!cmdwin
-#ifdef FEAT_CMDWIN
-	    || cmdwin_result == 0
-#endif
-	    )
+    while (!cmdwin || cmdwin_result == 0)
     {
 	if (stuff_empty())
 	{
 	    did_check_timestamps = FALSE;
 	    if (need_check_timestamps)
 		check_timestamps(FALSE);
-	    if (need_wait_return)	// if wait_return still needed ...
+	    if (need_wait_return)	// if wait_return() still needed ...
 		wait_return(FALSE);	// ... call it now
 	    if (need_start_insertmode && goto_im() && !VIsual_active)
 	    {
@@ -1228,7 +1472,7 @@ main_loop(
 		// Typed two CTRL-C in a row: go back to ex mode as if "Q" was
 		// used and keep "got_int" set, so that it aborts ":g".
 		exmode_active = EXMODE_NORMAL;
-		State = NORMAL;
+		State = MODE_NORMAL;
 	    }
 	    else if (!global_busy || !exmode_active)
 	    {
@@ -1241,12 +1485,21 @@ main_loop(
 	else
 	    previous_got_int = FALSE;
 
+#ifdef FEAT_EVAL
+	// At the toplevel there is no exception handling.  Discard any that
+	// may be hanging around (e.g. from "interrupt" at the debug prompt).
+	if (did_throw && !ex_normal_busy)
+	    discard_current_exception();
+#endif
+
 	if (!exmode_active)
 	    msg_scroll = FALSE;
 	quit_more = FALSE;
 
 	// it's not safe unless may_trigger_safestate_main() is called
+#if defined(FEAT_EVAL) || defined(MESSAGE_QUEUE)
 	was_safe = FALSE;
+#endif
 
 	/*
 	 * If skip redraw is set (for ":" in wait_return()), don't redraw now.
@@ -1254,7 +1507,11 @@ main_loop(
 	 * update cursor and redraw.
 	 */
 	if (skip_redraw || exmode_active)
+	{
 	    skip_redraw = FALSE;
+	    setcursor();
+	    cursor_on();
+	}
 	else if (do_redraw || stuff_empty())
 	{
 #ifdef FEAT_GUI
@@ -1266,65 +1523,7 @@ main_loop(
 	    // locked, this would be a good time to handle the drop.
 	    handle_any_postponed_drop();
 #endif
-#ifdef FEAT_CONCEAL
-	    if (curwin->w_p_cole == 0)
-		conceal_update_lines = FALSE;
-#endif
-
-	    // Trigger CursorMoved if the cursor moved.
-	    if (!finish_op && (
-			has_cursormoved()
-#ifdef FEAT_PROP_POPUP
-			|| popup_visible
-#endif
-#ifdef FEAT_CONCEAL
-			|| curwin->w_p_cole > 0
-#endif
-			)
-		 && !EQUAL_POS(last_cursormoved, curwin->w_cursor))
-	    {
-		if (has_cursormoved())
-		    apply_autocmds(EVENT_CURSORMOVED, NULL, NULL,
-							       FALSE, curbuf);
-#ifdef FEAT_PROP_POPUP
-		if (popup_visible)
-		    popup_check_cursor_pos();
-#endif
-#ifdef FEAT_CONCEAL
-		if (curwin->w_p_cole > 0)
-		{
-		    conceal_old_cursor_line = last_cursormoved.lnum;
-		    conceal_new_cursor_line = curwin->w_cursor.lnum;
-		    conceal_update_lines = TRUE;
-		}
-#endif
-		last_cursormoved = curwin->w_cursor;
-	    }
-
-#if defined(FEAT_CONCEAL)
-	    if (conceal_update_lines
-		    && (conceal_old_cursor_line != conceal_new_cursor_line
-			|| conceal_cursor_line(curwin)
-			|| need_cursor_line_redraw))
-	    {
-		if (conceal_old_cursor_line != conceal_new_cursor_line
-			&& conceal_old_cursor_line != 0
-			&& conceal_old_cursor_line
-						<= curbuf->b_ml.ml_line_count)
-		    redrawWinline(curwin, conceal_old_cursor_line);
-		redrawWinline(curwin, conceal_new_cursor_line);
-		curwin->w_valid &= ~VALID_CROW;
-		need_cursor_line_redraw = FALSE;
-	    }
-#endif
-
-	    // Trigger TextChanged if b:changedtick differs.
-	    if (!finish_op && has_textchanged()
-		    && curbuf->b_last_changedtick != CHANGEDTICK(curbuf))
-	    {
-		apply_autocmds(EVENT_TEXTCHANGED, NULL, NULL, FALSE, curbuf);
-		curbuf->b_last_changedtick = CHANGEDTICK(curbuf);
-	    }
+	    may_trigger_deferred_events();
 
 	    // If nothing is pending and we are going to wait for the user to
 	    // type a character, trigger SafeState.
@@ -1367,37 +1566,24 @@ main_loop(
 	    }
 #endif
 
-	    /*
-	     * Before redrawing, make sure w_topline is correct, and w_leftcol
-	     * if lines don't wrap, and w_skipcol if lines wrap.
-	     */
+	    // Before redrawing, make sure w_topline is correct, and w_leftcol
+	    // if lines don't wrap, and w_skipcol if lines wrap.
 	    update_topline();
 	    validate_cursor();
 
-#ifdef FEAT_SYN_HL
-	    // Might need to update for 'cursorline'.
-	    // When 'cursorlineopt' is "screenline" need to redraw always.
-	    if (curwin->w_p_cul
-		    && (curwin->w_last_cursorline != curwin->w_cursor.lnum
-			|| (curwin->w_p_culopt_flags & CULOPT_SCRLINE))
-		    && !char_avail())
-		redraw_later(VALID);
-#endif
 	    if (VIsual_active)
-		update_curbuf(INVERTED); // update inverted part
+		update_curbuf(UPD_INVERTED); // update inverted part
 	    else if (must_redraw)
 	    {
 		mch_disable_flush();	// Stop issuing gui_mch_flush().
 		update_screen(0);
 		mch_enable_flush();
 	    }
-	    else if (redraw_cmdline || clear_cmdline)
+	    else if (redraw_cmdline || clear_cmdline || redraw_mode)
 		showmode();
 	    redraw_statuslines();
-#ifdef FEAT_TITLE
 	    if (need_maketitle)
 		maketitle();
-#endif
 #ifdef FEAT_VIMINFO
 	    curbuf->b_last_used = vim_time();
 #endif
@@ -1446,16 +1632,20 @@ main_loop(
 		time_fd = NULL;
 	    }
 #endif
+	    // After the first screen update may start triggering WinScrolled
+	    // autocmd events.  Store all the scroll positions and sizes now.
+	    may_make_initial_scroll_size_snapshot();
 	}
 #ifdef FEAT_GUI
 	if (need_mouse_correct)
 	    gui_mouse_correct();
 #endif
 
-	/*
-	 * Update w_curswant if w_set_curswant has been set.
-	 * Postponed until here to avoid computing w_virtcol too often.
-	 */
+	// May request the keyboard protocol state now.
+	may_send_t_RK();
+
+	// Update w_curswant if w_set_curswant has been set.
+	// Postponed until here to avoid computing w_virtcol too often.
 	update_curswant();
 
 #ifdef FEAT_EVAL
@@ -1487,7 +1677,7 @@ main_loop(
 		    && !skip_term_loop)
 	    {
 		// If terminal_loop() returns OK we got a key that is handled
-		// in Normal model.  With FAIL we first need to position the
+		// in Normal mode.  With FAIL we first need to position the
 		// cursor and the screen needs to be redrawn.
 		if (terminal_loop(TRUE) == OK)
 		    normal_cmd(&oa, TRUE);
@@ -1508,7 +1698,7 @@ theend:
 }
 
 
-#if defined(USE_XSMP) || defined(FEAT_GUI) || defined(PROTO)
+#if defined(USE_XSMP) || defined(FEAT_GUI)
 /*
  * Exit, but leave behind swap files for modified buffers.
  */
@@ -1519,7 +1709,7 @@ getout_preserve_modified(int exitval)
     // Ignore SIGHUP, because a dropped connection causes a read error, which
     // makes Vim exit and then handling SIGHUP causes various reentrance
     // problems.
-    signal(SIGHUP, SIG_IGN);
+    mch_signal(SIGHUP, SIG_IGN);
 # endif
 
     ml_close_notmod();		    // close all not-modified buffers
@@ -1538,7 +1728,7 @@ getout_preserve_modified(int exitval)
 getout(int exitval)
 {
     exiting = TRUE;
-#if defined(FEAT_JOB_CHANNEL)
+#if defined(FEAT_EVAL)
     ch_log(NULL, "Exiting...");
 #endif
 
@@ -1556,6 +1746,11 @@ getout(int exitval)
     // Position the cursor on the last screen line, below all the text
     if (!is_not_a_term_or_gui())
 	windgoto((int)Rows - 1, 0);
+
+#ifdef FEAT_EVAL
+    // Invoked all deferred functions in the function stack.
+    invoke_all_defer();
+#endif
 
 #if defined(FEAT_EVAL) || defined(FEAT_SYN_HL)
     // Optionally print hashtable efficiency.
@@ -1580,7 +1775,7 @@ getout(int exitval)
 	    next_tp = tp->tp_next;
 	    FOR_ALL_WINDOWS_IN_TAB(tp, wp)
 	    {
-		if (wp->w_buffer == NULL)
+		if (wp->w_buffer == NULL || !buf_valid(wp->w_buffer))
 		    // Autocmd must have close the buffer already, skip.
 		    continue;
 		buf = wp->w_buffer;
@@ -1628,7 +1823,11 @@ getout(int exitval)
     }
 
 #ifdef FEAT_VIMINFO
-    if (*p_viminfo != NUL)
+    if (
+# ifdef EXITFREE
+	    entered_free_all_mem == FALSE &&
+# endif
+	    *p_viminfo != NUL)
 	// Write out the registers, history, marks etc, to the viminfo file
 	write_viminfo(NULL, FALSE);
 #endif
@@ -1660,7 +1859,7 @@ getout(int exitval)
     {
 	// give the user a chance to read the (error) message
 	no_wait_return = FALSE;
-//	wait_return(FALSE);
+	wait_return(FALSE);
     }
 
     // Position the cursor again, the autocommands may have moved it
@@ -1697,8 +1896,14 @@ getout(int exitval)
 #ifdef FEAT_NETBEANS_INTG
     netbeans_end();
 #endif
+#ifdef FEAT_SOCKETSERVER
+    socketserver_stop();
+#endif
 #ifdef FEAT_CSCOPE
     cs_end();
+#endif
+#ifdef FEAT_IMAGE
+    uninit_image_state();
 #endif
 #ifdef FEAT_EVAL
     if (garbage_collect_at_exit)
@@ -1708,6 +1913,8 @@ getout(int exitval)
     free_cmd_argsW();
 #endif
 
+    term_disable_dec();
+
     mch_exit(exitval);
 }
 
@@ -1715,7 +1922,8 @@ getout(int exitval)
  * Get the name of the display, before gui_prepare() removes it from
  * argv[].  Used for the xterm-clipboard display.
  *
- * Also find the --server... arguments and --socketid and --windowid
+ * Also find the --server, --clientserver... arguments and --socketid and
+ * --windowid
  */
     static void
 early_arg_scan(mparm_T *parmp UNUSED)
@@ -1757,9 +1965,31 @@ early_arg_scan(mparm_T *parmp UNUSED)
 #  ifdef FEAT_GUI
 	    if (strstr(argv[i], "-wait") != 0)
 		// don't fork() when starting the GUI to edit files ourself
-		gui.dofork = FALSE;
+		gui.dofork = false;
 #  endif
 	}
+#  ifdef FEAT_CLIENTSERVER_BACKENDS
+	else if (STRICMP(argv[i], "--clientserver") == 0)
+	{
+	    char_u *arg;
+	    if (i == argc - 1)
+		mainerr_arg_missing((char_u *)argv[i]);
+	    arg = (char_u *)argv[++i];
+
+	    if (STRICMP(arg, "socket") == 0)
+		clientserver_method = CLIENTSERVER_METHOD_SOCKET;
+#   ifdef FEAT_X11
+	    else if (STRICMP(arg, "x11") == 0)
+		clientserver_method = CLIENTSERVER_METHOD_X11;
+#   endif
+#   ifdef MSWIN
+	    else if (STRICMP(arg, "mswin") == 0)
+		clientserver_method = CLIENTSERVER_METHOD_MSWIN;
+#   endif
+	    else
+		mainerr(ME_UNKNOWN_OPTION, arg);
+	}
+#  endif
 # endif
 
 # if defined(FEAT_GUI_GTK) || defined(FEAT_GUI_MSWIN)
@@ -1783,13 +2013,13 @@ early_arg_scan(mparm_T *parmp UNUSED)
 	    else
 #  ifdef FEAT_GUI_MSWIN
 		win_socket_id = id;
-#  else
+#  elif !defined(USE_GTK4)
 		gtk_socket_id = id;
 #  endif
 	    i++;
 	}
 # endif
-# ifdef FEAT_GUI_GTK
+# if defined(FEAT_GUI_GTK) && !defined(USE_GTK4)
 	else if (STRICMP(argv[i], "--echo-wid") == 0)
 	    echo_wid_arg = TRUE;
 # endif
@@ -1841,10 +2071,10 @@ parse_command_name(mparm_T *parmp)
 
     initstr = gettail((char_u *)parmp->argv[0]);
 
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     set_vim_var_string(VV_PROGNAME, initstr, -1);
     set_progpath((char_u *)parmp->argv[0]);
-#endif
+# endif
 
     if (TOLOWER_ASC(initstr[0]) == 'r')
     {
@@ -1857,28 +2087,32 @@ parse_command_name(mparm_T *parmp)
 	    && (TOLOWER_ASC(initstr[1]) == 'v'
 		|| TOLOWER_ASC(initstr[1]) == 'g'))
     {
-#ifdef FEAT_GUI
-	gui.starting = TRUE;
-#endif
+# ifdef FEAT_GUI
+	gui.starting = true;
+# endif
 	parmp->evim_mode = TRUE;
 	++initstr;
     }
 
     // "gvim" starts the GUI.  Also accept "Gvim" for MS-Windows.
-    if (TOLOWER_ASC(initstr[0]) == 'g')
+    if (TOLOWER_ASC(initstr[0]) == 'g'
+# ifdef VIMDLL
+	    || mch_is_gui_executable()
+# endif
+       )
     {
 	main_start_gui();
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	++initstr;
-#endif
-#ifdef GUI_MAY_SPAWN
-	gui.dospawn = FALSE;	// No need to spawn a new process.
-#endif
+# endif
+# ifdef GUI_MAY_SPAWN
+	gui.dospawn = false;	// No need to spawn a new process.
+# endif
     }
-#ifdef GUI_MAY_SPAWN
+# ifdef GUI_MAY_SPAWN
     else
-	gui.dospawn = TRUE;	// Not "gvim". Need to spawn gvim.exe.
-#endif
+	gui.dospawn = true;	// Not "gvim". Need to spawn gvim.exe.
+# endif
 
 
     if (STRNICMP(initstr, "view", 4) == 0)
@@ -1894,13 +2128,13 @@ parse_command_name(mparm_T *parmp)
     // Catch "[r][g]vimdiff" and "[r][g]viewdiff".
     if (STRICMP(initstr, "diff") == 0)
     {
-#ifdef FEAT_DIFF
+# ifdef FEAT_DIFF
 	parmp->diff_mode = TRUE;
-#else
+# else
 	mch_errmsg(_("This Vim was not compiled with the diff feature."));
 	mch_errmsg("\n");
 	mch_exit(2);
-#endif
+# endif
     }
 
     // Checking for "ex" here may catch some weird names, such as "vimex" or
@@ -1956,7 +2190,19 @@ command_line_scan(mparm_T *parmp)
 	{
 	    want_argument = FALSE;
 	    c = argv[0][argv_idx++];
-#ifdef VMS
+# if defined( VMS)
+	    /* 2025-05-13  SMS
+	     * On sufficiently recent non-VAX systems, case preservation
+	     * of the command line is possible/routine.  And quotation
+	     * always works, and is the expected method in such cases.
+	     * However, leaving this slash-prefix scheme available is
+	     * nearly harmless.  But note that it doesn't help with the
+	     * case of other command-line arguments, such as file names.
+	     * For details, see os_vms.c:vms_init().
+	     * On VAX and old non-VAX systems, or with SET PROC/PARSE=TRAD,
+	     * DCL upcases the command line, and the C RTL downcases it.
+	     * I would not say "only uses upper case command lines".
+	     */
 	    /*
 	     * VMS only uses upper case command lines.  Interpret "-X" as "-x"
 	     * and "-/X" as "-X".
@@ -1966,9 +2212,12 @@ command_line_scan(mparm_T *parmp)
 		c = argv[0][argv_idx++];
 		c = TOUPPER_ASC(c);
 	    }
-	    else
-		c = TOLOWER_ASC(c);
-#endif
+	    /* Note that although DCL might upcase things, the C RTL
+	     * will only downcase them, so there should be no need for
+	     * the following (additional?) downcasing (which spoils the
+	     * preserve-case results):
+	     */
+# endif /* defined( VMS) */
 	    switch (c)
 	    {
 	    case NUL:		// "vim -"  read from stdin
@@ -1990,20 +2239,24 @@ command_line_scan(mparm_T *parmp)
 				// "--version" give version message
 				// "--clean" clean context
 				// "--literal" take files literally
+				// "--startuptime fname" write timing info
+				// "--log fname" start logging early
 				// "--nofork" don't fork
 				// "--not-a-term" don't warn for not a term
+				// "--gui-dialog-file fname" write dialog text
 				// "--ttyfail" exit if not a term
+				// "--stdio-channel" use stdin/stdout as channel
 				// "--noplugin[s]" skip plugins
 				// "--cmd <cmd>" execute cmd before vimrc
 		if (STRICMP(argv[0] + argv_idx, "help") == 0)
 		    usage();
 		else if (STRICMP(argv[0] + argv_idx, "version") == 0)
 		{
-		    Columns = 80;	// need to init Columns
+		    cmdline_width = Columns = 80;   // need to init Columns
 		    info_message = TRUE; // use mch_msg(), not mch_errmsg()
-#if defined(FEAT_GUI) && !defined(ALWAYS_USE_GUI)
-		    gui.starting = FALSE; // not starting GUI, will exit
-#endif
+# if defined(FEAT_GUI) && !defined(ALWAYS_USE_GUI) && !defined(VIMDLL)
+		    gui.starting = false; // not starting GUI, will exit
+# endif
 		    list_version();
 		    msg_putchar('\n');
 		    msg_didout = FALSE;
@@ -2012,30 +2265,50 @@ command_line_scan(mparm_T *parmp)
 		else if (STRNICMP(argv[0] + argv_idx, "clean", 5) == 0)
 		{
 		    parmp->use_vimrc = (char_u *)"DEFAULTS";
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 		    use_gvimrc = (char_u *)"NONE";
-#endif
+# endif
 		    parmp->clean = TRUE;
-		    set_option_value((char_u *)"vif", 0L, (char_u *)"NONE", 0);
+		    set_option_value_give_err((char_u *)"vif",
+						      0L, (char_u *)"NONE", 0);
 		}
 		else if (STRNICMP(argv[0] + argv_idx, "literal", 7) == 0)
 		{
-#ifdef EXPAND_FILENAMES
+# ifdef EXPAND_FILENAMES
 		    parmp->literal = TRUE;
-#endif
+# endif
 		}
 		else if (STRNICMP(argv[0] + argv_idx, "nofork", 6) == 0)
 		{
-#ifdef FEAT_GUI
-		    gui.dofork = FALSE;	// don't fork() when starting GUI
-#endif
+# ifdef FEAT_GUI
+		    gui.dofork = false;	// don't fork() when starting GUI
+# endif
 		}
 		else if (STRNICMP(argv[0] + argv_idx, "noplugin", 8) == 0)
 		    p_lpl = FALSE;
 		else if (STRNICMP(argv[0] + argv_idx, "not-a-term", 10) == 0)
 		    parmp->not_a_term = TRUE;
+		else if (STRNICMP(argv[0] + argv_idx, "gui-dialog-file", 15)
+									 == 0)
+		{
+		    want_argument = TRUE;
+		    argv_idx += 15;
+		}
 		else if (STRNICMP(argv[0] + argv_idx, "ttyfail", 7) == 0)
 		    parmp->tty_fail = TRUE;
+# ifdef FEAT_JOB_CHANNEL
+		else if (STRNICMP(argv[0] + argv_idx, "stdio-channel", 13) == 0)
+		{
+		    // Like "-es": no terminal, but the channel is served
+		    // instead of reading Ex commands.
+		    use_stdio_channel = TRUE;
+		    exmode_active = EXMODE_NORMAL;
+		    silent_mode = TRUE;
+#  if defined(FEAT_GUI) && !defined(VIMDLL)
+		    gui.starting = false;	// don't start GUI
+#  endif
+		}
+# endif
 		else if (STRNICMP(argv[0] + argv_idx, "cmd", 3) == 0)
 		{
 		    want_argument = TRUE;
@@ -2046,11 +2319,20 @@ command_line_scan(mparm_T *parmp)
 		    want_argument = TRUE;
 		    argv_idx += 11;
 		}
-#ifdef FEAT_CLIENTSERVER
-		else if (STRNICMP(argv[0] + argv_idx, "serverlist", 10) == 0)
+		else if (STRNICMP(argv[0] + argv_idx, "log", 3) == 0)
+		{
+		    want_argument = TRUE;
+		    argv_idx += 3;
+		}
+# ifdef FEAT_CLIENTSERVER
+		else if (STRICMP(argv[0] + argv_idx, "serverlist") == 0)
 		    ; // already processed -- no arg
-		else if (STRNICMP(argv[0] + argv_idx, "servername", 10) == 0
-		       || STRNICMP(argv[0] + argv_idx, "serversend", 10) == 0)
+		else if (STRICMP(argv[0] + argv_idx, "servername") == 0
+		       || STRICMP(argv[0] + argv_idx, "serversend") == 0
+		       // Don't put this under FEAT_CLIENTSERVER_BACKENDS, just
+		       // let it be ignored. Makes tests less complicated
+		       || STRICMP(argv[0] + argv_idx, "clientserver") == 0
+		       )
 		{
 		    // already processed -- snatch the following arg
 		    if (argc > 1)
@@ -2059,13 +2341,13 @@ command_line_scan(mparm_T *parmp)
 			++argv;
 		    }
 		}
-#endif
-#if defined(FEAT_GUI_GTK) || defined(FEAT_GUI_MSWIN)
-# ifdef FEAT_GUI_GTK
-		else if (STRNICMP(argv[0] + argv_idx, "socketid", 8) == 0)
-# else
-		else if (STRNICMP(argv[0] + argv_idx, "windowid", 8) == 0)
 # endif
+# if defined(FEAT_GUI_GTK) || defined(FEAT_GUI_MSWIN)
+#  ifdef FEAT_GUI_GTK
+		else if (STRNICMP(argv[0] + argv_idx, "socketid", 8) == 0)
+#  else
+		else if (STRNICMP(argv[0] + argv_idx, "windowid", 8) == 0)
+#  endif
 		{
 		    // already processed -- snatch the following arg
 		    if (argc > 1)
@@ -2074,13 +2356,13 @@ command_line_scan(mparm_T *parmp)
 			++argv;
 		    }
 		}
-#endif
-#ifdef FEAT_GUI_GTK
+# endif
+# ifdef FEAT_GUI_GTK
 		else if (STRNICMP(argv[0] + argv_idx, "echo-wid", 8) == 0)
 		{
 		    // already processed, skip
 		}
-#endif
+# endif
 		else
 		{
 		    if (argv[0][argv_idx])
@@ -2092,12 +2374,12 @@ command_line_scan(mparm_T *parmp)
 		break;
 
 	    case 'A':		// "-A" start in Arabic mode
-#ifdef FEAT_ARABIC
-		set_option_value((char_u *)"arabic", 1L, NULL, 0);
-#else
-		mch_errmsg(_(e_noarabic));
+# ifdef FEAT_ARABIC
+		set_option_value_give_err((char_u *)"arabic", 1L, NULL, 0);
+# else
+		mch_errmsg(_(e_arabic_cannot_be_used_not_enabled_at_compile_time));
 		mch_exit(2);
-#endif
+# endif
 		break;
 
 	    case 'b':		// "-b" binary mode
@@ -2123,9 +2405,9 @@ command_line_scan(mparm_T *parmp)
 
 	    case 'f':		// "-f"  GUI: run in foreground.  Amiga: open
 				// window directly, not with newcli
-#ifdef FEAT_GUI
-		gui.dofork = FALSE;	// don't fork() when starting GUI
-#endif
+# ifdef FEAT_GUI
+		gui.dofork = false;	// don't fork() when starting GUI
+# endif
 		break;
 
 	    case 'g':		// "-g" start GUI
@@ -2139,28 +2421,26 @@ command_line_scan(mparm_T *parmp)
 
 	    case '?':		// "-?" give help message (for MS-Windows)
 	    case 'h':		// "-h" give help message
-#ifdef FEAT_GUI_GNOME
+# ifdef FEAT_GUI_GNOME
 		// Tell usage() to exit for "gvim".
-		gui.starting = FALSE;
-#endif
+		gui.starting = false;
+# endif
 		usage();
 		break;
 
 	    case 'H':		// "-H" start in Hebrew mode: rl + hkmap set
-#ifdef FEAT_RIGHTLEFT
+# ifdef FEAT_RIGHTLEFT
 		p_hkmap = TRUE;
-		set_option_value((char_u *)"rl", 1L, NULL, 0);
-#else
+		set_option_value_give_err((char_u *)"rl", 1L, NULL, 0);
+# else
 		mch_errmsg(_(e_hebrew_cannot_be_used_not_enabled_at_compile_time));
 		mch_exit(2);
-#endif
+# endif
 		break;
 
 	    case 'l':		// "-l" lisp mode, 'lisp' and 'showmatch' on
-#ifdef FEAT_LISP
-		set_option_value((char_u *)"lisp", 1L, NULL, 0);
+		set_option_value_give_err((char_u *)"lisp", 1L, NULL, 0);
 		p_sm = TRUE;
-#endif
 		break;
 
 	    case 'M':		// "-M"  no changes or writing of files
@@ -2172,9 +2452,9 @@ command_line_scan(mparm_T *parmp)
 		break;
 
 	    case 'y':		// "-y"  easy mode
-#ifdef FEAT_GUI
-		gui.starting = TRUE;	// start GUI a bit later
-#endif
+# ifdef FEAT_GUI
+		gui.starting = true;	// start GUI a bit later
+# endif
 		parmp->evim_mode = TRUE;
 		break;
 
@@ -2183,7 +2463,7 @@ command_line_scan(mparm_T *parmp)
 		break;
 
 	    case 'n':		// "-n" no swap file
-#ifdef FEAT_NETBEANS_INTG
+# ifdef FEAT_NETBEANS_INTG
 		// checking for "-nb", netbeans parameters
 		if (argv[0][argv_idx] == 'b')
 		{
@@ -2191,12 +2471,12 @@ command_line_scan(mparm_T *parmp)
 		    argv_idx = -1;	    // skip to next argument
 		}
 		else
-#endif
+# endif
 		parmp->no_swap_file = TRUE;
 		break;
 
 	    case 'p':		// "-p[N]" open N tab pages
-#ifdef TARGET_API_MAC_OSX
+# ifdef TARGET_API_MAC_OSX
 		// For some reason on MacOS X, an argument like:
 		// -psn_0_10223617 is passed in when invoke from Finder
 		// or with the 'open' command
@@ -2206,7 +2486,7 @@ command_line_scan(mparm_T *parmp)
 		    main_start_gui();
 		    break;
 		}
-#endif
+# endif
 		// default is 0: open window for each file
 		parmp->window_count = get_number_arg((char_u *)argv[0],
 								&argv_idx, 0);
@@ -2227,7 +2507,7 @@ command_line_scan(mparm_T *parmp)
 		parmp->window_layout = WIN_VER;
 		break;
 
-#ifdef FEAT_QUICKFIX
+# ifdef FEAT_QUICKFIX
 	    case 'q':		// "-q" QuickFix mode
 		if (parmp->edit_type != EDIT_NONE)
 		    mainerr(ME_TOO_MANY_ARGS, (char_u *)argv[0]);
@@ -2240,7 +2520,7 @@ command_line_scan(mparm_T *parmp)
 		else if (argc > 1)		// "-q {errorfile}"
 		    want_argument = TRUE;
 		break;
-#endif
+# endif
 
 	    case 'R':		// "-R" readonly mode
 		readonlymode = TRUE;
@@ -2273,38 +2553,38 @@ command_line_scan(mparm_T *parmp)
 		    want_argument = TRUE;
 		break;
 
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
 	    case 'D':		// "-D"		Debugging
 		parmp->use_debug_break_level = 9999;
 		break;
-#endif
-#ifdef FEAT_DIFF
+# endif
+# ifdef FEAT_DIFF
 	    case 'd':		// "-d"		'diff'
-# ifdef AMIGA
+#  ifdef AMIGA
 		// check for "-dev {device}"
 		if (argv[0][argv_idx] == 'e' && argv[0][argv_idx + 1] == 'v')
 		    want_argument = TRUE;
 		else
-# endif
+#  endif
 		    parmp->diff_mode = TRUE;
 		break;
-#endif
+# endif
 	    case 'V':		// "-V{N}"	Verbose level
 		// default is 10: a little bit verbose
 		p_verbose = get_number_arg((char_u *)argv[0], &argv_idx, 10);
 		if (argv[0][argv_idx] != NUL)
 		{
-		    set_option_value((char_u *)"verbosefile", 0L,
-					     (char_u *)argv[0] + argv_idx, 0);
+		    set_option_value_give_err((char_u *)"verbosefile",
+					  0L, (char_u *)argv[0] + argv_idx, 0);
 		    argv_idx = (int)STRLEN(argv[0]);
 		}
 		break;
 
 	    case 'v':		// "-v"  Vi-mode (as if called "vi")
 		exmode_active = 0;
-#if defined(FEAT_GUI) && !defined(VIMDLL)
-		gui.starting = FALSE;	// don't start GUI
-#endif
+# if defined(FEAT_GUI) && !defined(VIMDLL)
+		gui.starting = false;	// don't start GUI
+# endif
 		break;
 
 	    case 'w':		// "-w{number}"	set window height
@@ -2312,22 +2592,27 @@ command_line_scan(mparm_T *parmp)
 		if (vim_isdigit(((char_u *)argv[0])[argv_idx]))
 		{
 		    n = get_number_arg((char_u *)argv[0], &argv_idx, 10);
-		    set_option_value((char_u *)"window", n, NULL, 0);
+		    set_option_value_give_err((char_u *)"window", n, NULL, 0);
 		    break;
 		}
 		want_argument = TRUE;
 		break;
 
-#ifdef FEAT_CRYPT
+# ifdef FEAT_CRYPT
 	    case 'x':		// "-x"  encrypted reading/writing of files
 		parmp->ask_for_key = TRUE;
 		break;
-#endif
+# endif
 
 	    case 'X':		// "-X"  don't connect to X server
-#if (defined(UNIX) || defined(VMS)) && defined(FEAT_X11)
+# if (defined(UNIX) || defined(VMS)) && defined(FEAT_X11)
 		x_no_connect = TRUE;
-#endif
+# endif
+		break;
+	    case 'Y':		// "-Y" don't connect to Wayland compositor
+# if defined(FEAT_WAYLAND)
+		wayland_no_connect = TRUE;
+# endif
 		break;
 
 	    case 'Z':		// "-Z"  restricted mode
@@ -2348,16 +2633,16 @@ command_line_scan(mparm_T *parmp)
 		// FALLTHROUGH
 	    case 'S':		// "-S {file}" execute Vim script
 	    case 'i':		// "-i {viminfo}" use for viminfo
-#ifndef FEAT_DIFF
+# ifndef FEAT_DIFF
 	    case 'd':		// "-d {device}" device (for Amiga)
-#endif
+# endif
 	    case 'T':		// "-T {terminal}" terminal name
 	    case 'u':		// "-u {vimrc}" vim inits file
 	    case 'U':		// "-U {gvimrc}" gvim inits file
 	    case 'W':		// "-W {scriptout}" overwrite
-#ifdef FEAT_GUI_MSWIN
+# ifdef FEAT_GUI_MSWIN
 	    case 'P':		// "-P {parent title}" MDI parent
-#endif
+# endif
 		want_argument = TRUE;
 		break;
 
@@ -2427,20 +2712,31 @@ command_line_scan(mparm_T *parmp)
 			parmp->pre_commands[parmp->n_pre_commands++] =
 							    (char_u *)argv[0];
 		    }
+		    // --gui-dialog-file fname
+		    if (argv[-1][2] == 'g')
+		    {
+			// without GUI ignore the argument
+# ifdef FEAT_GUI
+			parmp->gui_dialog_file = (char_u *)argv[0];
+# endif
+		    }
+
 		    // "--startuptime <file>" already handled
+		    // "--log <file>" already handled
 		    break;
 
 	    //	case 'd':   -d {device} is handled in mch_check_win() for the
 	    //		    Amiga
 
-#ifdef FEAT_QUICKFIX
+# ifdef FEAT_QUICKFIX
 		case 'q':	// "-q {errorfile}" QuickFix mode
 		    parmp->use_ef = (char_u *)argv[0];
 		    break;
-#endif
+# endif
 
 		case 'i':	// "-i {viminfo}" use for viminfo
-		    set_option_value((char_u *)"vif", 0L, (char_u *)argv[0], 0);
+		    set_option_value_give_err((char_u *)"vif",
+						     0L, (char_u *)argv[0], 0);
 		    break;
 
 		case 's':	// "-s {scriptin}" read from script file
@@ -2475,11 +2771,11 @@ scripterror:
 		     * HAVE_TERMLIB is supported it overrides the environment
 		     * variable TERM.
 		     */
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 		    if (term_is_gui((char_u *)argv[0]))
-			gui.starting = TRUE;	// start GUI a bit later
+			gui.starting = true;	// start GUI a bit later
 		    else
-#endif
+# endif
 			parmp->term = (char_u *)argv[0];
 		    break;
 
@@ -2488,9 +2784,9 @@ scripterror:
 		    break;
 
 		case 'U':	// "-U {gvimrc}" gvim inits file
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 		    use_gvimrc = (char_u *)argv[0];
-#endif
+# endif
 		    break;
 
 		case 'w':	// "-w {nr}" 'window' value
@@ -2499,7 +2795,8 @@ scripterror:
 		    {
 			argv_idx = 0;
 			n = get_number_arg((char_u *)argv[0], &argv_idx, 10);
-			set_option_value((char_u *)"window", n, NULL, 0);
+			set_option_value_give_err((char_u *)"window",
+								   n, NULL, 0);
 			argv_idx = -1;
 			break;
 		    }
@@ -2517,11 +2814,11 @@ scripterror:
 		    }
 		    break;
 
-#ifdef FEAT_GUI_MSWIN
+# ifdef FEAT_GUI_MSWIN
 		case 'P':		// "-P {parent title}" MDI parent
 		    gui_mch_set_parent(argv[0]);
 		    break;
-#endif
+# endif
 		}
 	    }
 	}
@@ -2538,32 +2835,34 @@ scripterror:
 		mainerr(ME_TOO_MANY_ARGS, (char_u *)argv[0]);
 	    parmp->edit_type = EDIT_FILE;
 
-#ifdef MSWIN
+# ifdef MSWIN
 	    // Remember if the argument was a full path before changing
 	    // slashes to backslashes.
 	    if (argv[0][0] != NUL && argv[0][1] == ':' && argv[0][2] == '\\')
 		parmp->full_path = TRUE;
-#endif
+# endif
 
 	    // Add the file to the global argument list.
 	    if (ga_grow(&global_alist.al_ga, 1) == FAIL
 		    || (p = vim_strsave((char_u *)argv[0])) == NULL)
 		mch_exit(2);
-#ifdef FEAT_DIFF
+# ifdef FEAT_DIFF
 	    if (parmp->diff_mode && mch_isdir(p) && GARGCOUNT > 0
 				      && !mch_isdir(alist_name(&GARGLIST[0])))
 	    {
-		char_u	    *r;
+		char_u	    *tail;
+		string_T    ret;
 
-		r = concat_fnames(p, gettail(alist_name(&GARGLIST[0])), TRUE);
-		if (r != NULL)
+		tail = gettail(alist_name(&GARGLIST[0]));
+		concat_fnames(p, STRLEN(p), tail, STRLEN(tail), TRUE, &ret);
+		if (ret.string != NULL)
 		{
 		    vim_free(p);
-		    p = r;
+		    p = ret.string;
 		}
 	    }
-#endif
-#if defined(__CYGWIN32__) && !defined(MSWIN)
+# endif
+# ifdef __CYGWIN__
 	    /*
 	     * If vim is invoked by non-Cygwin tools, convert away any
 	     * DOS paths, so things like .swp files are created correctly.
@@ -2574,44 +2873,44 @@ scripterror:
 	    {
 		char posix_path[MAXPATHL];
 
-# if CYGWIN_VERSION_DLL_MAJOR >= 1007
+#  if CYGWIN_VERSION_DLL_MAJOR >= 1007
 		cygwin_conv_path(CCP_WIN_A_TO_POSIX, p, posix_path, MAXPATHL);
-# else
+#  else
 		cygwin_conv_to_posix_path(p, posix_path);
-# endif
+#  endif
 		vim_free(p);
 		p = vim_strsave((char_u *)posix_path);
 		if (p == NULL)
 		    mch_exit(2);
 	    }
-#endif
+# endif
 
-#ifdef USE_FNAME_CASE
+# ifdef USE_FNAME_CASE
 	    // Make the case of the file name match the actual file.
 	    fname_case(p, 0);
-#endif
+# endif
 
 	    alist_add(&global_alist, p,
-#ifdef EXPAND_FILENAMES
+# ifdef EXPAND_FILENAMES
 		    parmp->literal ? 2 : 0	// add buffer nr after exp.
-#else
+# else
 		    2		// add buffer number now and use curbuf
-#endif
+# endif
 		    );
 
-#ifdef MSWIN
+# ifdef MSWIN
 	    {
 		// Remember this argument has been added to the argument list.
 		// Needed when 'encoding' is changed.
 		used_file_arg(argv[0], parmp->literal, parmp->full_path,
-# ifdef FEAT_DIFF
+#  ifdef FEAT_DIFF
 							    parmp->diff_mode
-# else
+#  else
 							    FALSE
-# endif
+#  endif
 							    );
 	    }
-#endif
+# endif
 	}
 
 	/*
@@ -2627,20 +2926,23 @@ scripterror:
 	}
     }
 
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     // If there is a "+123" or "-c" command, set v:swapcommand to the first
     // one.
     if (parmp->n_commands > 0)
     {
-	p = alloc(STRLEN(parmp->commands[0]) + 3);
+	size_t  plen;
+
+	plen = STRLEN(parmp->commands[0]) + 2;
+	p = alloc(plen + 1);
 	if (p != NULL)
 	{
 	    sprintf((char *)p, ":%s\r", parmp->commands[0]);
-	    set_vim_var_string(VV_SWAPCOMMAND, p, -1);
+	    set_vim_var_string(VV_SWAPCOMMAND, p, (int)plen);
 	    vim_free(p);
 	}
     }
-#endif
+# endif
 }
 
 /*
@@ -2659,13 +2961,13 @@ check_tty(mparm_T *parmp)
 	    silent_mode = TRUE;
     }
     else if (parmp->want_full_screen && (!stdout_isatty || !input_isatty)
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    // don't want the delay when started from the desktop
 	    && !gui.starting
-#endif
+# endif
 	    && !parmp->not_a_term)
     {
-#ifdef NBDEBUG
+# ifdef NBDEBUG
 	/*
 	 * This shouldn't be necessary. But if I run netbeans with the log
 	 * output coming to the console and XOpenDisplay fails, I get vim
@@ -2678,15 +2980,15 @@ check_tty(mparm_T *parmp)
 	    mch_errmsg(_("Vim: Error: Failure to start gvim from NetBeans\n"));
 	    exit(1);
 	}
-#endif
-#if defined(MSWIN) && (!defined(FEAT_GUI_MSWIN) || defined(VIMDLL))
-	if (
-# ifdef VIMDLL
-	    !gui.starting &&
 # endif
+# if defined(MSWIN) && (!defined(FEAT_GUI_MSWIN) || defined(VIMDLL))
+	if (
+#  ifdef VIMDLL
+	    !gui.starting &&
+#  endif
 	    is_cygpty_used())
 	{
-# if defined(HAVE_BIND_TEXTDOMAIN_CODESET) \
+#  if defined(HAVE_BIND_TEXTDOMAIN_CODESET) \
 	&& defined(FEAT_GETTEXT)
 	    char    *s, *tofree = NULL;
 
@@ -2700,11 +3002,11 @@ check_tty(mparm_T *parmp)
 		s = "utf-8";	// Use "utf-8" by default.
 	    (void)bind_textdomain_codeset(VIMPACKAGE, s);
 	    vim_free(tofree);
-# endif
+#  endif
 	    mch_errmsg(_("Vim: Error: This version of Vim does not run in a Cygwin terminal\n"));
 	    exit(1);
 	}
-#endif
+# endif
 	if (!stdout_isatty)
 	    mch_errmsg(_("Vim: Warning: Output is not to a terminal\n"));
 	if (!input_isatty)
@@ -2742,13 +3044,13 @@ read_stdin(void)
 
     check_swap_exists_action();
 
-#if !(defined(AMIGA) || defined(MACOS_X))
+# if !(defined(AMIGA) || defined(MACOS_X))
     // Dup stdin from stderr to read commands from, so that shell commands
     // work.
     // TODO: why is this needed, even though readfile() has done this?
     close(0);
     vim_ignored = dup(2);
-#endif
+# endif
 }
 
 /*
@@ -2837,11 +3139,11 @@ create_windows(mparm_T *parmp UNUSED)
 	    curbuf = curwin->w_buffer;
 	    if (curbuf->b_ml.ml_mfp == NULL)
 	    {
-#ifdef FEAT_FOLDING
+# ifdef FEAT_FOLDING
 		// Set 'foldlevel' to 'foldlevelstart' if it's not negative.
 		if (p_fdls >= 0)
 		    curwin->w_p_fdl = p_fdls;
-#endif
+# endif
 		// When getting the ATTENTION prompt here, use a dialog
 		swap_exists_action = SEA_DIALOG;
 
@@ -2944,7 +3246,8 @@ edit_buffers(
 
 		    p_shm_save = vim_strsave(p_shm);
 		    vim_snprintf(buf, 100, "F%s", p_shm);
-		    set_option_value((char_u *)"shm", 0L, (char_u *)buf, 0);
+		    set_option_value_give_err((char_u *)"shm",
+							 0L, (char_u *)buf, 0);
 		}
 	    }
 	    else
@@ -2993,7 +3296,7 @@ edit_buffers(
 
     if (p_shm_save != NULL)
     {
-	set_option_value((char_u *)"shm", 0L, p_shm_save, 0);
+	set_option_value_give_err((char_u *)"shm", 0L, p_shm_save, 0);
 	vim_free(p_shm_save);
     }
 
@@ -3003,7 +3306,7 @@ edit_buffers(
 
     // make the first window the current window
     win = firstwin;
-#if defined(FEAT_QUICKFIX)
+# if defined(FEAT_QUICKFIX)
     // Avoid making a preview window the current window.
     while (win->w_p_pvw)
     {
@@ -3014,7 +3317,7 @@ edit_buffers(
 	    break;
 	}
     }
-#endif
+# endif
     win_enter(win, FALSE);
 
     --autocmd_no_leave;
@@ -3032,25 +3335,25 @@ exe_pre_commands(mparm_T *parmp)
     char_u	**cmds = parmp->pre_commands;
     int		cnt = parmp->n_pre_commands;
     int		i;
-    ESTACK_CHECK_DECLARATION
+    ESTACK_CHECK_DECLARATION;
 
-    if (cnt > 0)
-    {
-	curwin->w_cursor.lnum = 0; // just in case..
-	estack_push(ETYPE_ARGS, (char_u *)_("pre-vimrc command line"), 0);
-	ESTACK_CHECK_SETUP
+    if (cnt <= 0)
+	return;
+
+    curwin->w_cursor.lnum = 0; // just in case..
+    estack_push(ETYPE_ARGS, (char_u *)_("pre-vimrc command line"), 0);
+    ESTACK_CHECK_SETUP;
 # ifdef FEAT_EVAL
-	current_sctx.sc_sid = SID_CMDARG;
+    current_sctx.sc_sid = SID_CMDARG;
 # endif
-	for (i = 0; i < cnt; ++i)
-	    do_cmdline_cmd(cmds[i]);
-	ESTACK_CHECK_NOW
-	estack_pop();
+    for (i = 0; i < cnt; ++i)
+	do_cmdline_cmd(cmds[i]);
+    ESTACK_CHECK_NOW;
+    estack_pop();
 # ifdef FEAT_EVAL
-	current_sctx.sc_sid = 0;
+    current_sctx.sc_sid = 0;
 # endif
-	TIME_MSG("--cmd commands");
-    }
+    TIME_MSG("--cmd commands");
 }
 
 /*
@@ -3060,7 +3363,7 @@ exe_pre_commands(mparm_T *parmp)
 exe_commands(mparm_T *parmp)
 {
     int		i;
-    ESTACK_CHECK_DECLARATION
+    ESTACK_CHECK_DECLARATION;
 
     /*
      * We start commands on line 0, make "vim +/pat file" match a
@@ -3071,33 +3374,33 @@ exe_commands(mparm_T *parmp)
     if (parmp->tagname == NULL && curwin->w_cursor.lnum <= 1)
 	curwin->w_cursor.lnum = 0;
     estack_push(ETYPE_ARGS, (char_u *)"command line", 0);
-    ESTACK_CHECK_SETUP
-#ifdef FEAT_EVAL
+    ESTACK_CHECK_SETUP;
+# ifdef FEAT_EVAL
     current_sctx.sc_sid = SID_CARG;
     current_sctx.sc_seq = 0;
-#endif
+# endif
     for (i = 0; i < parmp->n_commands; ++i)
     {
 	do_cmdline_cmd(parmp->commands[i]);
 	if (parmp->cmds_tofree[i])
 	    vim_free(parmp->commands[i]);
     }
-    ESTACK_CHECK_NOW
+    ESTACK_CHECK_NOW;
     estack_pop();
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     current_sctx.sc_sid = 0;
-#endif
+# endif
     if (curwin->w_cursor.lnum == 0)
 	curwin->w_cursor.lnum = 1;
 
     if (!exmode_active)
 	msg_scroll = FALSE;
 
-#ifdef FEAT_QUICKFIX
+# ifdef FEAT_QUICKFIX
     // When started with "-q errorfile" jump to first error again.
     if (parmp->edit_type == EDIT_QF)
 	qf_jump(NULL, 0, 0, FALSE);
-#endif
+# endif
     TIME_MSG("executing command arguments");
 }
 
@@ -3129,42 +3432,42 @@ source_startup_scripts(mparm_T *parmp)
 	{
 	    if (do_source((char_u *)VIM_DEFAULTS_FILE, FALSE, DOSO_NONE, NULL)
 									 != OK)
-		emsg(e_failed_to_source_defaults);
+		emsg(_(e_failed_to_source_defaults));
 	}
 	else if (STRCMP(parmp->use_vimrc, "NONE") == 0
 				     || STRCMP(parmp->use_vimrc, "NORC") == 0)
 	{
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    if (use_gvimrc == NULL)	    // don't load gvimrc either
 		use_gvimrc = parmp->use_vimrc;
-#endif
+# endif
 	}
 	else
 	{
 	    if (do_source(parmp->use_vimrc, FALSE, DOSO_NONE, NULL) != OK)
-		semsg(_("E282: Cannot read from \"%s\""), parmp->use_vimrc);
+		semsg(_(e_cannot_read_from_str_2), parmp->use_vimrc);
 	}
     }
     else if (!silent_mode)
     {
-#ifdef AMIGA
+# ifdef AMIGA
 	struct Process	*proc = (struct Process *)FindTask(0L);
 	APTR		save_winptr = proc->pr_WindowPtr;
 
 	// Avoid a requester here for a volume that doesn't exist.
 	proc->pr_WindowPtr = (APTR)-1L;
-#endif
+# endif
 
 	/*
 	 * Get system wide defaults, if the file name is defined.
 	 */
-#ifdef SYS_VIMRC_FILE
+# ifdef SYS_VIMRC_FILE
 	(void)do_source((char_u *)SYS_VIMRC_FILE, FALSE, DOSO_NONE, NULL);
-#endif
-#ifdef MACOS_X
+# endif
+# ifdef MACOS_X
 	(void)do_source((char_u *)"$VIMRUNTIME/macmap.vim", FALSE,
 							      DOSO_NONE, NULL);
-#endif
+# endif
 
 	/*
 	 * Try to read initialization commands from the following places:
@@ -3180,31 +3483,35 @@ source_startup_scripts(mparm_T *parmp)
 	{
 	    if (do_source((char_u *)USR_VIMRC_FILE, TRUE,
 						      DOSO_VIMRC, NULL) == FAIL
-#ifdef USR_VIMRC_FILE2
+# ifdef USR_VIMRC_FILE2
 		&& do_source((char_u *)USR_VIMRC_FILE2, TRUE,
 						      DOSO_VIMRC, NULL) == FAIL
-#endif
-#ifdef USR_VIMRC_FILE3
+# endif
+# ifdef XDG_VIMRC_FILE
+		&& do_source((char_u *)XDG_VIMRC_FILE, TRUE,
+						      DOSO_VIMRC, NULL) == FAIL
+# endif
+# ifdef USR_VIMRC_FILE3
 		&& do_source((char_u *)USR_VIMRC_FILE3, TRUE,
 						      DOSO_VIMRC, NULL) == FAIL
-#endif
-#ifdef USR_VIMRC_FILE4
+# endif
+# ifdef USR_VIMRC_FILE4
 		&& do_source((char_u *)USR_VIMRC_FILE4, TRUE,
 						      DOSO_VIMRC, NULL) == FAIL
-#endif
+# endif
 		&& process_env((char_u *)"EXINIT", FALSE) == FAIL
 		&& do_source((char_u *)USR_EXRC_FILE, FALSE,
 						       DOSO_NONE, NULL) == FAIL
-#ifdef USR_EXRC_FILE2
+# ifdef USR_EXRC_FILE2
 		&& do_source((char_u *)USR_EXRC_FILE2, FALSE,
 						       DOSO_NONE, NULL) == FAIL
-#endif
+# endif
 		&& !has_dash_c_arg)
 	    {
 		// When no .vimrc file was found: source defaults.vim.
 		if (do_source((char_u *)VIM_DEFAULTS_FILE, FALSE, DOSO_NONE,
 								 NULL) == FAIL)
-		    emsg(e_failed_to_source_defaults);
+		    emsg(_(e_failed_to_source_defaults));
 	    }
 	}
 
@@ -3219,45 +3526,45 @@ source_startup_scripts(mparm_T *parmp)
 	 */
 	if (p_exrc)
 	{
-#if defined(UNIX) || defined(VMS)
+# if defined(UNIX) || defined(VMS)
 	    // If ".vimrc" file is not owned by user, set 'secure' mode.
 	    if (!file_owned(VIMRC_FILE))
-#endif
+# endif
 		secure = p_secure;
 
 	    i = FAIL;
 	    if (fullpathcmp((char_u *)USR_VIMRC_FILE,
 				(char_u *)VIMRC_FILE, FALSE, TRUE) != FPC_SAME
-#ifdef USR_VIMRC_FILE2
+# ifdef USR_VIMRC_FILE2
 		    && fullpathcmp((char_u *)USR_VIMRC_FILE2,
 				(char_u *)VIMRC_FILE, FALSE, TRUE) != FPC_SAME
-#endif
-#ifdef USR_VIMRC_FILE3
+# endif
+# ifdef USR_VIMRC_FILE3
 		    && fullpathcmp((char_u *)USR_VIMRC_FILE3,
 				(char_u *)VIMRC_FILE, FALSE, TRUE) != FPC_SAME
-#endif
-#ifdef SYS_VIMRC_FILE
+# endif
+# ifdef SYS_VIMRC_FILE
 		    && fullpathcmp((char_u *)SYS_VIMRC_FILE,
 				(char_u *)VIMRC_FILE, FALSE, TRUE) != FPC_SAME
-#endif
+# endif
 				)
 		i = do_source((char_u *)VIMRC_FILE, TRUE, DOSO_VIMRC, NULL);
 
 	    if (i == FAIL)
 	    {
-#if defined(UNIX) || defined(VMS)
+# if defined(UNIX) || defined(VMS)
 		// if ".exrc" is not owned by user set 'secure' mode
 		if (!file_owned(EXRC_FILE))
 		    secure = p_secure;
 		else
 		    secure = 0;
-#endif
+# endif
 		if (	   fullpathcmp((char_u *)USR_EXRC_FILE,
 				(char_u *)EXRC_FILE, FALSE, TRUE) != FPC_SAME
-#ifdef USR_EXRC_FILE2
+# ifdef USR_EXRC_FILE2
 			&& fullpathcmp((char_u *)USR_EXRC_FILE2,
 				(char_u *)EXRC_FILE, FALSE, TRUE) != FPC_SAME
-#endif
+# endif
 				)
 		    (void)do_source((char_u *)EXRC_FILE, FALSE,
 							      DOSO_NONE, NULL);
@@ -3266,9 +3573,9 @@ source_startup_scripts(mparm_T *parmp)
 	if (secure == 2)
 	    need_wait_return = TRUE;
 	secure = 0;
-#ifdef AMIGA
+# ifdef AMIGA
 	proc->pr_WindowPtr = save_winptr;
-#endif
+# endif
     }
     TIME_MSG("sourcing vimrc file(s)");
 }
@@ -3279,13 +3586,13 @@ source_startup_scripts(mparm_T *parmp)
     static void
 main_start_gui(void)
 {
-#ifdef FEAT_GUI
-    gui.starting = TRUE;	// start GUI a bit later
-#else
+# ifdef FEAT_GUI
+    gui.starting = true;	// start GUI a bit later
+# else
     mch_errmsg(_(e_gui_cannot_be_used_not_enabled_at_compile_time));
     mch_errmsg("\n");
     mch_exit(2);
-#endif
+# endif
 }
 
 #endif  // NO_VIM_MAIN
@@ -3301,31 +3608,29 @@ process_env(
 {
     char_u	*initstr;
     sctx_T	save_current_sctx;
+    ESTACK_CHECK_DECLARATION;
 
-    ESTACK_CHECK_DECLARATION
+    if ((initstr = mch_getenv(env)) == NULL || *initstr == NUL)
+	return FAIL;
 
-    if ((initstr = mch_getenv(env)) != NULL && *initstr != NUL)
-    {
-	if (is_viminit)
-	    vimrc_found(NULL, NULL);
-	estack_push(ETYPE_ENV, env, 0);
-	ESTACK_CHECK_SETUP
-	save_current_sctx = current_sctx;
-	current_sctx.sc_version = 1;
+    if (is_viminit)
+	vimrc_found(NULL, NULL);
+    estack_push(ETYPE_ENV, env, 0);
+    ESTACK_CHECK_SETUP;
+    save_current_sctx = current_sctx;
+    current_sctx.sc_version = 1;
 #ifdef FEAT_EVAL
-	current_sctx.sc_sid = SID_ENV;
-	current_sctx.sc_seq = 0;
-	current_sctx.sc_lnum = 0;
+    current_sctx.sc_sid = SID_ENV;
+    current_sctx.sc_seq = 0;
+    current_sctx.sc_lnum = 0;
 #endif
 
-	do_cmdline_cmd(initstr);
+    do_cmdline_cmd(initstr);
 
-	ESTACK_CHECK_NOW
-	estack_pop();
-	current_sctx = save_current_sctx;
-	return OK;
-    }
-    return FAIL;
+    ESTACK_CHECK_NOW;
+    estack_pop();
+    current_sctx = save_current_sctx;
+    return OK;
 }
 
 #if (defined(UNIX) || defined(VMS)) && !defined(NO_VIM_MAIN)
@@ -3369,7 +3674,7 @@ mainerr(
     gui.in_use = mch_is_gui_executable();
 #endif
 #ifdef FEAT_GUI_MSWIN
-    gui.starting = FALSE;   // Needed to show as error.
+    gui.starting = false;   // Needed to show as error.
 #endif
 
     init_longVersion();
@@ -3417,14 +3722,14 @@ usage(void)
 	N_("[file ..]       edit specified file(s)"),
 	N_("-               read text from stdin"),
 	N_("-t tag          edit file where tag is defined"),
-#ifdef FEAT_QUICKFIX
+# ifdef FEAT_QUICKFIX
 	N_("-q [errorfile]  edit file with first error")
-#endif
+# endif
     };
 
-#if defined(UNIX) || defined(VMS)
+# if defined(UNIX) || defined(VMS)
     reset_signals();		// kill us with CTRL-C here, if you like
-#endif
+# endif
 
     init_longVersion();
     mch_msg(longVersion);
@@ -3437,66 +3742,71 @@ usage(void)
 	    break;
 	mch_msg(_("\n   or:"));
     }
-#ifdef VMS
-    mch_msg(_("\nWhere case is ignored prepend / to make flag upper case"));
-#endif
+# if defined( VMS)
+    mch_msg(_("\nWhere command is down-cased, prepend / (like: -/R) to treat flag as upper-case."));
+    mch_msg(_("\nOr, where supported, SET PROC/PARSE=EXT, or else quote upper-case material."));
+# endif /* defined( VMS) */
 
     mch_msg(_("\n\nArguments:\n"));
     main_msg(_("--\t\t\tOnly file names after this"));
-#ifdef EXPAND_FILENAMES
+# ifdef EXPAND_FILENAMES
     main_msg(_("--literal\t\tDon't expand wildcards"));
-#endif
-#ifdef FEAT_OLE
+# endif
+# ifdef FEAT_OLE
     main_msg(_("-register\t\tRegister this gvim for OLE"));
     main_msg(_("-unregister\t\tUnregister gvim for OLE"));
-#endif
-#ifdef FEAT_GUI
+# endif
+# ifdef FEAT_GUI
     main_msg(_("-g\t\t\tRun using GUI (like \"gvim\")"));
     main_msg(_("-f  or  --nofork\tForeground: Don't fork when starting GUI"));
-#endif
+# endif
     main_msg(_("-v\t\t\tVi mode (like \"vi\")"));
     main_msg(_("-e\t\t\tEx mode (like \"ex\")"));
     main_msg(_("-E\t\t\tImproved Ex mode"));
     main_msg(_("-s\t\t\tSilent (batch) mode (only for \"ex\")"));
-#ifdef FEAT_DIFF
+# ifdef FEAT_DIFF
     main_msg(_("-d\t\t\tDiff mode (like \"vimdiff\")"));
-#endif
+# endif
     main_msg(_("-y\t\t\tEasy mode (like \"evim\", modeless)"));
     main_msg(_("-R\t\t\tReadonly mode (like \"view\")"));
     main_msg(_("-Z\t\t\tRestricted mode (like \"rvim\")"));
     main_msg(_("-m\t\t\tModifications (writing files) not allowed"));
     main_msg(_("-M\t\t\tModifications in text not allowed"));
     main_msg(_("-b\t\t\tBinary mode"));
-#ifdef FEAT_LISP
     main_msg(_("-l\t\t\tLisp mode"));
-#endif
     main_msg(_("-C\t\t\tCompatible with Vi: 'compatible'"));
     main_msg(_("-N\t\t\tNot fully Vi compatible: 'nocompatible'"));
     main_msg(_("-V[N][fname]\t\tBe verbose [level N] [log messages to fname]"));
-#ifdef FEAT_EVAL
+# ifdef FEAT_EVAL
     main_msg(_("-D\t\t\tDebugging mode"));
-#endif
+# endif
     main_msg(_("-n\t\t\tNo swap file, use memory only"));
     main_msg(_("-r\t\t\tList swap files and exit"));
     main_msg(_("-r (with file name)\tRecover crashed session"));
     main_msg(_("-L\t\t\tSame as -r"));
-#ifdef AMIGA
+# ifdef AMIGA
     main_msg(_("-f\t\t\tDon't use newcli to open window"));
     main_msg(_("-dev <device>\t\tUse <device> for I/O"));
-#endif
-#ifdef FEAT_ARABIC
+# endif
+# ifdef FEAT_ARABIC
     main_msg(_("-A\t\t\tStart in Arabic mode"));
-#endif
-#ifdef FEAT_RIGHTLEFT
+# endif
+# ifdef FEAT_RIGHTLEFT
     main_msg(_("-H\t\t\tStart in Hebrew mode"));
-#endif
+# endif
     main_msg(_("-T <terminal>\tSet terminal type to <terminal>"));
     main_msg(_("--not-a-term\t\tSkip warning for input/output not being a terminal"));
+# ifdef FEAT_GUI
+    main_msg(_("--gui-dialog-file {fname}  For testing: write dialog text"));
+# endif
     main_msg(_("--ttyfail\t\tExit if input or output is not a terminal"));
+# ifdef FEAT_JOB_CHANNEL
+    main_msg(_("--stdio-channel\tUse stdin and stdout as a channel"));
+# endif
     main_msg(_("-u <vimrc>\t\tUse <vimrc> instead of any .vimrc"));
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     main_msg(_("-U <gvimrc>\t\tUse <gvimrc> instead of any .gvimrc"));
-#endif
+# endif
     main_msg(_("--noplugin\t\tDon't load plugin scripts"));
     main_msg(_("-p[N]\t\tOpen N tab pages (default: one for each file)"));
     main_msg(_("-o[N]\t\tOpen N windows (default: one for each file)"));
@@ -3509,16 +3819,22 @@ usage(void)
     main_msg(_("-s <scriptin>\tRead Normal mode commands from file <scriptin>"));
     main_msg(_("-w <scriptout>\tAppend all typed commands to file <scriptout>"));
     main_msg(_("-W <scriptout>\tWrite all typed commands to file <scriptout>"));
-#ifdef FEAT_CRYPT
+# ifdef FEAT_CRYPT
     main_msg(_("-x\t\t\tEdit encrypted files"));
-#endif
-#if (defined(UNIX) || defined(VMS)) && defined(FEAT_X11)
-# if defined(FEAT_GUI_X11) && !defined(FEAT_GUI_GTK)
-    main_msg(_("-display <display>\tConnect Vim to this particular X-server"));
 # endif
+# if (defined(UNIX) || defined(VMS)) && defined(FEAT_X11)
+#  if defined(FEAT_GUI_X11) && !defined(FEAT_GUI_GTK)
+    main_msg(_("-display <display>\tConnect Vim to this particular X-server"));
+#  endif
     main_msg(_("-X\t\t\tDo not connect to X server"));
-#endif
-#ifdef FEAT_CLIENTSERVER
+# endif
+# if defined(FEAT_WAYLAND)
+    main_msg(_("-Y\t\t\tDo not connect to Wayland compositor"));
+# endif
+# ifdef FEAT_CLIENTSERVER
+#  ifdef FEAT_CLIENTSERVER_BACKENDS
+    main_msg(_("--clientserver <socket|x11|mswin> Backend for clientserver communication"));
+#  endif
     main_msg(_("--remote <files>\tEdit <files> in a Vim server if possible"));
     main_msg(_("--remote-silent <files>  Same, don't complain if there is no server"));
     main_msg(_("--remote-wait <files>  As --remote but wait for files to have been edited"));
@@ -3528,29 +3844,24 @@ usage(void)
     main_msg(_("--remote-expr <expr>\tEvaluate <expr> in a Vim server and print result"));
     main_msg(_("--serverlist\t\tList available Vim server names and exit"));
     main_msg(_("--servername <name>\tSend to/become the Vim server <name>"));
-#endif
-#ifdef STARTUPTIME
+# endif
+# ifdef STARTUPTIME
     main_msg(_("--startuptime <file>\tWrite startup timing messages to <file>"));
-#endif
-#ifdef FEAT_VIMINFO
+# endif
+# ifdef FEAT_JOB_CHANNEL
+    main_msg(_("--log <file>\t\tStart logging to <file> early"));
+# endif
+# ifdef FEAT_VIMINFO
     main_msg(_("-i <viminfo>\t\tUse <viminfo> instead of .viminfo"));
-#endif
+# endif
     main_msg(_("--clean\t\t'nocompatible', Vim defaults, no plugins, no viminfo"));
     main_msg(_("-h  or  --help\tPrint Help (this message) and exit"));
     main_msg(_("--version\t\tPrint version information and exit"));
 
-#ifdef FEAT_GUI_X11
-# ifdef FEAT_GUI_MOTIF
+# ifdef FEAT_GUI_X11
+#  ifdef FEAT_GUI_MOTIF
     mch_msg(_("\nArguments recognised by gvim (Motif version):\n"));
-# else
-#  ifdef FEAT_GUI_ATHENA
-#   ifdef FEAT_GUI_NEXTAW
-    mch_msg(_("\nArguments recognised by gvim (neXtaw version):\n"));
-#   else
-    mch_msg(_("\nArguments recognised by gvim (Athena version):\n"));
-#   endif
 #  endif
-# endif
     main_msg(_("-display <display>\tRun Vim on <display>"));
     main_msg(_("-iconic\t\tStart Vim iconified"));
     main_msg(_("-background <color>\tUse <color> for the background (also: -bg)"));
@@ -3561,45 +3872,50 @@ usage(void)
     main_msg(_("-geometry <geom>\tUse <geom> for initial geometry (also: -geom)"));
     main_msg(_("-borderwidth <width>\tUse a border width of <width> (also: -bw)"));
     main_msg(_("-scrollbarwidth <width>  Use a scrollbar width of <width> (also: -sw)"));
-# ifdef FEAT_GUI_ATHENA
-    main_msg(_("-menuheight <height>\tUse a menu bar height of <height> (also: -mh)"));
-# endif
     main_msg(_("-reverse\t\tUse reverse video (also: -rv)"));
     main_msg(_("+reverse\t\tDon't use reverse video (also: +rv)"));
     main_msg(_("-xrm <resource>\tSet the specified resource"));
-#endif // FEAT_GUI_X11
-#ifdef FEAT_GUI_GTK
+# endif // FEAT_GUI_X11
+# ifdef FEAT_GUI_GTK
+#  ifdef USE_GTK4
+    mch_msg(_("\nArguments recognised by gvim (GTK4 version):\n"));
+#  else
     mch_msg(_("\nArguments recognised by gvim (GTK+ version):\n"));
+#  endif
     main_msg(_("-background <color>\tUse <color> for the background (also: -bg)"));
     main_msg(_("-foreground <color>\tUse <color> for normal text (also: -fg)"));
     main_msg(_("-font <font>\t\tUse <font> for normal text (also: -fn)"));
     main_msg(_("-geometry <geom>\tUse <geom> for initial geometry (also: -geom)"));
+#  ifdef USE_GTK4
+    main_msg("--prg-name <name>\tSet GTK program name");
+#  else
     main_msg(_("-iconic\t\tStart Vim iconified"));
     main_msg(_("-reverse\t\tUse reverse video (also: -rv)"));
     main_msg(_("-display <display>\tRun Vim on <display> (also: --display)"));
     main_msg(_("--role <role>\tSet a unique role to identify the main window"));
     main_msg(_("--socketid <xid>\tOpen Vim inside another GTK widget"));
     main_msg(_("--echo-wid\t\tMake gvim echo the Window ID on stdout"));
-#endif
-#ifdef FEAT_GUI_MSWIN
-# ifdef VIMDLL
-    if (gui.starting)
+#  endif
 # endif
+# ifdef FEAT_GUI_MSWIN
+#  ifdef VIMDLL
+    if (gui.starting)
+#  endif
     {
 	main_msg(_("-P <parent title>\tOpen Vim inside parent application"));
 	main_msg(_("--windowid <HWND>\tOpen Vim inside another win32 widget"));
     }
-#endif
+# endif
 
-#ifdef FEAT_GUI_GNOME
+# ifdef FEAT_GUI_GNOME
     // Gnome gives extra messages for --help if we continue, but not for -h.
     if (gui.starting)
     {
 	mch_msg("\n");
-	gui.dofork = FALSE;
+	gui.dofork = false;
     }
     else
-#endif
+# endif
 	mch_exit(0);
 }
 

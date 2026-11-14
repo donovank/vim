@@ -1,6 +1,5 @@
 " Test for cscope commands.
 
-source check.vim
 CheckFeature cscope
 CheckFeature quickfix
 CheckExecutable cscope
@@ -17,7 +16,8 @@ func CscopeSetupOrClean(setup)
       cscope kill -1
       for file in ['Xcscope.out', 'Xcscope2.out', 'Xmemfile_test.c']
           call delete(file)
-      endfo
+      endfor
+      set cscopequickfix&
     endif
 endfunc
 
@@ -122,25 +122,23 @@ func Test_cscopeWithCscopeConnections()
     call assert_fails('cs find', 'E560:')
     call assert_fails('cs find x', 'E560:')
 
-    if has('float')
-      " Test: Find places where this symbol is assigned a value
-      " this needs a cscope >= 15.8
-      " unfortunately, Travis has cscope version 15.7
-      let cscope_version = systemlist('cscope --version')[0]
-      let cs_version = str2float(matchstr(cscope_version, '\d\+\(\.\d\+\)\?'))
-      if cs_version >= 15.8
-        for cmd in ['cs find a item', 'cs find 9 item']
-          let a = execute(cmd)
-          call assert_equal(['', '(1 of 4): <<test_mf_hash>> item = LALLOC_CLEAR_ONE(mf_hashitem_T);'], split(a, '\n', 1))
-          call assert_equal('	item = LALLOC_CLEAR_ONE(mf_hashitem_T);', getline('.'))
-          cnext
-          call assert_equal('	item = mf_hash_find(&ht, key);', getline('.'))
-          cnext
-          call assert_equal('	    item = mf_hash_find(&ht, key);', getline('.'))
-          cnext
-          call assert_equal('	item = mf_hash_find(&ht, key);', getline('.'))
-        endfor
-      endif
+    " Test: Find places where this symbol is assigned a value
+    " this needs a cscope >= 15.8
+    " unfortunately, Travis has cscope version 15.7
+    let cscope_version = systemlist('cscope --version')[0]
+    let cs_version = str2float(matchstr(cscope_version, '\d\+\(\.\d\+\)\?'))
+    if cs_version >= 15.8
+      for cmd in ['cs find a item', 'cs find 9 item']
+        let a = execute(cmd)
+        call assert_equal(['', '(1 of 4): <<test_mf_hash>> item = LALLOC_CLEAR_ONE(mf_hashitem_T);'], split(a, '\n', 1))
+        call assert_equal('	item = LALLOC_CLEAR_ONE(mf_hashitem_T);', getline('.'))
+        cnext
+        call assert_equal('	item = mf_hash_find(&ht, key);', getline('.'))
+        cnext
+        call assert_equal('	    item = mf_hash_find(&ht, key);', getline('.'))
+        cnext
+        call assert_equal('	item = mf_hash_find(&ht, key);', getline('.'))
+      endfor
     endif
 
     " Test: leading whitespace is not removed for cscope find text
@@ -222,7 +220,7 @@ func Test_cscopeWithCscopeConnections()
 
     " Test: this should trigger call to cs_print_tags()
     " Unclear how to check result though, we just exercise the code.
-    set cst cscopequickfix=s0
+    set cscopetag cscopequickfix=s0
     call feedkeys(":cs find s main\<CR>", 't')
 
     " Test: cscope kill
@@ -243,7 +241,7 @@ func Test_cscopeWithCscopeConnections()
     let a = execute('cscope kill -1')
     call assert_equal('', a)
 
-    " Test: 'csprg' option
+    " Test: 'csprg' option invalid command
     call assert_equal('cscope', &csprg)
     set csprg=doesnotexist
     call assert_fails('cscope add Xcscope2.out', 'E609:')
@@ -291,13 +289,31 @@ func Test_cscopeWithCscopeConnections()
 
     call assert_equal(cscope_connection(5, 'out'), 0)
     call assert_equal(cscope_connection(-1, 'out'), 0)
+    cscope kill -1
+
+    " Test: cscope file with shell meta chars
+    call writefile([], 'Xcscope2.out`id>Xid`', 'D')
+    call assert_fails('cscope add Xcscope2.out`id>Xid`', 'E609:')
+    call assert_false(filereadable('Xid'))
+    cscope kill -1
 
     call CscopeSetupOrClean(0)
+    set cscopetag&
+endfunc
+
+" Test that the list of matches shows the text after a Tab
+func Test_cscope_list_with_tab()
+  call CscopeSetupOrClean(1)
+  set cscopequickfix=
+  let a = execute('cs find t num_buckets')
+  call assert_match('\n\s\+long_u\^I   num_buckets;\n', a)
+  call assert_match('\n\s\+num_buckets = ht.mht_mask + 1;\n', a)
+  call CscopeSetupOrClean(0)
 endfunc
 
 " Test ":cs add {dir}"  (add the {dir}/cscope.out database)
 func Test_cscope_add_dir()
-  call mkdir('Xcscopedir', 'p')
+  call mkdir('Xcscopedir', 'pD')
 
   " Cscope doesn't handle symlinks, so this needs to be resolved in case a
   " shadow directory is being used.
@@ -315,8 +331,6 @@ func Test_cscope_add_dir()
   cs kill -1
   call delete('Xcscopedir/cscope.out')
   call assert_fails('cs add Xcscopedir', 'E563:')
-
-  call delete('Xcscopedir', 'd')
 endfunc
 
 func Test_cscopequickfix()
@@ -327,6 +341,7 @@ func Test_cscopequickfix()
   call assert_fails('set cscopequickfix=s', 'E474:')
   call assert_fails('set cscopequickfix=s7', 'E474:')
   call assert_fails('set cscopequickfix=s-a', 'E474:')
+  set cscopequickfix&
 endfunc
 
 func Test_withoutCscopeConnection()

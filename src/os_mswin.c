@@ -16,110 +16,19 @@
 #include "vim.h"
 
 #include <sys/types.h>
-#include <signal.h>
 #include <limits.h>
-#ifndef PROTO
-# include <process.h>
+
+#include <process.h>
+#include <direct.h>
+
+#if !defined(FEAT_GUI_MSWIN)
+# include <shellapi.h>
 #endif
 
-#undef chdir
-#ifdef __GNUC__
-# ifndef __MINGW32__
-#  include <dirent.h>
-# endif
-#else
-# include <direct.h>
-#endif
-
-#ifndef PROTO
-# if defined(FEAT_TITLE) && !defined(FEAT_GUI_MSWIN)
-#  include <shellapi.h>
-# endif
-
-# if defined(FEAT_PRINTER) && !defined(FEAT_POSTSCRIPT)
-#  include <dlgs.h>
-#  include <winspool.h>
-#  include <commdlg.h>
-# endif
-
-#endif // PROTO
-
-#ifdef __MINGW32__
-# ifndef FROM_LEFT_1ST_BUTTON_PRESSED
-#  define FROM_LEFT_1ST_BUTTON_PRESSED    0x0001
-# endif
-# ifndef RIGHTMOST_BUTTON_PRESSED
-#  define RIGHTMOST_BUTTON_PRESSED	  0x0002
-# endif
-# ifndef FROM_LEFT_2ND_BUTTON_PRESSED
-#  define FROM_LEFT_2ND_BUTTON_PRESSED    0x0004
-# endif
-# ifndef FROM_LEFT_3RD_BUTTON_PRESSED
-#  define FROM_LEFT_3RD_BUTTON_PRESSED    0x0008
-# endif
-# ifndef FROM_LEFT_4TH_BUTTON_PRESSED
-#  define FROM_LEFT_4TH_BUTTON_PRESSED    0x0010
-# endif
-
-/*
- * EventFlags
- */
-# ifndef MOUSE_MOVED
-#  define MOUSE_MOVED   0x0001
-# endif
-# ifndef DOUBLE_CLICK
-#  define DOUBLE_CLICK  0x0002
-# endif
-#endif
-
-/*
- * When generating prototypes for Win32 on Unix, these lines make the syntax
- * errors disappear.  They do not need to be correct.
- */
-#ifdef PROTO
-# define WINAPI
-# define WINBASEAPI
-typedef int BOOL;
-typedef int CALLBACK;
-typedef int COLORREF;
-typedef int CONSOLE_CURSOR_INFO;
-typedef int COORD;
-typedef int DWORD;
-typedef int ENUMLOGFONTW;
-typedef int HANDLE;
-typedef int HDC;
-typedef int HFONT;
-typedef int HICON;
-typedef int HWND;
-typedef int INPUT_RECORD;
-typedef int KEY_EVENT_RECORD;
-typedef int LOGFONTW;
-typedef int LPARAM;
-typedef int LPBOOL;
-typedef int LPCSTR;
-typedef int LPCWSTR;
-typedef int LPDWORD;
-typedef int LPSTR;
-typedef int LPTSTR;
-typedef int LPVOID;
-typedef int LPWSTR;
-typedef int LRESULT;
-typedef int MOUSE_EVENT_RECORD;
-typedef int NEWTEXTMETRICW;
-typedef int PACL;
-typedef int PRINTDLGW;
-typedef int PSECURITY_DESCRIPTOR;
-typedef int PSID;
-typedef int SECURITY_INFORMATION;
-typedef int SHORT;
-typedef int SMALL_RECT;
-typedef int TEXTMETRIC;
-typedef int UINT;
-typedef int WCHAR;
-typedef int WNDENUMPROC;
-typedef int WORD;
-typedef int WPARAM;
-typedef void VOID;
+#if defined(FEAT_PRINTER) && !defined(FEAT_POSTSCRIPT)
+# include <dlgs.h>
+# include <winspool.h>
+# include <commdlg.h>
 #endif
 
 // Record all output and all keyboard & mouse input
@@ -143,39 +52,7 @@ static HWND s_hwnd = 0;	    // console window handle, set by GetConsoleHwnd()
 int WSInitialized = FALSE; // WinSock is initialized
 #endif
 
-// Don't generate prototypes here, because some systems do have these
-// functions.
-#if defined(__GNUC__) && !defined(PROTO)
-# ifndef __MINGW32__
-int _stricoll(char *a, char *b)
-{
-    // the ANSI-ish correct way is to use strxfrm():
-    char a_buff[512], b_buff[512];  // file names, so this is enough on Win32
-    strxfrm(a_buff, a, 512);
-    strxfrm(b_buff, b, 512);
-    return strcoll(a_buff, b_buff);
-}
 
-char * _fullpath(char *buf, char *fname, int len)
-{
-    LPTSTR toss;
-
-    return (char *)GetFullPathName(fname, len, buf, &toss);
-}
-# endif
-
-# if !defined(__MINGW32__) || (__GNUC__ < 4)
-int _chdrive(int drive)
-{
-    char temp [3] = "-:";
-    temp[0] = drive + 'A' - 1;
-    return !SetCurrentDirectory(temp);
-}
-# endif
-#endif
-
-
-#ifndef PROTO
 /*
  * Save the instance handle of the exe/dll.
  */
@@ -184,9 +61,8 @@ SaveInst(HINSTANCE hInst)
 {
     g_hinst = hInst;
 }
-#endif
 
-#if defined(FEAT_GUI_MSWIN) || defined(PROTO)
+#if defined(FEAT_GUI_MSWIN)
 /*
  * GUI version of mch_exit().
  * Shut down and exit with status `r'
@@ -229,12 +105,42 @@ mch_exit_g(int r)
 
 
 /*
+ * Get version number including build number
+ */
+typedef BOOL (WINAPI *PfnRtlGetVersion)(LPOSVERSIONINFOW);
+DWORD win_version;
+    static void
+win_version_init(void)
+{
+    OSVERSIONINFOW	osver;
+    HMODULE		hNtdll;
+    PfnRtlGetVersion	pRtlGetVersion;
+
+    hNtdll = GetModuleHandle("ntdll.dll");
+    if (hNtdll == NULL)
+	return;
+
+    pRtlGetVersion =
+	(PfnRtlGetVersion) GetProcAddress(hNtdll, "RtlGetVersion");
+    if (pRtlGetVersion == NULL)
+	return;
+
+    osver.dwOSVersionInfoSize = sizeof(OSVERSIONINFOW);
+    pRtlGetVersion(&osver);
+    win_version = MAKE_VER(min(osver.dwMajorVersion, 0xFF),
+	    min(osver.dwMinorVersion, 0xFF),
+	    min(osver.dwBuildNumber, 0xFFFF));
+}
+
+/*
  * Init the tables for toupper() and tolower().
  */
     void
 mch_early_init(void)
 {
     int		i;
+
+    win_version_init();
 
     PlatformId();
 
@@ -265,7 +171,6 @@ mch_input_isatty(void)
 #endif
 }
 
-#ifdef FEAT_TITLE
 /*
  * mch_settitle(): set titlebar of our window
  */
@@ -274,16 +179,16 @@ mch_settitle(
     char_u *title,
     char_u *icon UNUSED)
 {
-# ifdef FEAT_GUI_MSWIN
-#  ifdef VIMDLL
+#ifdef FEAT_GUI_MSWIN
+# ifdef VIMDLL
     if (gui.in_use)
-#  endif
+# endif
     {
 	gui_mch_settitle(title, icon);
 	return;
     }
-# endif
-# if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
+#endif
+#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
     if (title != NULL)
     {
 	WCHAR	*wp = enc_to_utf16(title, NULL);
@@ -295,7 +200,7 @@ mch_settitle(
 	vim_free(wp);
 	return;
     }
-# endif
+#endif
 }
 
 
@@ -309,12 +214,12 @@ mch_settitle(
     void
 mch_restore_title(int which UNUSED)
 {
-# if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
-#  ifdef VIMDLL
+#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
+# ifdef VIMDLL
     if (!gui.in_use)
-#  endif
-	SetConsoleTitle(g_szOrigTitle);
 # endif
+	SetConsoleTitle(g_szOrigTitle);
+#endif
 }
 
 
@@ -336,7 +241,6 @@ mch_can_restore_icon(void)
 {
     return FALSE;
 }
-#endif // FEAT_TITLE
 
 
 /*
@@ -388,12 +292,15 @@ mch_FullName(
 mch_isFullName(char_u *fname)
 {
     // A name like "d:/foo" and "//server/share" is absolute.  "d:foo" is not.
+    // /foo and \foo are absolute too because Windows keeps a current drive.
     // Another way to check is to use mch_FullName() and see if the result is
     // the same as the name or mch_FullName() fails.  However, this has quite a
     // bit of overhead, so let's not do that.
+    if (*fname == NUL)
+	return FALSE;
     return ((ASCII_ISALPHA(fname[0]) && fname[1] == ':'
 				      && (fname[2] == '/' || fname[2] == '\\'))
-	    || (fname[0] == fname[1] && (fname[0] == '/' || fname[0] == '\\')));
+	    || (fname[0] == '/' || fname[0] == '\\'));
 }
 
 /*
@@ -429,42 +336,145 @@ slash_adjust(char_u *p)
     }
 }
 
-// Use 64-bit stat functions if available.
-#ifdef HAVE_STAT64
-# undef stat
-# undef _stat
-# undef _wstat
-# undef _fstat
-# define stat _stat64
-# define _stat _stat64
-# define _wstat _wstat64
-# define _fstat _fstat64
-#endif
-
-#if (defined(_MSC_VER) && (_MSC_VER >= 1300)) || defined(__MINGW32__)
-# define OPEN_OH_ARGTYPE intptr_t
-#else
-# define OPEN_OH_ARGTYPE long
-#endif
-
     static int
-wstat_symlink_aware(const WCHAR *name, stat_T *stp)
+read_reparse_point(const WCHAR *name, char_u *buf, DWORD *buf_len)
 {
-#if (defined(_MSC_VER) && (_MSC_VER < 1900)) || defined(__MINGW32__)
-    // Work around for VC12 or earlier (and MinGW). _wstat() can't handle
-    // symlinks properly.
-    // VC9 or earlier: _wstat() doesn't support a symlink at all. It retrieves
-    // status of a symlink itself.
-    // VC10: _wstat() supports a symlink to a normal file, but it doesn't
-    // support a symlink to a directory (always returns an error).
-    // VC11 and VC12: _wstat() doesn't return an error for a symlink to a
-    // directory, but it doesn't set S_IFDIR flag.
-    // MinGW: Same as VC9.
+    HANDLE h;
+    BOOL ok;
+
+    h = CreateFileW(name, FILE_READ_ATTRIBUTES,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+	    OPEN_EXISTING,
+	    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+	    NULL);
+    if (h == INVALID_HANDLE_VALUE)
+	return FAIL;
+
+    ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, buf, *buf_len,
+	    buf_len, NULL);
+    CloseHandle(h);
+
+    return ok ? OK : FAIL;
+}
+
+    char_u *
+resolve_appexeclink(char_u *fname)
+{
+    DWORD		attr = 0;
+    int			idx;
+    WCHAR		*p, *end, *wname;
+    // The buffer size is arbitrarily chosen to be "big enough" (TM), the
+    // ceiling should be around 16k.
+    char_u		buf[4096];
+    DWORD		buf_len = sizeof(buf);
+    REPARSE_DATA_BUFFER *rb = (REPARSE_DATA_BUFFER *)buf;
+
+    wname = enc_to_utf16(fname, NULL);
+    if (wname == NULL)
+	return NULL;
+
+    attr = GetFileAttributesW(wname);
+    if (attr == INVALID_FILE_ATTRIBUTES ||
+	    (attr & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+    {
+	vim_free(wname);
+	return NULL;
+    }
+
+    // The applinks are similar to symlinks but with a huge difference: they can
+    // only be executed, any other I/O operation on them is bound to fail with
+    // ERROR_FILE_NOT_FOUND even though the file exists.
+    if (read_reparse_point(wname, buf, &buf_len) == FAIL)
+    {
+	vim_free(wname);
+	return NULL;
+    }
+    vim_free(wname);
+
+    if (rb->ReparseTag != IO_REPARSE_TAG_APPEXECLINK)
+	return NULL;
+
+    // The (undocumented) reparse buffer contains a set of N null-terminated
+    // Unicode strings, the application path is stored in the third one.
+    if (rb->AppExecLinkReparseBuffer.StringCount < 3)
+	return NULL;
+
+    p = rb->AppExecLinkReparseBuffer.StringList;
+    end = p + rb->ReparseDataLength / sizeof(WCHAR);
+    for (idx = 0; p < end
+	    && idx < (int)rb->AppExecLinkReparseBuffer.StringCount
+	    && idx != 2; )
+    {
+	if (*p++ == L'\0')
+	    ++idx;
+    }
+
+    return utf16_to_enc(p, NULL);
+}
+
+// Use 64-bit stat functions.
+#undef stat
+#undef _stat
+#undef _wstat
+#undef _fstat
+#define stat _stat64
+#define _stat _stat64
+#define _wstat _wstat64
+#define _fstat _fstat64
+
+/*
+ * Implements lstat() and stat() that can handle symlinks properly.
+ */
+    static int
+mswin_stat_impl(const WCHAR *name, stat_T *stp, const int resolve)
+{
     int			n;
+    int			fd;
     BOOL		is_symlink = FALSE;
     HANDLE		hFind, h;
     DWORD		attr = 0;
-    WIN32_FIND_DATAW	findDataW;
+    DWORD		flag = 0;
+    WIN32_FIND_DATAW    findDataW;
+
+#if 0 && defined(_UCRT)
+    // This code was disabled because the behavior of MSVC's _wstat (actually
+    // _wstat64) for empty symlinks varies depending on the C runtime you link
+    // to.
+    //
+    // The expected behavior here is for _wstat() to fail for empty symlinks.
+    // The expected behavior occurs when linking to a static runtime.  However,
+    // the expected behavior does not occur when linking to a dynamic runtime,
+    // and it succeeds for empty symlinks.  This causes Test_glob_symlinks in
+    // test_functions.vim to fail when linking to a dynamic runtime.
+    //
+    // For more details, see:
+    // https://github.com/koron/vc-stat-behavior-verification
+    if (resolve)
+	// Universal CRT can handle symlinks properly.
+	return _wstat(name, stp);
+#endif
+
+    // Only reparse points need a directory query to identify symbolic links.
+    // In particular, avoid enumerating the directory for each missing file
+    // while searching 'runtimepath'.
+    attr = GetFileAttributesW(name);
+    if (attr == INVALID_FILE_ATTRIBUTES)
+    {
+	DWORD error = GetLastError();
+
+	// A missing file or path cannot provide stat information.  Other
+	// errors and UNC paths still need the CRT fallback.
+	if ((error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+		&& !((name[0] == L'\\' || name[0] == L'/')
+		    && (name[1] == L'\\' || name[1] == L'/')))
+	{
+	    errno = ENOENT;
+	    return -1;
+	}
+	return _wstat(name, stp);
+    }
+    if (!(attr & FILE_ATTRIBUTE_REPARSE_POINT))
+	return _wstat(name, stp);
 
     hFind = FindFirstFileW(name, &findDataW);
     if (hFind != INVALID_HANDLE_VALUE)
@@ -475,52 +485,59 @@ wstat_symlink_aware(const WCHAR *name, stat_T *stp)
 	    is_symlink = TRUE;
 	FindClose(hFind);
     }
-    if (is_symlink)
-    {
-	h = CreateFileW(name, FILE_READ_ATTRIBUTES,
-		FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
-		OPEN_EXISTING,
-		(attr & FILE_ATTRIBUTE_DIRECTORY)
-					    ? FILE_FLAG_BACKUP_SEMANTICS : 0,
-		NULL);
-	if (h != INVALID_HANDLE_VALUE)
-	{
-	    int	    fd;
 
-	    fd = _open_osfhandle((OPEN_OH_ARGTYPE)h, _O_RDONLY);
-	    n = _fstat(fd, (struct _stat *)stp);
-	    if ((n == 0) && (attr & FILE_ATTRIBUTE_DIRECTORY))
-		stp->st_mode = (stp->st_mode & ~S_IFREG) | S_IFDIR;
-	    _close(fd);
-	    return n;
-	}
-    }
-#endif
-    return _wstat(name, (struct _stat *)stp);
+    // Use the plain old stat() whenever it's possible.
+    if (!is_symlink)
+	return _wstat(name, stp);
+
+    if (!resolve && is_symlink)
+	flag = FILE_FLAG_OPEN_REPARSE_POINT;
+    if (attr & FILE_ATTRIBUTE_DIRECTORY)
+	flag |= FILE_FLAG_BACKUP_SEMANTICS;
+
+    h = CreateFileW(name, FILE_READ_ATTRIBUTES,
+	    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, flag,
+	    NULL);
+    if (h == INVALID_HANDLE_VALUE)
+	return -1;
+
+    fd = _open_osfhandle((intptr_t)h, _O_RDONLY);
+    n = _fstat(fd, (struct _stat *)stp);
+    if ((n == 0) && (attr & FILE_ATTRIBUTE_DIRECTORY))
+	stp->st_mode = (stp->st_mode & ~S_IFMT) | S_IFDIR;
+    _close(fd);
+
+    return n;
 }
 
 /*
  * stat() can't handle a trailing '/' or '\', remove it first.
+ * When 'resolve' is true behave as lstat() wrt symlinks.
  */
-    int
-vim_stat(const char *name, stat_T *stp)
+    static int
+stat_impl(const char *name, stat_T *stp, const int resolve)
 {
     // WinNT and later can use _MAX_PATH wide characters for a pathname, which
     // means that the maximum pathname is _MAX_PATH * 3 bytes when 'enc' is
     // UTF-8.
     char_u	buf[_MAX_PATH * 3 + 1];
+    size_t	buflen;
     char_u	*p;
     WCHAR	*wp;
     int		n;
 
     vim_strncpy((char_u *)buf, (char_u *)name, sizeof(buf) - 1);
-    p = buf + STRLEN(buf);
+    buflen = STRLEN(buf);
+    p = buf + buflen;
     if (p > buf)
 	MB_PTR_BACK(buf, p);
 
     // Remove trailing '\\' except root path.
     if (p > buf && (*p == '\\' || *p == '/') && p[-1] != ':')
+    {
 	*p = NUL;
+	buflen = (size_t)(p - buf);
+    }
 
     if ((buf[0] == '\\' && buf[1] == '\\') || (buf[0] == '/' && buf[1] == '/'))
     {
@@ -530,7 +547,7 @@ vim_stat(const char *name, stat_T *stp)
 	{
 	    p = vim_strpbrk(p + 1, (char_u *)"\\/");
 	    if (p == NULL)
-		STRCAT(buf, "\\");
+		STRCPY(buf + buflen, "\\");
 	}
     }
 
@@ -538,12 +555,24 @@ vim_stat(const char *name, stat_T *stp)
     if (wp == NULL)
 	return -1;
 
-    n = wstat_symlink_aware(wp, stp);
+    n = mswin_stat_impl(wp, stp, resolve);
     vim_free(wp);
     return n;
 }
 
-#if (defined(FEAT_GUI_MSWIN) && !defined(VIMDLL)) || defined(PROTO)
+    int
+vim_lstat(const char *name, stat_T *stp)
+{
+    return stat_impl(name, stp, FALSE);
+}
+
+    int
+vim_stat(const char *name, stat_T *stp)
+{
+    return stat_impl(name, stp, TRUE);
+}
+
+#if defined(FEAT_GUI_MSWIN) && !defined(VIMDLL)
     void
 mch_settmode(tmode_T tmode UNUSED)
 {
@@ -572,6 +601,12 @@ mch_new_shellsize(void)
     // never used
 }
 
+    void
+mch_calc_cell_size(struct cellsize *cs_out UNUSED)
+{
+    // never used
+}
+
 #endif
 
 /*
@@ -583,7 +618,7 @@ mch_suspend(void)
     suspend_shell();
 }
 
-#if defined(USE_MCH_ERRMSG) || defined(PROTO)
+#if defined(USE_MCH_ERRMSG)
 
 # ifdef display_errors
 #  undef display_errors
@@ -596,7 +631,7 @@ mch_suspend(void)
 display_errors(void)
 {
 # ifdef FEAT_GUI
-    char *p;
+    char_u *p;
 
 #  ifdef VIMDLL
     if (gui.in_use || gui.starting)
@@ -605,15 +640,18 @@ display_errors(void)
 	if (error_ga.ga_data != NULL)
 	{
 	    // avoid putting up a message box with blanks only
-	    for (p = (char *)error_ga.ga_data; *p; ++p)
-		if (!isspace(*p))
+	    for (p = (char_u *)error_ga.ga_data; *p; ++p)
+		if (!SAFE_isspace(*p))
 		{
-		    (void)gui_mch_dialog(
+		    // Only use a dialog when not using --gui-dialog-file:
+		    // write text to a file.
+		    if (!gui_dialog_log((char_u *)"Errors", p))
+			(void)gui_mch_dialog(
 				     gui.starting ? VIM_INFO :
 					     VIM_ERROR,
 				     gui.starting ? (char_u *)_("Message") :
 					     (char_u *)_("Error"),
-				     (char_u *)p, (char_u *)_("&Ok"),
+					     p, (char_u *)_("&Ok"),
 					1, NULL, FALSE);
 		    break;
 		}
@@ -654,13 +692,7 @@ mch_has_wildcard(char_u *p)
 {
     for ( ; *p; MB_PTR_ADV(p))
     {
-	if (vim_strchr((char_u *)
-#ifdef VIM_BACKTICK
-				    "?*$[`"
-#else
-				    "?*$["
-#endif
-						, *p) != NULL
+	if (vim_strchr((char_u *)"?*$[`", *p) != NULL
 		|| (*p == '~' && p[1] != NUL))
 	    return TRUE;
     }
@@ -687,7 +719,7 @@ mch_chdir(char *path)
 	smsg("chdir(%s)", path);
 	verbose_leave();
     }
-    if (isalpha(path[0]) && path[1] == ':')	// has a drive name
+    if (SAFE_isalpha(path[0]) && path[1] == ':')	// has a drive name
     {
 	// If we can change to the drive, skip that part of the path.  If we
 	// can't then the current directory may be invalid, try using chdir()
@@ -720,7 +752,7 @@ mch_char_avail(void)
     return TRUE;
 }
 
-# if defined(FEAT_TERMINAL) || defined(PROTO)
+# if defined(FEAT_TERMINAL)
 /*
  * Check for any pending input or messages.
  */
@@ -734,15 +766,15 @@ mch_check_messages(void)
 #endif
 
 
-#if defined(FEAT_LIBCALL) || defined(PROTO)
+#if defined(FEAT_LIBCALL)
 /*
  * Call a DLL routine which takes either a string or int param
  * and returns an allocated string.
  * Return OK if it worked, FAIL if not.
  */
-typedef LPTSTR (*MYSTRPROCSTR)(LPTSTR);
-typedef LPTSTR (*MYINTPROCSTR)(int);
-typedef int (*MYSTRPROCINT)(LPTSTR);
+typedef char_u *(*MYSTRPROCSTR)(char_u *);
+typedef int (*MYSTRPROCINT)(char_u *);
+typedef char_u *(*MYINTPROCSTR)(int);
 typedef int (*MYINTPROCINT)(int);
 
 /*
@@ -763,24 +795,24 @@ check_str_len(char_u *str)
     GetSystemInfo(&si);
 
     // get memory information
-    if (VirtualQuery(str, &mbi, sizeof(mbi)))
-    {
-	// pre cast these (typing savers)
-	long_u dwStr = (long_u)str;
-	long_u dwBaseAddress = (long_u)mbi.BaseAddress;
+    if (!VirtualQuery(str, &mbi, sizeof(mbi)))
+	return 0;
 
-	// get start address of page that str is on
-	long_u strPage = dwStr - (dwStr - dwBaseAddress) % si.dwPageSize;
+    // pre cast these (typing savers)
+    long_u dwStr = (long_u)str;
+    long_u dwBaseAddress = (long_u)mbi.BaseAddress;
 
-	// get length from str to end of page
-	long_u pageLength = si.dwPageSize - (dwStr - strPage);
+    // get start address of page that str is on
+    long_u strPage = dwStr - (dwStr - dwBaseAddress) % si.dwPageSize;
 
-	for (p = str; !IsBadReadPtr(p, (UINT)pageLength);
-				  p += pageLength, pageLength = si.dwPageSize)
-	    for (i = 0; i < pageLength; ++i, ++length)
-		if (p[i] == NUL)
-		    return length + 1;
-    }
+    // get length from str to end of page
+    long_u pageLength = si.dwPageSize - (dwStr - strPage);
+
+    for (p = str; !IsBadReadPtr(p, (UINT)pageLength);
+	    p += pageLength, pageLength = si.dwPageSize)
+	for (i = 0; i < pageLength; ++i, ++length)
+	    if (p[i] == NUL)
+		return length + 1;
 
     return 0;
 }
@@ -811,6 +843,40 @@ mch_icon_load(HANDLE *iconp)
 						  0, mch_icon_load_cb, iconp);
 }
 
+/*
+ * Fill the buffer 'buf' with 'len' random bytes.
+ * Returns FAIL if the OS PRNG is not available or something went wrong.
+ */
+    int
+mch_get_random(char_u *buf, int len)
+{
+    static int		initialized = NOTDONE;
+    static HINSTANCE	hInstLib;
+    static BOOL (WINAPI *pProcessPrng)(PUCHAR, ULONG);
+
+    if (initialized == NOTDONE)
+    {
+	hInstLib = vimLoadLib("bcryptprimitives.dll");
+	if (hInstLib != NULL)
+	    pProcessPrng = (void *)GetProcAddress(hInstLib, "ProcessPrng");
+	if (hInstLib == NULL || pProcessPrng == NULL)
+	{
+	    FreeLibrary(hInstLib);
+	    initialized = FAIL;
+	}
+	else
+	    initialized = OK;
+    }
+
+    if (initialized == FAIL)
+	return FAIL;
+
+    // According to the documentation this call cannot fail.
+    pProcessPrng(buf, len);
+
+    return OK;
+}
+
     int
 mch_libcall(
     char_u	*libname,
@@ -821,11 +887,6 @@ mch_libcall(
     int		*number_result)
 {
     HINSTANCE		hinstLib;
-    MYSTRPROCSTR	ProcAdd;
-    MYINTPROCSTR	ProcAddI;
-    char_u		*retval_str = NULL;
-    int			retval_int = 0;
-    size_t		len;
 
     BOOL fRunTimeLinkSuccess = FALSE;
 
@@ -835,6 +896,10 @@ mch_libcall(
     // If the handle is valid, try to get the function address.
     if (hinstLib != NULL)
     {
+	char_u	*retval_str = NULL;
+	int	retval_int = 0;
+	size_t	len;
+
 # ifdef HAVE_TRY_EXCEPT
 	__try
 	{
@@ -842,25 +907,53 @@ mch_libcall(
 	if (argstring != NULL)
 	{
 	    // Call with string argument
-	    ProcAdd = (MYSTRPROCSTR)GetProcAddress(hinstLib, (LPCSTR)funcname);
-	    if ((fRunTimeLinkSuccess = (ProcAdd != NULL)) != 0)
+	    if (string_result != NULL)
 	    {
-		if (string_result == NULL)
-		    retval_int = ((MYSTRPROCINT)ProcAdd)((LPSTR)argstring);
-		else
-		    retval_str = (char_u *)(ProcAdd)((LPSTR)argstring);
+		MYSTRPROCSTR proc;
+
+		proc = (MYSTRPROCSTR)GetProcAddress(hinstLib, (LPCSTR)funcname);
+		if (proc != NULL)
+		{
+		    fRunTimeLinkSuccess = TRUE;
+		    retval_str = proc(argstring);
+		}
+	    }
+	    else
+	    {
+		MYSTRPROCINT proc;
+
+		proc = (MYSTRPROCINT)GetProcAddress(hinstLib, (LPCSTR)funcname);
+		if (proc != NULL)
+		{
+		    fRunTimeLinkSuccess = TRUE;
+		    retval_int = proc(argstring);
+		}
 	    }
 	}
 	else
 	{
 	    // Call with number argument
-	    ProcAddI = (MYINTPROCSTR) GetProcAddress(hinstLib, (LPCSTR)funcname);
-	    if ((fRunTimeLinkSuccess = (ProcAddI != NULL)) != 0)
+	    if (string_result != NULL)
 	    {
-		if (string_result == NULL)
-		    retval_int = ((MYINTPROCINT)ProcAddI)(argint);
-		else
-		    retval_str = (char_u *)(ProcAddI)(argint);
+		MYINTPROCSTR proc;
+
+		proc = (MYINTPROCSTR)GetProcAddress(hinstLib, (LPCSTR)funcname);
+		if (proc != NULL)
+		{
+		    fRunTimeLinkSuccess = TRUE;
+		    retval_str = proc(argint);
+		}
+	    }
+	    else
+	    {
+		MYINTPROCINT proc;
+
+		proc = (MYINTPROCINT)GetProcAddress(hinstLib, (LPCSTR)funcname);
+		if (proc != NULL)
+		{
+		    fRunTimeLinkSuccess = TRUE;
+		    retval_int = proc(argint);
+		}
 	    }
 	}
 
@@ -881,8 +974,8 @@ mch_libcall(
 	__except(EXCEPTION_EXECUTE_HANDLER)
 	{
 	    if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW)
-		RESETSTKOFLW();
-	    fRunTimeLinkSuccess = 0;
+		_resetstkoflw();
+	    fRunTimeLinkSuccess = FALSE;
 	}
 # endif
 
@@ -892,7 +985,7 @@ mch_libcall(
 
     if (!fRunTimeLinkSuccess)
     {
-	semsg(_(e_libcall), funcname);
+	semsg(_(e_library_call_failed_for_str), funcname);
 	return FAIL;
     }
 
@@ -936,10 +1029,8 @@ Trace(
 
 #endif //_DEBUG
 
-#if !defined(FEAT_GUI) || defined(VIMDLL) || defined(PROTO)
-# ifdef FEAT_TITLE
+#if !defined(FEAT_GUI) || defined(VIMDLL)
 extern HWND g_hWnd;	// This is in os_win32.c.
-# endif
 
 /*
  * Showing the printer dialog is tricky since we have no GUI
@@ -953,14 +1044,12 @@ GetConsoleHwnd(void)
     if (s_hwnd != 0)
 	return;
 
-# ifdef FEAT_TITLE
     // Window handle may have been found by init code (Windows NT only)
     if (g_hWnd != 0)
     {
 	s_hwnd = g_hWnd;
 	return;
     }
-# endif
 
     s_hwnd = GetConsoleWindow();
 }
@@ -992,7 +1081,7 @@ mch_set_winpos(int x, int y)
 }
 #endif
 
-#if (defined(FEAT_PRINTER) && !defined(FEAT_POSTSCRIPT)) || defined(PROTO)
+#if defined(FEAT_PRINTER) && !defined(FEAT_POSTSCRIPT)
 
 //=================================================================
 // Win32 printer stuff
@@ -1047,14 +1136,7 @@ swap_me(COLORREF colorref)
     return colorref;
 }
 
-// Attempt to make this work for old and new compilers
-# if !defined(_WIN64) && (!defined(_MSC_VER) || _MSC_VER < 1300)
-#  define PDP_RETVAL BOOL
-# else
-#  define PDP_RETVAL INT_PTR
-# endif
-
-    static PDP_RETVAL CALLBACK
+    static INT_PTR CALLBACK
 PrintDlgProc(
 	HWND hDlg,
 	UINT message,
@@ -1127,18 +1209,16 @@ AbortProc(HDC hdcPrn UNUSED, int iCode UNUSED)
 {
     MSG msg;
 
-    while (!*bUserAbort && pPeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+    while (!*bUserAbort && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
     {
-	if (!hDlgPrint || !pIsDialogMessage(hDlgPrint, &msg))
+	if (!hDlgPrint || !IsDialogMessageW(hDlgPrint, &msg))
 	{
 	    TranslateMessage(&msg);
-	    pDispatchMessage(&msg);
+	    DispatchMessageW(&msg);
 	}
     }
     return !*bUserAbort;
 }
-
-# if !defined(FEAT_GUI) || defined(VIMDLL)
 
     static UINT_PTR CALLBACK
 PrintHookProc(
@@ -1152,47 +1232,46 @@ PrintHookProc(
     RECT	rc, rcDlg, rcOwner;
     PRINTDLGW	*pPD;
 
-    if (uiMsg == WM_INITDIALOG)
-    {
-	// Get the owner window and dialog box rectangles.
-	if ((hwndOwner = GetParent(hDlg)) == NULL)
-	    hwndOwner = GetDesktopWindow();
+    if (uiMsg != WM_INITDIALOG)
+	return FALSE;
 
-	GetWindowRect(hwndOwner, &rcOwner);
-	GetWindowRect(hDlg, &rcDlg);
-	CopyRect(&rc, &rcOwner);
+    // Get the owner window and dialog box rectangles.
+    if ((hwndOwner = GetParent(hDlg)) == NULL)
+	hwndOwner = GetDesktopWindow();
 
-	// Offset the owner and dialog box rectangles so that
-	// right and bottom values represent the width and
-	// height, and then offset the owner again to discard
-	// space taken up by the dialog box.
+    GetWindowRect(hwndOwner, &rcOwner);
+    GetWindowRect(hDlg, &rcDlg);
+    CopyRect(&rc, &rcOwner);
 
-	OffsetRect(&rcDlg, -rcDlg.left, -rcDlg.top);
-	OffsetRect(&rc, -rc.left, -rc.top);
-	OffsetRect(&rc, -rcDlg.right, -rcDlg.bottom);
+    // Offset the owner and dialog box rectangles so that
+    // right and bottom values represent the width and
+    // height, and then offset the owner again to discard
+    // space taken up by the dialog box.
 
-	// The new position is the sum of half the remaining
-	// space and the owner's original position.
+    OffsetRect(&rcDlg, -rcDlg.left, -rcDlg.top);
+    OffsetRect(&rc, -rc.left, -rc.top);
+    OffsetRect(&rc, -rcDlg.right, -rcDlg.bottom);
 
-	SetWindowPos(hDlg,
-		HWND_TOP,
-		rcOwner.left + (rc.right / 2),
-		rcOwner.top + (rc.bottom / 2),
-		0, 0,		// ignores size arguments
-		SWP_NOSIZE);
+    // The new position is the sum of half the remaining
+    // space and the owner's original position.
 
-	//  tackle the printdlg copiesctrl problem
-	pPD = (PRINTDLGW *)lParam;
-	pPD->nCopies = (WORD)pPD->lCustData;
-	SetDlgItemInt( hDlg, edt3, pPD->nCopies, FALSE );
-	//  Bring the window to top
-	BringWindowToTop(GetParent(hDlg));
-	SetForegroundWindow(hDlg);
-    }
+    SetWindowPos(hDlg,
+	    HWND_TOP,
+	    rcOwner.left + (rc.right / 2),
+	    rcOwner.top + (rc.bottom / 2),
+	    0, 0,		// ignores size arguments
+	    SWP_NOSIZE);
+
+    //  tackle the printdlg copiesctrl problem
+    pPD = (PRINTDLGW *)lParam;
+    pPD->nCopies = (WORD)pPD->lCustData;
+    SetDlgItemInt( hDlg, edt3, pPD->nCopies, FALSE );
+    //  Bring the window to top
+    BringWindowToTop(GetParent(hDlg));
+    SetForegroundWindow(hDlg);
 
     return FALSE;
 }
-# endif
 
     void
 mch_print_cleanup(void)
@@ -1208,7 +1287,7 @@ mch_print_cleanup(void)
 
     if (prt_dlg.hDC != NULL)
 	DeleteDC(prt_dlg.hDC);
-    if (!*bUserAbort)
+    if (!*bUserAbort && hDlgPrint != NULL)
 	SendMessage(hDlgPrint, WM_COMMAND, 0, 0);
 }
 
@@ -1328,6 +1407,7 @@ mch_print_init(prt_settings_T *psettings, char_u *jobname, int forceit)
     DEVMODEW		*mem;
     DEVNAMES		*devname;
     int			i;
+    DWORD		err;
 
     bUserAbort = &(psettings->user_abort);
     CLEAR_FIELD(prt_dlg);
@@ -1345,18 +1425,11 @@ mch_print_init(prt_settings_T *psettings, char_u *jobname, int forceit)
 	prt_dlg.hDevMode = stored_dm;
 	prt_dlg.hDevNames = stored_devn;
 	prt_dlg.lCustData = stored_nCopies; // work around bug in print dialog
-# if !defined(FEAT_GUI) || defined(VIMDLL)
-#  ifdef VIMDLL
-	if (!gui.in_use)
-#  endif
-	{
-	    /*
-	     * Use hook to prevent console window being sent to back
-	     */
-	    prt_dlg.lpfnPrintHook = PrintHookProc;
-	    prt_dlg.Flags |= PD_ENABLEPRINTHOOK;
-	}
-# endif
+	/*
+	 * Use hook to prevent print dialog being sent to back.
+	 */
+	prt_dlg.lpfnPrintHook = PrintHookProc;
+	prt_dlg.Flags |= PD_ENABLEPRINTHOOK;
 	prt_dlg.Flags |= stored_nFlags;
     }
 
@@ -1403,7 +1476,7 @@ mch_print_init(prt_settings_T *psettings, char_u *jobname, int forceit)
 
     if (prt_dlg.hDC == NULL)
     {
-	emsg(_("E237: Printer selection failed"));
+	emsg(_(e_printer_selection_failed));
 	mch_print_cleanup();
 	return FALSE;
     }
@@ -1462,7 +1535,7 @@ mch_print_init(prt_settings_T *psettings, char_u *jobname, int forceit)
     CLEAR_FIELD(fLogFont);
     if (get_logfont(&fLogFont, p_pfn, prt_dlg.hDC, TRUE) == FAIL)
     {
-	semsg(_("E613: Unknown printer font: %s"), p_pfn);
+	semsg(_(e_unknown_printer_font_str), p_pfn);
 	mch_print_cleanup();
 	return FALSE;
     }
@@ -1510,29 +1583,26 @@ mch_print_init(prt_settings_T *psettings, char_u *jobname, int forceit)
     return TRUE;
 
 init_fail_dlg:
+    err = CommDlgExtendedError();
+    if (err)
     {
-	DWORD err = CommDlgExtendedError();
+	char_u *buf;
 
-	if (err)
-	{
-	    char_u *buf;
-
-	    // I suspect FormatMessage() doesn't work for values returned by
-	    // CommDlgExtendedError().  What does?
-	    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-			  FORMAT_MESSAGE_FROM_SYSTEM |
-			  FORMAT_MESSAGE_IGNORE_INSERTS,
-			  NULL, err, 0, (LPTSTR)(&buf), 0, NULL);
-	    semsg(_("E238: Print error: %s"),
-				  buf == NULL ? (char_u *)_("Unknown") : buf);
-	    LocalFree((LPVOID)(buf));
-	}
-	else
-	    msg_clr_eos(); // Maybe canceled
-
-	mch_print_cleanup();
-	return FALSE;
+	// I suspect FormatMessage() doesn't work for values returned by
+	// CommDlgExtendedError().  What does?
+	FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+		FORMAT_MESSAGE_FROM_SYSTEM |
+		FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL, err, 0, (LPTSTR)(&buf), 0, NULL);
+	semsg(_(e_print_error_str),
+		buf == NULL ? (char_u *)_("Unknown") : buf);
+	LocalFree((LPVOID)(buf));
     }
+    else
+	msg_clr_eos(); // Maybe canceled
+
+    mch_print_cleanup();
+    return FALSE;
 }
 
 
@@ -1576,7 +1646,7 @@ mch_print_begin(prt_settings_T *psettings)
 mch_print_end(prt_settings_T *psettings UNUSED)
 {
     EndDoc(prt_dlg.hDC);
-    if (!*bUserAbort)
+    if (!*bUserAbort && hDlgPrint != NULL)
 	SendMessage(hDlgPrint, WM_COMMAND, 0, 0);
 }
 
@@ -1678,17 +1748,8 @@ mch_print_set_fg(long_u fgcol)
 
 
 
-#if defined(FEAT_SHORTCUT) || defined(PROTO)
-# ifndef PROTO
-#  include <shlobj.h>
-# endif
-
-typedef BOOL (WINAPI *pfnGetFinalPathNameByHandleW)(
-	HANDLE	hFile,
-	LPWSTR	lpszFilePath,
-	DWORD	cchFilePath,
-	DWORD	dwFlags);
-static pfnGetFinalPathNameByHandleW pGetFinalPathNameByHandleW = NULL;
+#if defined(FEAT_SHORTCUT)
+# include <shlobj.h>
 
 # define is_path_sep(c)	    ((c) == L'\\' || (c) == L'/')
 
@@ -1699,7 +1760,7 @@ is_reparse_point_included(LPCWSTR fname)
     WCHAR	buf[MAX_PATH];
     DWORD	attr;
 
-    if (isalpha(p[0]) && p[1] == L':' && is_path_sep(p[2]))
+    if (SAFE_isalpha(p[0]) && p[1] == L':' && is_path_sep(p[2]))
 	p += 3;
     else if (is_path_sep(p[0]) && is_path_sep(p[1]))
 	p += 2;
@@ -1723,7 +1784,11 @@ is_reparse_point_included(LPCWSTR fname)
     return FALSE;
 }
 
-    static char_u *
+/*
+ * Return the resolved file path, NULL if "fname" is an AppExecLink reparse
+ * point, already fully resolved, or it doesn't exists.
+ */
+    char_u *
 resolve_reparse_point(char_u *fname)
 {
     HANDLE	    h = INVALID_HANDLE_VALUE;
@@ -1731,20 +1796,6 @@ resolve_reparse_point(char_u *fname)
     WCHAR	    *p, *wp;
     char_u	    *rfname = NULL;
     WCHAR	    *buff = NULL;
-    static BOOL	    loaded = FALSE;
-
-    if (pGetFinalPathNameByHandleW == NULL)
-    {
-	HMODULE hmod = GetModuleHandle("kernel32.dll");
-
-	if (loaded == TRUE)
-	    return NULL;
-	pGetFinalPathNameByHandleW = (pfnGetFinalPathNameByHandleW)
-		GetProcAddress(hmod, "GetFinalPathNameByHandleW");
-	loaded = TRUE;
-	if (pGetFinalPathNameByHandleW == NULL)
-	    return NULL;
-    }
 
     p = enc_to_utf16(fname, NULL);
     if (p == NULL)
@@ -1763,13 +1814,13 @@ resolve_reparse_point(char_u *fname)
     if (h == INVALID_HANDLE_VALUE)
 	goto fail;
 
-    size = pGetFinalPathNameByHandleW(h, NULL, 0, 0);
+    size = GetFinalPathNameByHandleW(h, NULL, 0, 0);
     if (size == 0)
 	goto fail;
     buff = ALLOC_MULT(WCHAR, size);
     if (buff == NULL)
 	goto fail;
-    if (pGetFinalPathNameByHandleW(h, buff, size, 0) == 0)
+    if (GetFinalPathNameByHandleW(h, buff, size, 0) == 0)
 	goto fail;
 
     if (wcsncmp(buff, L"\\\\?\\UNC\\", 8) == 0)
@@ -1880,7 +1931,7 @@ mch_resolve_path(char_u *fname, int reparse_point)
 }
 #endif
 
-#if (defined(FEAT_EVAL) && (!defined(FEAT_GUI) || defined(VIMDLL))) || defined(PROTO)
+#if defined(FEAT_EVAL) && (!defined(FEAT_GUI) || defined(VIMDLL))
 /*
  * Bring ourselves to the foreground.  Does work if the OS doesn't allow it.
  */
@@ -1893,7 +1944,7 @@ win32_set_foreground(void)
 }
 #endif
 
-#if defined(FEAT_CLIENTSERVER) || defined(PROTO)
+#if defined(FEAT_CLIENTSERVER)
 /*
  * Client-server code for Vim
  *
@@ -1911,7 +1962,11 @@ HWND message_window = 0;	    // window that's handling messages
 # define VIM_CLASSNAME      "VIM_MESSAGES"
 # define VIM_CLASSNAME_LEN  (sizeof(VIM_CLASSNAME) - 1)
 
-// Communication is via WM_COPYDATA messages. The message type is send in
+// Timeout for sending a message to another Vim instance.  Normally this works
+// instantly, but it may hang when the other Vim instance is halted.
+# define SENDMESSAGE_TIMEOUT	(5 * 1000)
+
+// Communication is via WM_COPYDATA messages. The message type is sent in
 // the dwData parameter. Types are defined here.
 # define COPYDATA_KEYS		0
 # define COPYDATA_REPLY		1
@@ -1932,9 +1987,9 @@ static char_u	*client_enc = NULL;
 
 /*
  * Tell the other side what encoding we are using.
- * Errors are ignored.
+ * Return -1 if timeout happens.  Other errors are ignored.
  */
-    static void
+    static int
 serverSendEnc(HWND target)
 {
     COPYDATASTRUCT data;
@@ -1942,8 +1997,11 @@ serverSendEnc(HWND target)
     data.dwData = COPYDATA_ENCODING;
     data.cbData = (DWORD)STRLEN(p_enc) + 1;
     data.lpData = p_enc;
-    (void)SendMessage(target, WM_COPYDATA, (WPARAM)message_window,
-							     (LPARAM)(&data));
+    if (SendMessageTimeout(target, WM_COPYDATA,
+	    (WPARAM)message_window, (LPARAM)&data,
+	    SMTO_ABORTIFHUNG, SENDMESSAGE_TIMEOUT, NULL) == 0)
+	return -1;
+    return 0;
 }
 
 /*
@@ -1952,11 +2010,11 @@ serverSendEnc(HWND target)
     static void
 CleanUpMessaging(void)
 {
-    if (message_window != 0)
-    {
-	DestroyWindow(message_window);
-	message_window = 0;
-    }
+    if (message_window == 0)
+	return;
+
+    DestroyWindow(message_window);
+    message_window = 0;
 }
 
 static int save_reply(HWND server, char_u *reply, int expr);
@@ -2001,6 +2059,7 @@ Messaging_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	COPYDATASTRUCT	reply;
 	char_u		*res;
 	int		retval;
+	DWORD_PTR	dwret = 0;
 	char_u		*str;
 	char_u		*tofree;
 
@@ -2016,10 +2075,15 @@ Messaging_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	    // Remember who sent this, for <client>
 	    clientWindow = sender;
 
-	    // Add the received keys to the input buffer.  The loop waiting
-	    // for the user to do something should check the input buffer.
+	    // Add the received keys to the input buffer.
 	    str = serverConvert(client_enc, (char_u *)data->lpData, &tofree);
-	    server_to_input_buf(str);
+# ifdef FEAT_GUI
+	    if (gui.in_use)
+		// The GUI may get here re-entrantly, so insert the keys later.
+		server_add_input(str);
+	    else
+# endif
+		server_to_input_buf(str);
 	    vim_free(tofree);
 
 # ifdef FEAT_GUI
@@ -2041,22 +2105,35 @@ Messaging_WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 	    if (res == NULL)
 	    {
-		char	*err = _(e_invexprmsg);
+		char	*err = _(e_invalid_expression_received);
 		size_t	len = STRLEN(str) + STRLEN(err) + 5;
 
 		res = alloc(len);
 		if (res != NULL)
-		    vim_snprintf((char *)res, len, "%s: \"%s\"", err, str);
+		    reply.cbData = (DWORD)vim_snprintf_safelen(
+			(char *)res, len, "%s: \"%s\"", err, str);
+		else
+		    reply.cbData = 0;
 		reply.dwData = COPYDATA_ERROR_RESULT;
 	    }
 	    else
+	    {
+		reply.cbData = (DWORD)STRLEN(res) + 1;
 		reply.dwData = COPYDATA_RESULT;
+	    }
 	    reply.lpData = res;
-	    reply.cbData = (DWORD)STRLEN(res) + 1;
 
-	    serverSendEnc(sender);
-	    retval = (int)SendMessage(sender, WM_COPYDATA,
-				    (WPARAM)message_window, (LPARAM)(&reply));
+	    if (serverSendEnc(sender) < 0)
+		retval = -1;
+	    else
+	    {
+		if (SendMessageTimeout(sender, WM_COPYDATA,
+			(WPARAM)message_window, (LPARAM)&reply,
+			SMTO_ABORTIFHUNG, SENDMESSAGE_TIMEOUT, &dwret) == 0)
+		    retval = -1;
+		else
+		    retval = (int)dwret;
+	    }
 	    vim_free(tofree);
 	    vim_free(res);
 	    return retval;
@@ -2187,12 +2264,16 @@ enumWindowsGetServer(HWND hwnd, LPARAM lparam)
     }
 
     // If we are looking for an alternate server, remember this name.
-    if (altname_buf_ptr != NULL
-	    && STRNICMP(server, id->name, STRLEN(id->name)) == 0
-	    && vim_isdigit(server[STRLEN(id->name)]))
+    if (altname_buf_ptr != NULL)
     {
-	STRCPY(altname_buf_ptr, server);
-	altname_buf_ptr = NULL;	    // don't use another name
+	size_t	namelen = STRLEN(id->name);
+
+	if (STRNICMP(server, id->name, namelen) == 0
+	    && vim_isdigit(server[namelen]))
+	{
+	    STRCPY(altname_buf_ptr, server);
+	    altname_buf_ptr = NULL;	    // don't use another name
+	}
     }
 
     // Otherwise, keep looking
@@ -2202,16 +2283,14 @@ enumWindowsGetServer(HWND hwnd, LPARAM lparam)
     static BOOL CALLBACK
 enumWindowsGetNames(HWND hwnd, LPARAM lparam)
 {
-    garray_T	*ga = (garray_T *)lparam;
+    list_T	*list = (list_T *)lparam;
     char	server[MAX_PATH];
 
     // Get the title of the window
     if (getVimServerName(hwnd, server, sizeof(server)) == 0)
 	return TRUE;
 
-    // Add the name to the list
-    ga_concat(ga, (char_u *)server);
-    ga_concat(ga, (char_u *)"\n");
+    list_append_string(list, (char_u *)server, -1);
     return TRUE;
 }
 
@@ -2268,16 +2347,20 @@ findServer(char_u *name)
     void
 serverSetName(char_u *name)
 {
+    size_t	namelen;
     char_u	*ok_name;
     HWND	hwnd = 0;
     int		i = 0;
     char_u	*p;
 
     // Leave enough space for a 9-digit suffix to ensure uniqueness!
-    ok_name = alloc(STRLEN(name) + 10);
+    namelen = STRLEN(name);
+    ok_name = alloc(namelen + 10);
+    if (ok_name == NULL)
+	return;
 
     STRCPY(ok_name, name);
-    p = ok_name + STRLEN(name);
+    p = ok_name + namelen;
 
     for (;;)
     {
@@ -2301,9 +2384,7 @@ serverSetName(char_u *name)
     {
 	// Remember the name
 	serverName = ok_name;
-# ifdef FEAT_TITLE
 	need_maketitle = TRUE;	// update Vim window title later
-# endif
 
 	// Update the message window title
 	SetWindowText(message_window, (LPCSTR)ok_name);
@@ -2315,17 +2396,17 @@ serverSetName(char_u *name)
     }
 }
 
-    char_u *
+    list_T *
 serverGetVimNames(void)
 {
-    garray_T ga;
+    list_T *list = list_alloc();
 
-    ga_init2(&ga, 1, 100);
+    if (list == NULL)
+	return NULL;
 
-    enum_windows(enumWindowsGetNames, (LPARAM)(&ga));
-    ga_append(&ga, NUL);
+    enum_windows(enumWindowsGetNames, (LPARAM)list);
 
-    return ga.ga_data;
+    return list;
 }
 
     int
@@ -2336,6 +2417,7 @@ serverSendReply(
     HWND	target;
     COPYDATASTRUCT data;
     long_u	n = 0;
+    DWORD_PTR	dwret = 0;
 
     // The "name" argument is a magic cookie obtained from expand("<client>").
     // It should be of the form 0xXXXXX - i.e. a C hex literal, which is the
@@ -2352,12 +2434,13 @@ serverSendReply(
     data.cbData = (DWORD)STRLEN(reply) + 1;
     data.lpData = reply;
 
-    serverSendEnc(target);
-    if (SendMessage(target, WM_COPYDATA, (WPARAM)message_window,
-							     (LPARAM)(&data)))
-	return 0;
-
-    return -1;
+    if (serverSendEnc(target) < 0)
+	return -1;
+    if (SendMessageTimeout(target, WM_COPYDATA,
+		(WPARAM)message_window, (LPARAM)&data,
+		SMTO_ABORTIFHUNG, SENDMESSAGE_TIMEOUT, &dwret) == 0)
+	return -1;
+    return dwret ? 0 : -1;
 }
 
     int
@@ -2370,10 +2453,12 @@ serverSendToVim(
     int		 timeout,		// timeout in seconds or zero
     int		 silent)		// don't complain about no server
 {
+    size_t	namelen;
     HWND	target;
     COPYDATASTRUCT data;
     char_u	*retval = NULL;
     int		retcode = 0;
+    DWORD_PTR	dwret = 0;
     char_u	altname_buf[MAX_PATH];
 
     // Execute locally if no display or target is ourselves
@@ -2381,8 +2466,9 @@ serverSendToVim(
 	return sendToLocalVim(cmd, asExpr, result);
 
     // If the server name does not end in a digit then we look for an
-    // alternate name.  e.g. when "name" is GVIM the we may find GVIM2.
-    if (STRLEN(name) > 1 && !vim_isdigit(name[STRLEN(name) - 1]))
+    // alternate name.  e.g. when "name" is GVIM then we may find GVIM2.
+    namelen = STRLEN(name);
+    if (namelen > 1 && !vim_isdigit(name[namelen - 1]))
 	altname_buf_ptr = altname_buf;
     altname_buf[0] = NUL;
     target = findServer(name);
@@ -2394,7 +2480,7 @@ serverSendToVim(
     if (target == 0)
     {
 	if (!silent)
-	    semsg(_(e_noserver), name);
+	    semsg(_(e_no_registered_server_named_str), name);
 	return -1;
     }
 
@@ -2405,9 +2491,13 @@ serverSendToVim(
     data.cbData = (DWORD)STRLEN(cmd) + 1;
     data.lpData = cmd;
 
-    serverSendEnc(target);
-    if (SendMessage(target, WM_COPYDATA, (WPARAM)message_window,
-							(LPARAM)(&data)) == 0)
+    if (serverSendEnc(target) < 0)
+	return -1;
+    if (SendMessageTimeout(target, WM_COPYDATA,
+		(WPARAM)message_window, (LPARAM)&data,
+		SMTO_ABORTIFHUNG, SENDMESSAGE_TIMEOUT, &dwret) == 0)
+	return -1;
+    if (dwret == 0)
 	return -1;
 
     if (asExpr)
@@ -2582,76 +2672,74 @@ serverProcessPendingMessages(void)
 {
     MSG msg;
 
-    while (pPeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+    while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
     {
 	TranslateMessage(&msg);
-	pDispatchMessage(&msg);
+	DispatchMessageW(&msg);
     }
 }
 
 #endif // FEAT_CLIENTSERVER
 
-#if defined(FEAT_GUI) || (defined(FEAT_PRINTER) && !defined(FEAT_POSTSCRIPT)) \
-	|| defined(PROTO)
+#if defined(FEAT_GUI) || (defined(FEAT_PRINTER) && !defined(FEAT_POSTSCRIPT))
 
 struct charset_pair
 {
-    char	*name;
+    string_T	name;
     BYTE	charset;
 };
 
 static struct charset_pair
 charset_pairs[] =
 {
-    {"ANSI",		ANSI_CHARSET},
-    {"CHINESEBIG5",	CHINESEBIG5_CHARSET},
-    {"DEFAULT",		DEFAULT_CHARSET},
-    {"HANGEUL",		HANGEUL_CHARSET},
-    {"OEM",		OEM_CHARSET},
-    {"SHIFTJIS",	SHIFTJIS_CHARSET},
-    {"SYMBOL",		SYMBOL_CHARSET},
-    {"ARABIC",		ARABIC_CHARSET},
-    {"BALTIC",		BALTIC_CHARSET},
-    {"EASTEUROPE",	EASTEUROPE_CHARSET},
-    {"GB2312",		GB2312_CHARSET},
-    {"GREEK",		GREEK_CHARSET},
-    {"HEBREW",		HEBREW_CHARSET},
-    {"JOHAB",		JOHAB_CHARSET},
-    {"MAC",		MAC_CHARSET},
-    {"RUSSIAN",		RUSSIAN_CHARSET},
-    {"THAI",		THAI_CHARSET},
-    {"TURKISH",		TURKISH_CHARSET},
+    {STR_LITERAL_INIT("ANSI"),		ANSI_CHARSET},
+    {STR_LITERAL_INIT("CHINESEBIG5"),	CHINESEBIG5_CHARSET},
+    {STR_LITERAL_INIT("DEFAULT"),	DEFAULT_CHARSET},
+    {STR_LITERAL_INIT("HANGEUL"),	HANGEUL_CHARSET},
+    {STR_LITERAL_INIT("OEM"),		OEM_CHARSET},
+    {STR_LITERAL_INIT("SHIFTJIS"),	SHIFTJIS_CHARSET},
+    {STR_LITERAL_INIT("SYMBOL"),	SYMBOL_CHARSET},
+    {STR_LITERAL_INIT("ARABIC"),	ARABIC_CHARSET},
+    {STR_LITERAL_INIT("BALTIC"),	BALTIC_CHARSET},
+    {STR_LITERAL_INIT("EASTEUROPE"),	EASTEUROPE_CHARSET},
+    {STR_LITERAL_INIT("GB2312"),	GB2312_CHARSET},
+    {STR_LITERAL_INIT("GREEK"),		GREEK_CHARSET},
+    {STR_LITERAL_INIT("HEBREW"),	HEBREW_CHARSET},
+    {STR_LITERAL_INIT("JOHAB"),		JOHAB_CHARSET},
+    {STR_LITERAL_INIT("MAC"),		MAC_CHARSET},
+    {STR_LITERAL_INIT("RUSSIAN"),	RUSSIAN_CHARSET},
+    {STR_LITERAL_INIT("THAI"),		THAI_CHARSET},
+    {STR_LITERAL_INIT("TURKISH"),	TURKISH_CHARSET}
 # ifdef VIETNAMESE_CHARSET
-    {"VIETNAMESE",	VIETNAMESE_CHARSET},
+    ,
+    {STR_LITERAL_INIT("VIETNAMESE"),	VIETNAMESE_CHARSET}
 # endif
-    {NULL,		0}
 };
 
 struct quality_pair
 {
-    char	*name;
+    string_T	name;
     DWORD	quality;
 };
 
 static struct quality_pair
 quality_pairs[] = {
 # ifdef CLEARTYPE_QUALITY
-    {"CLEARTYPE",	CLEARTYPE_QUALITY},
+    {STR_LITERAL_INIT("CLEARTYPE"),	CLEARTYPE_QUALITY},
 # endif
 # ifdef ANTIALIASED_QUALITY
-    {"ANTIALIASED",	ANTIALIASED_QUALITY},
+    {STR_LITERAL_INIT("ANTIALIASED"),	ANTIALIASED_QUALITY},
 # endif
 # ifdef NONANTIALIASED_QUALITY
-    {"NONANTIALIASED",	NONANTIALIASED_QUALITY},
+    {STR_LITERAL_INIT("NONANTIALIASED"), NONANTIALIASED_QUALITY},
 # endif
 # ifdef PROOF_QUALITY
-    {"PROOF",		PROOF_QUALITY},
+    {STR_LITERAL_INIT("PROOF"),		PROOF_QUALITY},
 # endif
 # ifdef DRAFT_QUALITY
-    {"DRAFT",		DRAFT_QUALITY},
+    {STR_LITERAL_INIT("DRAFT"),		DRAFT_QUALITY},
 # endif
-    {"DEFAULT",		DEFAULT_QUALITY},
-    {NULL,		0}
+    {STR_LITERAL_INIT("DEFAULT"),	DEFAULT_QUALITY}
 };
 
 /*
@@ -2661,12 +2749,15 @@ quality_pairs[] = {
     char *
 charset_id2name(int id)
 {
-    struct charset_pair *cp;
+    int	i;
 
-    for (cp = charset_pairs; cp->name != NULL; ++cp)
-	if ((BYTE)id == cp->charset)
-	    break;
-    return cp->name;
+    for (i = 0; i < (int)ARRAY_LENGTH(charset_pairs); ++i)
+    {
+	if ((BYTE)id == charset_pairs[i].charset)
+	    return (char *)charset_pairs[i].name.string;
+    }
+
+    return NULL;
 }
 
 /*
@@ -2676,27 +2767,33 @@ charset_id2name(int id)
     char *
 quality_id2name(DWORD id)
 {
-    struct quality_pair *qp;
+    int	i;
 
-    for (qp = quality_pairs; qp->name != NULL; ++qp)
-	if (id == qp->quality)
-	    break;
-    return qp->name;
+    for (i = 0; i < (int)ARRAY_LENGTH(quality_pairs); ++i)
+    {
+	if (id == quality_pairs[i].quality)
+	    return (char *)quality_pairs[i].name.string;
+    }
+
+    return NULL;
 }
+
+// The default font height in 100% scaling (96dpi).
+// (-16 in 96dpi equates to roughly 12pt)
+# define DEFAULT_FONT_HEIGHT	(-16)
 
 static const LOGFONTW s_lfDefault =
 {
-    -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    DEFAULT_FONT_HEIGHT,
+    0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
     PROOF_QUALITY, FIXED_PITCH | FF_DONTCARE,
-    L"Fixedsys"	// see _ReadVimIni
+    L""	// Default font name will be set later based on current language.
 };
 
-// Initialise the "current height" to -12 (same as s_lfDefault) just
-// in case the user specifies a font in "guifont" with no size before a font
-// with an explicit size has been set. This defaults the size to this value
-// (-12 equates to roughly 9pt).
-int current_font_height = -12;		// also used in gui_w32.c
+// This will be initialized when set_default_logfont() is called first time.
+// The value will be based on the system DPI.
+int current_font_height = 0;		// also used in gui_w32.c
 
 /*
  * Convert a string representing a point size into pixels. The string should
@@ -2754,6 +2851,32 @@ points_to_pixels(WCHAR *str, WCHAR **end, int vertical, long_i pprinter_dc)
 
     *end = str;
     return pixels;
+}
+
+/*
+ * Convert pixel into point size. This is a reverse of points_to_pixels.
+ */
+    static double
+pixels_to_points(int pixels, int vertical, long_i pprinter_dc)
+{
+    double	points = 0;
+    HWND	hwnd = (HWND)0;
+    HDC		hdc;
+    HDC		printer_dc = (HDC)pprinter_dc;
+
+    if (printer_dc == NULL)
+    {
+	hwnd = GetDesktopWindow();
+	hdc = GetWindowDC(hwnd);
+    }
+    else
+	hdc = printer_dc;
+
+    points = pixels * 72.0 / GetDeviceCaps(hdc, vertical ? LOGPIXELSY : LOGPIXELSX);
+    if (printer_dc == NULL)
+	ReleaseDC(hwnd, hdc);
+
+    return points;
 }
 
     static int CALLBACK
@@ -2827,6 +2950,103 @@ init_logfont(LOGFONTW *lf)
 }
 
 /*
+ * Call back for EnumFontFamiliesW in expand_font_enumproc.
+ *
+ */
+    static int CALLBACK
+expand_font_enumproc(
+    ENUMLOGFONTW    *elf,
+    NEWTEXTMETRICW  *ntm UNUSED,
+    DWORD	    type UNUSED,
+    LPARAM	    lparam)
+{
+    LOGFONTW *lf = (LOGFONTW*)elf;
+
+# ifndef FEAT_PROPORTIONAL_FONTS
+    // Ignore non-monospace fonts without further ado
+    if ((ntm->tmPitchAndFamily & 1) != 0)
+	return 1;
+# endif
+
+    // Filter only on ANSI. Otherwise will see a lot of random fonts that we
+    // usually don't want.
+    if (lf->lfCharSet != ANSI_CHARSET)
+	return 1;
+
+    int (*add_match)(char_u *) = (int (*)(char_u *))lparam;
+
+    WCHAR *faceNameW = lf->lfFaceName;
+    char_u *faceName = utf16_to_enc(faceNameW, NULL);
+    if (!faceName)
+	return 0;
+
+    add_match(faceName);
+    vim_free(faceName);
+
+    return 1;
+}
+
+/*
+ * Cmdline expansion for setting 'guifont'. Will enumerate through all
+ * monospace fonts for completion. If used after ':', will expand to possible
+ * font configuration options like font sizes.
+ *
+ * This function has "gui" in its name because in some platforms (GTK) font
+ * handling is done by the GUI code, whereas in Windows it's part of the
+ * platform code.
+ */
+    void
+gui_mch_expand_font(
+    optexpand_T	*args,
+    void	*param UNUSED,
+    int		(*add_match)(char_u *val))
+{
+    expand_T	    *xp = args->oe_xp;
+    if (xp->xp_pattern > args->oe_set_arg && *(xp->xp_pattern-1) == ':')
+    {
+	char buf[30];
+	int	i;
+
+	// Always fill in with the current font size as first option for
+	// convenience. We simply round to the closest integer for simplicity.
+	int font_height = (int)round(
+		pixels_to_points(-current_font_height, TRUE, (long_i)NULL));
+	vim_snprintf(buf, ARRAY_LENGTH(buf), "h%d", font_height);
+	add_match((char_u *)buf);
+
+	// Note: Keep this in sync with get_logfont(). Don't include 'c' and
+	// 'q' as we fill in all the values below.
+	static char *(p_gfn_win_opt_values[]) = {
+	    "h" , "w" , "W" , "b" , "i" , "u" , "s"};
+	for (i = 0; i < (int)ARRAY_LENGTH(p_gfn_win_opt_values); i++)
+	    add_match((char_u *)p_gfn_win_opt_values[i]);
+
+	for (i = 0; i < (int)ARRAY_LENGTH(charset_pairs); ++i)
+	{
+	    vim_snprintf(buf, sizeof(buf), "c%s", charset_pairs[i].name.string);
+	    add_match((char_u *)buf);
+	}
+
+	for (i = 0; i < (int)ARRAY_LENGTH(quality_pairs); ++i)
+	{
+	    vim_snprintf(buf, sizeof(buf), "q%s", quality_pairs[i].name.string);
+	    add_match((char_u *)buf);
+	}
+	return;
+    }
+
+    HWND	hwnd = GetDesktopWindow();
+    HDC		hdc = GetWindowDC(hwnd);
+
+    EnumFontFamiliesW(hdc,
+	    NULL,
+	    (FONTENUMPROCW)expand_font_enumproc,
+	    (LPARAM)add_match);
+
+    ReleaseDC(hwnd, hdc);
+}
+
+/*
  * Compare a UTF-16 string and an ASCII string literally.
  * Only works all the code points are inside ASCII range.
  */
@@ -2841,6 +3061,47 @@ utf16ascncmp(const WCHAR *w, const char *p, size_t n)
 	    return w[i] - p[i];
     }
     return 0;
+}
+
+/*
+ * Equivalent of GetDpiForSystem().
+ */
+    UINT WINAPI
+vimGetDpiForSystem(void)
+{
+    HWND hwnd = GetDesktopWindow();
+    HDC hdc = GetWindowDC(hwnd);
+    UINT dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+    ReleaseDC(hwnd, hdc);
+    return dpi;
+}
+
+/*
+ * Set default logfont based on current language.
+ */
+    static void
+set_default_logfont(LOGFONTW *lf)
+{
+    // Default font name for current language on MS-Windows.
+    // If not translated, falls back to "Consolas".
+    // This must be a fixed-pitch font.
+    const char *defaultfontname = N_("DefaultFontNameForWindows");
+    char *fontname = _(defaultfontname);
+
+    if (STRCMP(fontname, defaultfontname) == 0)
+	fontname = "Consolas";
+
+    *lf = s_lfDefault;
+    lf->lfHeight = DEFAULT_FONT_HEIGHT * (int)vimGetDpiForSystem() / 96;
+    if (current_font_height == 0)
+	current_font_height = lf->lfHeight;
+
+    WCHAR *wfontname = enc_to_utf16((char_u*)fontname, NULL);
+    if (wfontname != NULL)
+    {
+	wcscpy_s(lf->lfFaceName, LF_FACESIZE, wfontname);
+	vim_free(wfontname);
+    }
 }
 
 /*
@@ -2860,7 +3121,7 @@ get_logfont(
     static LOGFONTW *lastlf = NULL;
     WCHAR	*wname;
 
-    *lf = s_lfDefault;
+    set_default_logfont(lf);
     if (name == NULL)
 	return OK;
 
@@ -2900,7 +3161,7 @@ get_logfont(
 	lf->lfFaceName[p - wname] = NUL;
 
     // First set defaults
-    lf->lfHeight = -12;
+    lf->lfHeight = DEFAULT_FONT_HEIGHT * (int)vimGetDpiForSystem() / 96;
     lf->lfWidth = 0;
     lf->lfWeight = FW_NORMAL;
     lf->lfItalic = FALSE;
@@ -2932,6 +3193,7 @@ get_logfont(
     {
 	switch (*p++)
 	{
+	    // Note: Keep this in sync with gui_mch_expand_font().
 	    case L'h':
 		lf->lfHeight = - points_to_pixels(p, &p, TRUE, (long_i)printer_dc);
 		break;
@@ -2954,48 +3216,60 @@ get_logfont(
 		lf->lfStrikeOut = TRUE;
 		break;
 	    case L'c':
+		for (i = 0; i < (int)ARRAY_LENGTH(charset_pairs); ++i)
 		{
-		    struct charset_pair *cp;
-
-		    for (cp = charset_pairs; cp->name != NULL; ++cp)
-			if (utf16ascncmp(p, cp->name, strlen(cp->name)) == 0)
-			{
-			    lf->lfCharSet = cp->charset;
-			    p += strlen(cp->name);
-			    break;
-			}
-		    if (cp->name == NULL && verbose)
+		    if (utf16ascncmp(p, (char *)charset_pairs[i].name.string,
+			    charset_pairs[i].name.length) == 0)
 		    {
-			char_u *s = utf16_to_enc(p, NULL);
-			semsg(_("E244: Illegal charset name \"%s\" in font name \"%s\""), s, name);
-			vim_free(s);
+			lf->lfCharSet = charset_pairs[i].charset;
+			p += charset_pairs[i].name.length;
 			break;
 		    }
-		    break;
 		}
+
+		if (i == (int)ARRAY_LENGTH(charset_pairs) && verbose)
+		{
+		    char_u *s = utf16_to_enc(p, NULL);
+		    if (s != NULL)
+		    {
+			semsg(_(e_illegal_str_name_str_in_font_name_str),
+							   "charset", s, name);
+			vim_free(s);
+		    }
+		}
+		break;
+	    case L'f':
+		// Font features (e.g., "fss19=1").
+		// Parsed separately by gui_mch_init_font(); skip here.
+		while (*p && *p != L':')
+		    p++;
+		break;
 	    case L'q':
+		for (i = 0; i < (int)ARRAY_LENGTH(quality_pairs); ++i)
 		{
-		    struct quality_pair *qp;
-
-		    for (qp = quality_pairs; qp->name != NULL; ++qp)
-			if (utf16ascncmp(p, qp->name, strlen(qp->name)) == 0)
-			{
-			    lf->lfQuality = qp->quality;
-			    p += strlen(qp->name);
-			    break;
-			}
-		    if (qp->name == NULL && verbose)
+		    if (utf16ascncmp(p, (char *)quality_pairs[i].name.string,
+			    quality_pairs[i].name.length) == 0)
 		    {
-			char_u *s = utf16_to_enc(p, NULL);
-			semsg(_("E244: Illegal quality name \"%s\" in font name \"%s\""), s, name);
-			vim_free(s);
+			lf->lfQuality = quality_pairs[i].quality;
+			p += quality_pairs[i].name.length;
 			break;
 		    }
-		    break;
 		}
+
+		if (i == (int)ARRAY_LENGTH(quality_pairs) && verbose)
+		{
+		    char_u *s = utf16_to_enc(p, NULL);
+		    if (s != NULL)
+		    {
+			semsg(_(e_illegal_str_name_str_in_font_name_str),
+							   "quality", s, name);
+			vim_free(s);
+		    }
+		}
+		break;
 	    default:
 		if (verbose)
-		    semsg(_("E245: Illegal char '%c' in font name \"%s\""), p[-1], name);
+		    semsg(_(e_illegal_char_nr_in_font_name_str), p[-1], name);
 		goto theend;
 	}
 	while (*p == L':')
@@ -3019,7 +3293,7 @@ theend:
 
 #endif // defined(FEAT_GUI) || defined(FEAT_PRINTER)
 
-#if defined(FEAT_JOB_CHANNEL) || defined(PROTO)
+#if defined(FEAT_JOB_CHANNEL)
 /*
  * Initialize the Winsock dll.
  */

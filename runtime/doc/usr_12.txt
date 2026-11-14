@@ -1,6 +1,8 @@
-*usr_12.txt*	For Vim version 8.2.  Last change: 2021 Apr 19
+*usr_12.txt*	For Vim version 9.2.  Last change: 2026 Feb 14
 
-		     VIM USER MANUAL - by Bram Moolenaar
+
+		     VIM USER MANUAL	by Bram Moolenaar
+
 
 				Clever tricks
 

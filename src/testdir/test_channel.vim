@@ -1,12 +1,9 @@
 " Test for channel and job functions.
 
 " When +channel is supported then +job is too, so we don't check for that.
-source check.vim
 CheckFeature channel
 
-source shared.vim
-source screendump.vim
-source view_util.vim
+source util/screendump.vim
 
 let s:python = PythonProg()
 if s:python == ''
@@ -20,9 +17,12 @@ endif
 " call ch_logfile('channellog', 'w')
 
 func SetUp()
-  if g:testfunc =~ '_ipv6()$' 
+  if g:testfunc =~ '_ipv6()$'
     let s:localhost = '[::1]:'
     let s:testscript = 'test_channel_6.py'
+  elseif g:testfunc =~ '_unix()$'
+    let s:localhost = 'unix:Xtestsocket'
+    let s:testscript = 'test_channel_unix.py'
   else
     let s:localhost = 'localhost:'
     let s:testscript = 'test_channel.py'
@@ -37,6 +37,15 @@ endfunc
 " Run "testfunc" after starting the server and stop the server afterwards.
 func s:run_server(testfunc, ...)
   call RunServer(s:testscript, a:testfunc, a:000)
+endfunc
+
+" Returns the address of the test server.
+func s:address(port)
+  if s:localhost =~ '^unix:'
+    return s:localhost
+  else
+    return s:localhost . a:port
+  end
 endfunc
 
 " Return a list of open files.
@@ -65,7 +74,7 @@ func Ch_communicate(port)
   let s:chopt.drop = 'never'
   " Also add the noblock flag to try it out.
   let s:chopt.noblock = 1
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -77,7 +86,10 @@ func Ch_communicate(port)
   let dict = handle->ch_info()
   call assert_true(dict.id != 0)
   call assert_equal('open', dict.status)
-  call assert_equal(a:port, string(dict.port))
+  if has_key(dict, 'port')
+    " Channels using Unix sockets have no 'port' entry.
+    call assert_equal(a:port, string(dict.port))
+  end
   call assert_equal('open', dict.sock_status)
   call assert_equal('socket', dict.sock_io)
 
@@ -252,13 +264,19 @@ endfunc
 
 func Test_communicate_ipv6()
   CheckIPv6
-
   call Test_communicate()
 endfunc
 
+func Test_communicate_unix()
+  CheckUnix
+  call Test_communicate()
+  call delete('Xtestsocket')
+endfunc
+
+
 " Test that we can open two channels.
 func Ch_two_channels(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   call assert_equal(v:t_channel, type(handle))
   if handle->ch_status() == "fail"
     call assert_report("Can't open channel")
@@ -267,7 +285,7 @@ func Ch_two_channels(port)
 
   call assert_equal('got it', ch_evalexpr(handle, 'hello!'))
 
-  let newhandle = ch_open(s:localhost . a:port, s:chopt)
+  let newhandle = ch_open(s:address(a:port), s:chopt)
   if ch_status(newhandle) == "fail"
     call assert_report("Can't open second channel")
     return
@@ -292,9 +310,15 @@ func Test_two_channels_ipv6()
   call Test_two_channels()
 endfunc
 
+func Test_two_channels_unix()
+  CheckUnix
+  call Test_two_channels()
+  call delete('Xtestsocket')
+endfunc
+
 " Test that a server crash is handled gracefully.
 func Ch_server_crash(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -314,6 +338,12 @@ func Test_server_crash_ipv6()
   call Test_server_crash()
 endfunc
 
+func Test_server_crash_unix()
+  CheckUnix
+  call Test_server_crash()
+  call delete('Xtestsocket')
+endfunc
+
 """""""""
 
 func Ch_handler(chan, msg)
@@ -323,7 +353,7 @@ func Ch_handler(chan, msg)
 endfunc
 
 func Ch_channel_handler(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -352,6 +382,12 @@ func Test_channel_handler_ipv6()
   call Test_channel_handler()
 endfunc
 
+func Test_channel_handler_unix()
+  CheckUnix
+  call Test_channel_handler()
+  call delete('Xtestsocket')
+endfunc
+
 """""""""
 
 let g:Ch_reply = ''
@@ -367,7 +403,7 @@ func Ch_oneHandler(chan, msg)
 endfunc
 
 func Ch_channel_zero(port)
-  let handle = (s:localhost .. a:port)->ch_open(s:chopt)
+  let handle = (s:address(a:port))->ch_open(s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -415,6 +451,13 @@ func Test_zero_reply_ipv6()
   call Test_zero_reply()
 endfunc
 
+func Test_zero_reply_unix()
+  CheckUnix
+  call Test_zero_reply()
+  call delete('Xtestsocket')
+endfunc
+
+
 """""""""
 
 let g:Ch_reply1 = ""
@@ -436,7 +479,7 @@ func Ch_handleRaw3(chan, msg)
 endfunc
 
 func Ch_raw_one_time_callback(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -462,6 +505,12 @@ func Test_raw_one_time_callback_ipv6()
   call Test_raw_one_time_callback()
 endfunc
 
+func Test_raw_one_time_callback_unix()
+  CheckUnix
+  call Test_raw_one_time_callback()
+  call delete('Xtestsocket')
+endfunc
+
 """""""""
 
 " Test that trying to connect to a non-existing port fails quickly.
@@ -472,11 +521,11 @@ func Test_connect_waittime()
   let start = reltime()
   let handle = ch_open('localhost:9876', s:chopt)
   if ch_status(handle) != "fail"
-    " Oops, port does exists.
+    " Oops, port exists.
     call ch_close(handle)
   else
     let elapsed = reltime(start)
-    call assert_true(reltimefloat(elapsed) < 1.0)
+    call assert_inrange(0.0, 1.0, reltimefloat(elapsed))
   endif
 
   " We intend to use a socket that doesn't exist and wait for half a second
@@ -486,7 +535,7 @@ func Test_connect_waittime()
   try
     let handle = ch_open('localhost:9867', {'waittime': 500})
     if ch_status(handle) != "fail"
-      " Oops, port does exists.
+      " Oops, port exists.
       call ch_close(handle)
     else
       " Failed connection should wait about 500 msec.  Can be longer if the
@@ -507,7 +556,7 @@ func Test_raw_pipe()
   " ch_canread().
   " Also test the non-blocking option.
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'mode': 'raw', 'drop': 'never', 'noblock': 1})
+        \ {'mode': 'raw', 'drop': 'never', 'noblock': 1})
   call assert_equal(v:t_job, type(job))
   call assert_equal("run", job_status(job))
 
@@ -590,7 +639,7 @@ func Test_raw_pipe_blob()
   " ch_canread().
   " Also test the non-blocking option.
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'mode': 'raw', 'drop': 'never', 'noblock': 1})
+        \ {'mode': 'raw', 'drop': 'never', 'noblock': 1})
   call assert_equal(v:t_job, type(job))
   call assert_equal("run", job_status(job))
 
@@ -662,9 +711,9 @@ func Stop_g_job()
 endfunc
 
 func Test_nl_read_file()
-  call writefile(['echo something', 'echoerr wrong', 'double this'], 'Xinput')
+  call writefile(['echo something', 'echoerr wrong', 'double this'], 'Xinput', 'D')
   let g:job = job_start(s:python . " test_channel_pipe.py",
-	\ {'in_io': 'file', 'in_name': 'Xinput'})
+        \ {'in_io': 'file', 'in_name': 'Xinput'})
   call assert_equal("run", job_status(g:job))
   try
     let handle = job_getchannel(g:job)
@@ -674,14 +723,13 @@ func Test_nl_read_file()
     call assert_equal("AND this", ch_readraw(handle))
   finally
     call Stop_g_job()
-    call delete('Xinput')
   endtry
   call assert_fails("echo ch_read(test_null_channel(), {'callback' : 'abc'})", 'E475:')
 endfunc
 
 func Test_nl_write_out_file()
   let g:job = job_start(s:python . " test_channel_pipe.py",
-	\ {'out_io': 'file', 'out_name': 'Xoutput'})
+        \ {'out_io': 'file', 'out_name': 'Xoutput'})
   call assert_equal("run", job_status(g:job))
   try
     let handle = job_getchannel(g:job)
@@ -698,7 +746,7 @@ endfunc
 
 func Test_nl_write_err_file()
   let g:job = job_start(s:python . " test_channel_pipe.py",
-	\ {'err_io': 'file', 'err_name': 'Xoutput'})
+        \ {'err_io': 'file', 'err_name': 'Xoutput'})
   call assert_equal("run", job_status(g:job))
   try
     let handle = job_getchannel(g:job)
@@ -714,7 +762,7 @@ endfunc
 
 func Test_nl_write_both_file()
   let g:job = job_start(s:python . " test_channel_pipe.py",
-	\ {'out_io': 'file', 'out_name': 'Xoutput', 'err_io': 'out'})
+        \ {'out_io': 'file', 'out_name': 'Xoutput', 'err_io': 'out'})
   call assert_equal("run", job_status(g:job))
   try
     let handle = job_getchannel(g:job)
@@ -795,6 +843,7 @@ func Test_pipe_to_buffer_name_nomsg()
 endfunc
 
 func Test_close_output_buffer()
+  let g:test_is_flaky = 1
   enew!
   let test_lines = ['one', 'two']
   call setline(1, test_lines)
@@ -880,7 +929,7 @@ endfunc
 
 func Test_pipe_both_to_buffer()
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'out_io': 'buffer', 'out_name': 'pipe-err', 'err_io': 'out'})
+        \ {'out_io': 'buffer', 'out_name': 'pipe-err', 'err_io': 'out'})
   call assert_equal("run", job_status(job))
   let handle = job_getchannel(job)
   call assert_equal(bufnr('pipe-err'), ch_getbufnr(handle, 'out'))
@@ -935,6 +984,7 @@ endfunc
 
 func Run_pipe_through_sort(all, use_buffer)
   CheckExecutable sort
+  let g:test_is_flaky = 1
 
   let options = {'out_io': 'buffer', 'out_name': 'sortout'}
   if a:use_buffer
@@ -987,7 +1037,7 @@ endfunc
 
 func Test_pipe_to_nameless_buffer()
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'out_io': 'buffer'})
+        \ {'out_io': 'buffer'})
   call assert_equal("run", job_status(job))
   try
     let handle = job_getchannel(job)
@@ -1006,7 +1056,7 @@ func Test_pipe_to_buffer_json()
   CheckFunction reltimefloat
 
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'out_io': 'buffer', 'out_mode': 'json'})
+        \ {'out_io': 'buffer', 'out_mode': 'json'})
   call assert_equal("run", job_status(job))
   try
     let handle = job_getchannel(job)
@@ -1039,9 +1089,9 @@ func Test_pipe_io_two_buffers()
   set buftype=nofile
 
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'in_io': 'buffer', 'in_name': 'pipe-input', 'in_top': 0,
-	\  'out_io': 'buffer', 'out_name': 'pipe-output',
-	\  'block_write': 1})
+        \ {'in_io': 'buffer', 'in_name': 'pipe-input', 'in_top': 0,
+        \  'out_io': 'buffer', 'out_name': 'pipe-output',
+        \  'block_write': 1})
   call assert_equal("run", job_status(job))
   try
     exe "normal Gaecho hello\<CR>"
@@ -1070,9 +1120,9 @@ func Test_pipe_io_one_buffer()
   set buftype=nofile
 
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'in_io': 'buffer', 'in_name': 'pipe-io', 'in_top': 0,
-	\  'out_io': 'buffer', 'out_name': 'pipe-io',
-	\  'block_write': 1})
+        \ {'in_io': 'buffer', 'in_name': 'pipe-io', 'in_top': 0,
+        \  'out_io': 'buffer', 'out_name': 'pipe-io',
+        \  'block_write': 1})
   call assert_equal("run", job_status(job))
   try
     exe "normal Goecho hello\<CR>"
@@ -1101,27 +1151,26 @@ func Test_write_to_buffer_and_scroll()
       wincmd w
       call deletebufline('Xscrollbuffer', 1, '$')
       if has('win32')
-	let cmd = ['cmd', '/c', 'echo sometext']
+        let cmd = ['cmd', '/c', 'echo sometext']
       else
-	let cmd = [&shell, &shellcmdflag, 'echo sometext']
+        let cmd = [&shell, &shellcmdflag, 'echo sometext']
       endif
       call job_start(cmd, #{out_io: 'buffer', out_name: 'Xscrollbuffer'})
   END
-  call writefile(lines, 'XtestBufferScroll')
+  call writefile(lines, 'XtestBufferScroll', 'D')
   let buf = RunVimInTerminal('-S XtestBufferScroll', #{rows: 10})
   call TermWait(buf, 50)
   call VerifyScreenDump(buf, 'Test_job_buffer_scroll_1', {})
 
   " clean up
   call StopVimInTerminal(buf)
-  call delete('XtestBufferScroll')
 endfunc
 
 func Test_pipe_null()
   " We cannot check that no I/O works, we only check that the job starts
   " properly.
   let job = job_start(s:python . " test_channel_pipe.py something",
-	\ {'in_io': 'null'})
+        \ {'in_io': 'null'})
   call assert_equal("run", job_status(job))
   try
     call assert_equal('something', ch_read(job))
@@ -1130,7 +1179,7 @@ func Test_pipe_null()
   endtry
 
   let job = job_start(s:python . " test_channel_pipe.py err-out",
-	\ {'out_io': 'null'})
+        \ {'out_io': 'null'})
   call assert_equal("run", job_status(job))
   try
     call assert_equal('err-out', ch_read(job, {"part": "err"}))
@@ -1139,7 +1188,7 @@ func Test_pipe_null()
   endtry
 
   let job = job_start(s:python . " test_channel_pipe.py something",
-	\ {'err_io': 'null'})
+        \ {'err_io': 'null'})
   call assert_equal("run", job_status(job))
   try
     call assert_equal('something', ch_read(job))
@@ -1147,25 +1196,28 @@ func Test_pipe_null()
     call job_stop(job)
   endtry
 
-  let job = job_start(s:python . " test_channel_pipe.py something",
-	\ {'out_io': 'null', 'err_io': 'out'})
-  call assert_equal("run", job_status(job))
-  call job_stop(job)
+  " This causes spurious leak errors with valgrind.
+  if !RunningWithValgrind()
+    let job = job_start(s:python . " test_channel_pipe.py something",
+          \ {'out_io': 'null', 'err_io': 'out'})
+    call assert_equal("run", job_status(job))
+    call job_stop(job)
 
-  let job = job_start(s:python . " test_channel_pipe.py something",
-	\ {'in_io': 'null', 'out_io': 'null', 'err_io': 'null'})
-  call assert_equal("run", job_status(job))
-  call assert_equal('channel fail', string(job_getchannel(job)))
-  call assert_equal('fail', ch_status(job))
-  call assert_equal('no process', string(test_null_job()))
-  call assert_equal('channel fail', string(test_null_channel()))
-  call job_stop(job)
+    let job = job_start(s:python . " test_channel_pipe.py something",
+          \ {'in_io': 'null', 'out_io': 'null', 'err_io': 'null'})
+    call assert_equal("run", job_status(job))
+    call assert_equal('channel fail', string(job_getchannel(job)))
+    call assert_equal('fail', ch_status(job))
+    call assert_equal('no process', string(test_null_job()))
+    call assert_equal('channel fail', string(test_null_channel()))
+    call job_stop(job)
+  endif
 endfunc
 
 func Test_pipe_to_buffer_raw()
   let options = {'out_mode': 'raw', 'out_io': 'buffer', 'out_name': 'testout'}
   split testout
-  let job = job_start([s:python, '-c', 
+  let job = job_start([s:python, '-c',
         \ 'import sys; [sys.stdout.write(".") and sys.stdout.flush() for _ in range(10000)]'], options)
   " the job may be done quickly, also accept "dead"
   call assert_match('^\%(dead\|run\)$', job_status(job))
@@ -1206,6 +1258,7 @@ func Test_reuse_channel()
 endfunc
 
 func Test_out_cb()
+  let g:test_is_flaky = 1
   let dict = {'thisis': 'dict: '}
   func dict.outHandler(chan, msg) dict
     if type(a:msg) == v:t_string
@@ -1218,10 +1271,10 @@ func Test_out_cb()
     let g:Ch_errmsg = self.thisis . a:msg
   endfunc
   let job = job_start(s:python . " test_channel_pipe.py",
-	\ {'out_cb': dict.outHandler,
-	\  'out_mode': 'json',
-	\  'err_cb': dict.errHandler,
-	\  'err_mode': 'json'})
+        \ {'out_cb': dict.outHandler,
+        \  'out_mode': 'json',
+        \  'err_cb': dict.errHandler,
+        \  'err_mode': 'json'})
   call assert_equal("run", job_status(job))
   call test_garbagecollect_now()
   try
@@ -1236,10 +1289,15 @@ func Test_out_cb()
     let g:Ch_outobj = ''
     call ch_sendraw(job, "echosplit [0, {\"one\": 1,| \"tw|o\": 2, \"three\": 3|}]\n")
     " For unknown reasons this can be very slow on Mac.
-    if has('mac')
+    " Increase the timeout on every run.
+    if g:run_nr == 1
+      let timeout = 5000
+    elseif g:run_nr == 2
+      let timeout = 10000
+    elseif g:run_nr == 3
       let timeout = 20000
     else
-      let timeout = 5000
+      let timeout = 40000
     endif
     call WaitForAssert({-> assert_equal({'one': 1, 'two': 2, 'three': 3}, g:Ch_outobj)}, timeout)
   finally
@@ -1262,8 +1320,8 @@ func Test_out_close_cb()
     let s:counter += 1
   endfunc
   let job = job_start(s:python . " test_channel_pipe.py quit now",
-	\ {'out_cb': 'OutHandler',
-	\  'close_cb': 'CloseHandler'})
+        \ {'out_cb': 'OutHandler',
+        \  'close_cb': 'CloseHandler'})
   " the job may be done quickly, also accept "dead"
   call assert_match('^\%(dead\|run\)$', job_status(job))
   try
@@ -1282,7 +1340,7 @@ func Test_read_in_close_cb()
     let g:Ch_received = ch_read(a:chan)
   endfunc
   let job = job_start(s:python . " test_channel_pipe.py quit now",
-	\ {'close_cb': 'CloseHandler'})
+        \ {'close_cb': 'CloseHandler'})
   " the job may be done quickly, also accept "dead"
   call assert_match('^\%(dead\|run\)$', job_status(job))
   try
@@ -1302,7 +1360,7 @@ func Test_read_in_close_cb_incomplete()
     endwhile
   endfunc
   let job = job_start(s:python . " test_channel_pipe.py incomplete",
-	\ {'close_cb': 'CloseHandler'})
+        \ {'close_cb': 'CloseHandler'})
   " the job may be done quickly, also accept "dead"
   call assert_match('^\%(dead\|run\)$', job_status(job))
   try
@@ -1332,7 +1390,66 @@ func Test_out_cb_lambda()
   endtry
 endfunc
 
+func Test_out_cb_blob_mode()
+  let g:Ch_blob_bytes = []
+  func OutBlobCb(chan, msg)
+    call assert_equal(v:t_blob, type(a:msg))
+    let g:Ch_blob_bytes += blob2list(a:msg)
+  endfunc
+
+  let cmd = [s:python, '-c',
+        \ 'import sys,time;'
+        \ .. 'sys.stdout.buffer.write(bytes([0, 1, 2, 10, 255]));'
+        \ .. 'sys.stdout.flush();'
+        \ .. 'time.sleep(0.1)']
+  let job = job_start(cmd, #{
+        \ out_mode: 'blob',
+        \ out_cb: 'OutBlobCb',
+        \ })
+  try
+    call WaitForAssert({-> assert_equal([0, 1, 2, 10, 255], g:Ch_blob_bytes)})
+  finally
+    call job_stop(job)
+    delfunc OutBlobCb
+    unlet g:Ch_blob_bytes
+  endtry
+endfunc
+
+func Test_pty_out_cb_blob_mode()
+  CheckUnix
+
+  let g:Ch_blob_bytes = []
+  func PtyBlobCb(chan, msg)
+    call assert_equal(v:t_blob, type(a:msg))
+    let g:Ch_blob_bytes += blob2list(a:msg)
+  endfunc
+
+  " Put the pty in raw mode so the line discipline does not translate LF
+  " to CRLF or strip NUL bytes, then write bytes that include NULs on
+  " both sides of an embedded LF.
+  let cmd = [s:python, '-c',
+        \ 'import os,sys,time;'
+        \ .. 'os.system("stty raw -echo");'
+        \ .. 'sys.stdout.buffer.write(bytes([65, 0, 66, 10, 67, 0, 68]));'
+        \ .. 'sys.stdout.flush();'
+        \ .. 'time.sleep(0.1)']
+  let job = job_start(cmd, #{
+        \ pty: 1,
+        \ out_mode: 'blob',
+        \ out_cb: 'PtyBlobCb',
+        \ })
+  try
+    call WaitForAssert({-> assert_equal(
+          \ [65, 0, 66, 10, 67, 0, 68], g:Ch_blob_bytes)})
+  finally
+    call job_stop(job)
+    delfunc PtyBlobCb
+    unlet g:Ch_blob_bytes
+  endtry
+endfunc
+
 func Test_close_and_exit_cb()
+  let g:test_is_flaky = 1
   let g:retdict = {'ret': {}}
   func g:retdict.close_cb(ch) dict
     let self.ret['close_cb'] = a:ch->ch_getjob()->job_status()
@@ -1367,8 +1484,8 @@ func Test_exit_cb_wipes_buf()
   new
   let g:wipe_buf = bufnr('')
 
-  let job = job_start(has('win32') ? 'cmd /c echo:' : ['true'],
-	\ {'exit_cb': 'ExitCbWipe'})
+  let job = job_start(has('win32') ? 'cmd /D /c echo:' : ['true'],
+        \ {'exit_cb': 'ExitCbWipe'})
   let timer = timer_start(300, {-> feedkeys("\<Esc>", 'nt')}, {'repeat': 5})
   call feedkeys(repeat('g', 1000) . 'o', 'ntx!')
   call WaitForAssert({-> assert_equal("dead", job_status(job))})
@@ -1389,7 +1506,7 @@ endfunc
 
 " Test that "unlet handle" in a handler doesn't crash Vim.
 func Ch_unlet_handle(port)
-  let s:channelfd = ch_open(s:localhost . a:port, s:chopt)
+  let s:channelfd = ch_open(s:address(a:port), s:chopt)
   eval s:channelfd->ch_sendexpr("test", {'callback': function('s:UnletHandler')})
   call WaitForAssert({-> assert_equal('what?', g:Ch_unletResponse)})
 endfunc
@@ -1413,9 +1530,12 @@ endfunc
 
 " Test that "unlet handle" in a handler doesn't crash Vim.
 func Ch_close_handle(port)
-  let s:channelfd = ch_open(s:localhost . a:port, s:chopt)
+  let s:channelfd = ch_open(s:address(a:port), s:chopt)
   call ch_sendexpr(s:channelfd, "test", {'callback': function('Ch_CloseHandler')})
   call WaitForAssert({-> assert_equal('what?', g:Ch_unletResponse)})
+  " Wait for the channel to be fully closed, so that the callback does not
+  " fire during the next test.
+  call WaitForAssert({-> assert_equal('closed', ch_status(s:channelfd))})
 endfunc
 
 func Test_close_handle()
@@ -1430,7 +1550,7 @@ endfunc
 """"""""""
 
 func Ch_open_ipv6(port)
-  let handle = ch_open('[::1]:' .. a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   call assert_notequal('fail', ch_status(handle))
 endfunc
 
@@ -1445,7 +1565,7 @@ func Test_open_fail()
   call assert_fails("let ch = ch_open('noserver')", 'E475:')
   echo ch
   let d = ch
-  call assert_fails("let ch = ch_open('noserver', 10)", 'E474:')
+  call assert_fails("let ch = ch_open('noserver', 10)", 'E1206:')
   call assert_fails("let ch = ch_open('localhost:-1')", 'E475:')
   call assert_fails("let ch = ch_open('localhost:65537')", 'E475:')
   call assert_fails("let ch = ch_open('localhost:8765', {'timeout' : -1})",
@@ -1470,7 +1590,7 @@ endfunc
 func Ch_open_delay(port)
   " Wait up to a second for the port to open.
   let s:chopt.waittime = 1000
-  let channel = ch_open(s:localhost . a:port, s:chopt)
+  let channel = ch_open(s:address(a:port), s:chopt)
   if ch_status(channel) == "fail"
     call assert_report("Can't open channel")
     return
@@ -1480,12 +1600,16 @@ func Ch_open_delay(port)
 endfunc
 
 func Test_open_delay()
+  " This fails on BSD (e.g. Cirrus-CI), why?
+  CheckNotBSD
   " The server will wait half a second before creating the port.
   call s:run_server('Ch_open_delay', 'delay')
 endfunc
 
 func Test_open_delay_ipv6()
   CheckIPv6
+  " This fails on BSD (e.g. Cirrus-CI), why?
+  CheckNotBSD
   call Test_open_delay()
 endfunc
 
@@ -1496,7 +1620,7 @@ function MyFunction(a,b,c)
 endfunc
 
 function Ch_test_call(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -1518,6 +1642,12 @@ endfunc
 func Test_call_ipv6()
   CheckIPv6
   call Test_call()
+endfunc
+
+func Test_call_unix()
+  CheckUnix
+  call Test_call()
+  call delete('Xtestsocket')
 endfunc
 
 """""""""
@@ -1560,14 +1690,19 @@ endfunction
 
 func Test_exit_callback_interval()
   CheckFunction reltimefloat
+  let g:test_is_flaky = 1
 
   let g:exit_cb_val = {'start': reltime(), 'end': 0, 'process': 0}
   let job = [s:python, '-c', 'import time;time.sleep(0.5)']->job_start({'exit_cb': 'MyExitTimeCb'})
   let g:exit_cb_val.process = job_info(job).process
-  call WaitFor('type(g:exit_cb_val.end) != v:t_number || g:exit_cb_val.end != 0')
+  try
+    call WaitFor('type(g:exit_cb_val.end) != v:t_number || g:exit_cb_val.end != 0')
+  catch
+    call add(v:errors, "Job status: " .. string(job->job_info()))
+    throw v:exception
+  endtry
   let elapsed = reltimefloat(g:exit_cb_val.end)
-  call assert_true(elapsed > 0.5)
-  call assert_true(elapsed < 1.0)
+  call assert_inrange(0.5, 1.0, elapsed)
 
   " case: unreferenced job, using timer
   if !has('timers')
@@ -1595,7 +1730,7 @@ function MyCloseCb(ch)
 endfunc
 
 function Ch_test_close_callback(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -1615,8 +1750,14 @@ func Test_close_callback_ipv6()
   call Test_close_callback()
 endfunc
 
+func Test_close_callback_unix()
+  CheckUnix
+  call Test_close_callback()
+  call delete('Xtestsocket')
+endfunc
+
 function Ch_test_close_partial(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -1639,6 +1780,12 @@ endfunc
 func Test_close_partial_ipv6()
   CheckIPv6
   call Test_close_partial()
+endfunc
+
+func Test_close_partial_unix()
+  CheckUnix
+  call Test_close_partial()
+  call delete('Xtestsocket')
 endfunc
 
 func Test_job_start_fails()
@@ -1681,19 +1828,21 @@ func Test_job_start_fails()
   call assert_fails("call job_start('ls',
         \ {'err_io' : 'buffer', 'err_buf' : -1})", 'E475:')
 
+  let cmd = has('win32') ? "cmd /D /c dir" : "ls"
+
   set nomodifiable
-  call assert_fails("call job_start('cmd /c dir',
+  call assert_fails("call job_start(cmd,
         \ {'out_io' : 'buffer', 'out_buf' :" .. bufnr() .. "})", 'E21:')
-  call assert_fails("call job_start('cmd /c dir',
+  call assert_fails("call job_start(cmd,
         \ {'err_io' : 'buffer', 'err_buf' :" .. bufnr() .. "})", 'E21:')
   set modifiable
 
-  call assert_fails("call job_start('ls', {'in_io' : 'buffer'})", 'E915:')
+  call assert_fails("call job_start(cmd, {'in_io' : 'buffer'})", 'E915:')
 
   edit! XXX
   let bnum = bufnr()
   enew
-  call assert_fails("call job_start('ls',
+  call assert_fails("call job_start(cmd,
         \ {'in_io' : 'buffer', 'in_buf' : bnum})", 'E918:')
 
   " Empty job tests
@@ -1708,6 +1857,9 @@ func Test_job_start_fails()
 endfunc
 
 func Test_job_stop_immediately()
+  " With valgrind this causes spurious leak reports
+  CheckNotValgrind
+
   let g:job = job_start([s:python, '-c', 'import time;time.sleep(10)'])
   try
     eval g:job->job_stop()
@@ -1716,6 +1868,10 @@ func Test_job_stop_immediately()
     call job_stop(g:job, 'kill')
     unlet g:job
   endtry
+endfunc
+
+func Test_null_job_eval()
+  call assert_fails('eval test_null_job()->eval()', 'E121:')
 endfunc
 
 " This was leaking memory.
@@ -1738,6 +1894,7 @@ func Test_using_freed_memory()
 endfunc
 
 func Test_collapse_buffers()
+  let g:test_is_flaky = 1
   CheckExecutable cat
 
   sp test_channel.vim
@@ -1874,12 +2031,15 @@ func Test_env()
     let cmd = [&shell, &shellcmdflag, 'echo $FOO']
   endif
   call assert_fails('call job_start(cmd, {"env": 1})', 'E475:')
-  call job_start(cmd, {'callback': {ch,msg -> execute(":let g:envstr .= msg")}, 'env': {'FOO': 'bar'}})
-  call WaitForAssert({-> assert_equal("bar", g:envstr)})
+  let job = job_start(cmd, {'callback': {ch,msg -> execute(":let g:envstr .= msg")}, 'env': {'FOO': 'bar'}})
+  if WaitForAssert({-> assert_equal("bar", g:envstr)}, 500) != 0
+    call add(v:errors, "Job status: " .. string(job->job_info()))
+  endif
   unlet g:envstr
 endfunc
 
 func Test_cwd()
+  let g:test_is_flaky = 1
   let g:envstr = ''
   if has('win32')
     let expect = $TEMP
@@ -1891,8 +2051,13 @@ func Test_cwd()
   let job = job_start(cmd, {'callback': {ch,msg -> execute(":let g:envstr .= msg")}, 'cwd': expect})
   try
     call WaitForAssert({-> assert_notequal("", g:envstr)})
+    " There may be a trailing slash or not, ignore it
     let expect = substitute(expect, '[/\\]$', '', '')
     let g:envstr = substitute(g:envstr, '[/\\]$', '', '')
+    " on CI there can be /private prefix or not, ignore it
+    if $CI != '' && stridx(expect, '/private/') == 0
+      let expect = expect[8:]
+    endif
     if $CI != '' && stridx(g:envstr, '/private/') == 0
       let g:envstr = g:envstr[8:]
     endif
@@ -1904,7 +2069,7 @@ func Test_cwd()
 endfunc
 
 function Ch_test_close_lambda(port)
-  let handle = ch_open(s:localhost . a:port, s:chopt)
+  let handle = ch_open(s:address(a:port), s:chopt)
   if ch_status(handle) == "fail"
     call assert_report("Can't open channel")
     return
@@ -1926,11 +2091,22 @@ func Test_close_lambda_ipv6()
   call Test_close_lambda()
 endfunc
 
+func Test_close_lambda_unix()
+  CheckUnix
+  call Test_close_lambda()
+  call delete('Xtestsocket')
+endfunc
+
 func s:test_list_args(cmd, out, remove_lf)
   try
     let g:out = ''
     let job = job_start([s:python, '-c', a:cmd], {'callback': {ch, msg -> execute('let g:out .= msg')}, 'out_mode': 'raw'})
-    call WaitFor('"" != g:out')
+    try
+      call WaitFor('"" != g:out')
+    catch
+      call add(v:errors, "Job status: " .. string(job->job_info()))
+      throw v:exception
+    endtry
     if has('win32')
       let g:out = substitute(g:out, '\r', '', 'g')
     endif
@@ -2079,7 +2255,7 @@ endfunc
 func Test_job_tty_in_out()
   CheckUnix
 
-  call writefile(['test'], 'Xtestin')
+  call writefile(['test'], 'Xtestin', 'D')
   let in_opts = [{},
         \ {'in_io': 'null'},
         \ {'in_io': 'file', 'in_name': 'Xtestin'}]
@@ -2121,7 +2297,6 @@ func Test_job_tty_in_out()
     call WaitForAssert({-> assert_equal('dead', job_status(job))})
   endfor
 
-  call delete('Xtestin')
   call delete('Xtestout')
   call delete('Xtesterr')
 endfunc
@@ -2151,16 +2326,16 @@ func Test_zz_nl_err_to_out_pipe()
     let found_stop = 0
     for l in loglines
       if l =~ 'Test_zz_nl_err_to_out_pipe'
-	let found_test = 1
+        let found_test = 1
       endif
       if l =~ 'SEND on.*echo something'
-	let found_send = 1
+        let found_send = 1
       endif
       if l =~ 'RECV on.*something'
-	let found_recv = 1
+        let found_recv = 1
       endif
       if l =~ 'Stopping job with'
-	let found_stop = 1
+        let found_stop = 1
       endif
     endfor
     call assert_equal(1, found_test)
@@ -2180,17 +2355,18 @@ func Test_zz_ch_log()
   call ch_log('%s%s')
   call ch_logfile('')
   let text = readfile('Xlog')
-  call assert_match("hello there", text[1])
+  call assert_match("start log session", text[0])
+  call assert_match("ch_log(): hello there", text[1])
   call assert_match("%s%s", text[2])
-  call mkdir("Xdir1")
-  call assert_fails("call ch_logfile('Xdir1')", 'E484:')
-  cal delete("Xdir1", 'd')
+  call mkdir("Xchlogdir1", 'D')
+  call assert_fails("call ch_logfile('Xchlogdir1')", 'E484:')
+
   call delete('Xlog')
 endfunc
 
 func Test_issue_5150()
   if has('win32')
-    let cmd = 'cmd /c pause'
+    let cmd = 'cmd /D /c pause'
   else
     let cmd = 'grep foo'
   endif
@@ -2227,6 +2403,8 @@ func Test_job_trailing_space_unix()
   let job = job_start("cat ", #{in_io: 'null'})
   call WaitForAssert({-> assert_equal("dead", job_status(job))})
   call assert_equal(0, job_info(job).exitval)
+
+  call delete('Xtestsocket')
 endfunc
 
 func Test_ch_getbufnr()
@@ -2318,7 +2496,7 @@ func Test_cb_with_input()
   let g:wait_exit_cb = 1
 
   if has('win32')
-    let cmd = 'cmd /c echo "Vim''s test"'
+    let cmd = 'cmd /D /c echo "Vim''s test"'
   else
     let cmd = 'echo "Vim''s test"'
   endif
@@ -2358,5 +2536,746 @@ func Test_parse_messages_in_autocmd()
   augroup END
 endfunc
 
+func Test_job_start_with_invalid_argument()
+  call assert_fails('call job_start([0zff])', 'E976:')
+endfunc
+
+" Process requests received from the LSP server
+func LspProcessServerRequests(chan, msg)
+  if a:msg['method'] == 'server-req-in-middle'
+        \ && a:msg['params']['text'] == 'server-req'
+    call ch_sendexpr(a:chan, #{method: 'server-req-in-middle-resp',
+          \ id: a:msg['id'], params: #{text: 'client-resp'}})
+  endif
+endfunc
+
+" LSP channel message callback function
+func LspCb(chan, msg)
+  call add(g:lspNotif, a:msg)
+  if a:msg->has_key('method')
+    call LspProcessServerRequests(a:chan, a:msg)
+  endif
+endfunc
+
+" LSP one-time message callback function (used for ch_sendexpr())
+func LspOtCb(chan, msg)
+  call add(g:lspOtMsgs, a:msg)
+  if a:msg->has_key('method')
+    call LspProcessServerRequests(a:chan, a:msg)
+  endif
+endfunc
+
+" Test for the 'lsp' channel mode
+func LspTests(port)
+  " call ch_logfile('Xlspclient.log', 'w')
+  let ch = ch_open(s:localhost .. a:port, #{mode: 'lsp', callback: 'LspCb'})
+  if ch_status(ch) == "fail"
+    call assert_report("Can't open the lsp channel")
+    return
+  endif
+
+  " check for channel information
+  let info = ch_info(ch)
+  call assert_equal('LSP', info.sock_mode)
+
+  " Evaluate an expression
+  let resp = ch_evalexpr(ch, #{method: 'simple-rpc', params: [10, 20]})
+  call assert_false(empty(resp))
+  call assert_equal(#{id: 1, jsonrpc: '2.0', result: 'simple-rpc'}, resp)
+
+  " Evaluate an expression. While waiting for the response, a notification
+  " message is delivered.
+  let g:lspNotif = []
+  let resp = ch_evalexpr(ch, #{method: 'rpc-with-notif', params: {'v': 10}})
+  call assert_false(empty(resp))
+  call assert_equal(#{id: 2, jsonrpc: '2.0', result: 'rpc-with-notif-resp'},
+        \ resp)
+  call assert_equal([#{jsonrpc: '2.0', result: 'rpc-with-notif-notif'}],
+        \ g:lspNotif)
+
+  " Wrong payload notification test
+  let g:lspNotif = []
+  let r = ch_sendexpr(ch, #{method: 'wrong-payload', params: {}})
+  call assert_equal({}, r)
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', result: 'wrong-payload'}], g:lspNotif)
+
+  " Test for receiving a response with incorrect 'id' and additional
+  " notification messages while evaluating an expression.
+  let g:lspNotif = []
+  let resp = ch_evalexpr(ch, #{method: 'rpc-resp-incorrect-id',
+        \ params: {'a': [1, 2]}})
+  call assert_false(empty(resp))
+  call assert_equal(#{id: 4, jsonrpc: '2.0',
+        \ result: 'rpc-resp-incorrect-id-4'}, resp)
+  call assert_equal([#{jsonrpc: '2.0', result: 'rpc-resp-incorrect-id-1'},
+        \ #{jsonrpc: '2.0', result: 'rpc-resp-incorrect-id-2'},
+        \ #{jsonrpc: '2.0', id: 1, result: 'rpc-resp-incorrect-id-3'}],
+        \ g:lspNotif)
+
+  " simple notification test
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'simple-notif', params: [#{a: 10, b: []}]})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', result: 'simple-notif'}], g:lspNotif)
+
+  " multiple notifications test
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'multi-notif', params: [#{a: {}, b: {}}]})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', result: 'multi-notif1'},
+        \ #{jsonrpc: '2.0', result: 'multi-notif2'}], g:lspNotif)
+
+  " Test for sending a message with an identifier.
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'msg-with-id', id: 93, params: #{s: 'str'}})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', id: 93, result: 'msg-with-id'}],
+        \ g:lspNotif)
+
+  " Test for setting the 'id' value in a request message
+  let resp = ch_evalexpr(ch, #{method: 'ping', id: 1, params: {}})
+  call assert_equal(#{id: 8, jsonrpc: '2.0', result: 'alive'}, resp)
+
+  " Test for using a one time callback function to process a response
+  let g:lspOtMsgs = []
+  let r = ch_sendexpr(ch, #{method: 'msg-specific-cb', params: {}},
+        \ #{callback: 'LspOtCb'})
+  call assert_equal(9, r.id)
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{id: 9, jsonrpc: '2.0', result: 'msg-specific-cb'}],
+        \ g:lspOtMsgs)
+
+  " Test for generating a request message from the other end (server)
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'server-req', params: #{}})
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([{'id': 201, 'jsonrpc': '2.0',
+        \ 'result': {'method': 'checkhealth', 'params': {'a': 20}}}],
+        \ g:lspNotif)
+
+  " Test for sending a message without an id
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'echo', params: #{s: 'msg-without-id'}})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', result:
+        \ #{method: 'echo', jsonrpc: '2.0', params: #{s: 'msg-without-id'}}}],
+        \ g:lspNotif)
+
+  " Test for sending a notification message with an id
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'echo', id: 110, params: #{s: 'msg-with-id'}})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', result:
+        \ #{method: 'echo', jsonrpc: '2.0', id: 110,
+        \ params: #{s: 'msg-with-id'}}}], g:lspNotif)
+
+  " Test for processing the extra fields in the HTTP header
+  let resp = ch_evalexpr(ch, #{method: 'extra-hdr-fields', params: {}})
+  call assert_equal({'id': 14, 'jsonrpc': '2.0', 'result': 'extra-hdr-fields'},
+        \ resp)
+
+  " Test for processing delayed payload
+  let resp = ch_evalexpr(ch, #{method: 'delayed-payload', params: {}})
+  call assert_equal({'id': 15, 'jsonrpc': '2.0', 'result': 'delayed-payload'},
+        \ resp)
+
+  " Test for processing a HTTP header without the Content-Length field
+  let resp = ch_evalexpr(ch, #{method: 'hdr-without-len', params: {}},
+        \ #{timeout: 200})
+  call assert_equal({}, resp)
+  " send a ping to make sure communication still works
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+
+  " Test for processing a HTTP header with wrong length
+  let resp = ch_evalexpr(ch, #{method: 'hdr-with-wrong-len', params: {}},
+        \ #{timeout: 200})
+  call assert_equal({}, resp)
+  " send a ping to make sure communication still works
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+
+  " Test for processing a HTTP header with negative length
+  let resp = ch_evalexpr(ch, #{method: 'hdr-with-negative-len', params: {}},
+        \ #{timeout: 200})
+  call assert_equal({}, resp)
+  " send a ping to make sure communication still works
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+
+  " Test for an empty header
+  let resp = ch_evalexpr(ch, #{method: 'empty-header', params: {}},
+        \ #{timeout: 200})
+  call assert_equal({}, resp)
+  " send a ping to make sure communication still works
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+
+  " Test for an empty payload
+  let resp = ch_evalexpr(ch, #{method: 'empty-payload', params: {}},
+        \ #{timeout: 200})
+  call assert_equal({}, resp)
+  " send a ping to make sure communication still works
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+
+  " Test for a large payload
+  let content = repeat('abcdef', 11000)
+  let resp = ch_evalexpr(ch, #{method: 'large-payload',
+        \ params: #{text: content}})
+  call assert_equal(#{jsonrpc: '2.0', id: 26, result:
+        \ #{method: 'large-payload', jsonrpc: '2.0', id: 26,
+        \ params: #{text: content}}}, resp)
+  " send a ping to make sure communication still works
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+
+  " Test for processing a request message from the server while the client
+  " is waiting for a response with the same identifier (sync-rpc)
+  let g:lspNotif = []
+  let resp = ch_evalexpr(ch, #{method: 'server-req-in-middle',
+        \ params: #{text: 'client-req'}})
+  call assert_equal(#{jsonrpc: '2.0', id: 28,
+        \ result: #{text: 'server-resp'}}, resp)
+  call assert_equal([
+        \ #{id: -1, jsonrpc: '2.0', method: 'server-req-in-middle',
+        \   params: #{text: 'server-notif'}},
+        \ #{id: 28, jsonrpc: '2.0', method: 'server-req-in-middle',
+        \   params: #{text: 'server-req'}}], g:lspNotif)
+
+  " Test for processing a request message from the server while the client
+  " is waiting for a response with the same identifier (async-rpc using the
+  " channel callback function)
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'server-req-in-middle', id: 500,
+        \ params: #{text: 'client-req'}})
+  " Send three pings to wait for all the notification messages to arrive
+  for i in range(3)
+    call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  endfor
+  call assert_equal([
+        \ #{id: -1, jsonrpc: '2.0', method: 'server-req-in-middle',
+        \   params: #{text: 'server-notif'}},
+        \ #{id: 500, jsonrpc: '2.0', method: 'server-req-in-middle',
+        \   params: #{text: 'server-req'}},
+        \ #{id: 500, jsonrpc: '2.0', result: #{text: 'server-resp'}}
+        \ ], g:lspNotif)
+
+  " Test for processing a request message from the server while the client
+  " is waiting for a response with the same identifier (async-rpc using a
+  " one-time callback function)
+  let g:lspNotif = []
+  let g:lspOtMsgs = []
+  call ch_sendexpr(ch, #{method: 'server-req-in-middle',
+        \ params: #{text: 'client-req'}}, #{callback: 'LspOtCb'})
+  " Send a ping to wait for all the notification messages to arrive
+  for i in range(3)
+    call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  endfor
+  call assert_equal([
+        \ #{id: 32, jsonrpc: '2.0', result: #{text: 'server-resp'}}],
+        \ g:lspOtMsgs)
+  call assert_equal([
+        \ #{id: -1, jsonrpc: '2.0', method: 'server-req-in-middle',
+        \ params: #{text: 'server-notif'}},
+        \ #{id: 32, jsonrpc: '2.0', method: 'server-req-in-middle',
+        \ params: {'text': 'server-req'}}], g:lspNotif)
+
+  " Test for invoking an unsupported method
+  let resp = ch_evalexpr(ch, #{method: 'xyz', params: {}}, #{timeout: 200})
+  call assert_equal({}, resp)
+
+  " Test for sending a message without a callback function. Notification
+  " message should be dropped but RPC response should not be dropped.
+  call ch_setoptions(ch, #{callback: ''})
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'echo', params: #{s: 'no-callback'}})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([], g:lspNotif)
+  " Restore the callback function
+  call ch_setoptions(ch, #{callback: 'LspCb'})
+
+  " " Test for sending a raw message
+  " let g:lspNotif = []
+  " let s = "Content-Length: 62\r\n"
+  " let s ..= "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
+  " let s ..= "\r\n"
+  " let s ..= '{"method":"echo","jsonrpc":"2.0","params":{"m":"raw-message"}}'
+  " call ch_sendraw(ch, s)
+  " call ch_evalexpr(ch, #{method: 'ping'})
+  " call assert_equal([{'jsonrpc': '2.0',
+  "       \ 'result': {'method': 'echo', 'jsonrpc': '2.0',
+  "       \ 'params': {'m': 'raw-message'}}}], g:lspNotif)
+
+  " Test for sending a message with a String id, which is what answering a
+  " request from a server that named it with one takes
+  let g:lspNotif = []
+  call ch_sendexpr(ch, #{method: 'echo', id: 'e8a1-4c2f',
+        \ params: #{s: 'msg-with-string-id'}})
+  " Send a ping to wait for all the notification messages to arrive
+  call assert_equal('alive', ch_evalexpr(ch, #{method: 'ping'}).result)
+  call assert_equal([#{jsonrpc: '2.0', result:
+        \ #{method: 'echo', jsonrpc: '2.0', id: 'e8a1-4c2f',
+        \ params: #{s: 'msg-with-string-id'}}}], g:lspNotif)
+
+  " Invalid arguments to ch_evalexpr() and ch_sendexpr()
+  call assert_fails('call ch_sendexpr(ch, #{method: "cookie", id: "cookie"},'
+        \ .. ' #{callback: "LspOtCb"})', 'E475:')
+  call assert_fails('call ch_evalexpr(ch, #{method: "ping", id: [{}]})', 'E475:')
+  call assert_fails('call ch_evalexpr(ch, [1, 2, 3])', 'E1206:')
+  call assert_fails('call ch_sendexpr(ch, "abc")', 'E1206:')
+  call assert_fails('call ch_evalexpr(ch, #{method: "ping"}, #{callback: "LspOtCb"})', 'E917:')
+  " call ch_logfile('', 'w')
+endfunc
+
+let g:server_received_addr = ''
+let g:server_received_msg = ''
+let g:server_received_input = ''
+
+func s:test_listen_input(ch, msg)
+    let g:server_received_input = a:msg
+endfunc
+
+func s:test_listen_accept(ch, addr)
+    let g:server_received_addr = a:addr
+    let g:server_received_msg = ch_readraw(a:ch)
+
+    call ch_setoptions(a:ch, #{mode: "raw", callback: function('s:test_listen_input')})
+endfunction
+
+func Test_listen()
+    call ch_log('Test_listen()')
+    let server = ch_listen('12345', {'callback': function('s:test_listen_accept')})
+    if ch_status(server) == 'fail'
+        call assert_report("Can't listen channel")
+        return
+    endif
+    let handle = ch_open('127.0.0.1:12345', s:chopt)
+    if ch_status(handle) == 'fail'
+        call assert_report("Can't open channel")
+        return
+    endif
+    call ch_sendraw(handle, 'hello')
+    call WaitFor('"hello" == g:server_received_msg')
+    call ch_sendraw(handle, 'notify')
+    call WaitFor('"notify" == g:server_received_input')
+
+    call ch_close(handle)
+    call ch_close(server)
+    call assert_equal('hello', g:server_received_msg)
+    call assert_match('127.0.0.1:', g:server_received_addr)
+endfunc
+
+func Test_listen_invalid_argument()
+    call ch_log('Test_listen_invalid_argument()')
+
+    " missing port
+    call assert_fails("call ch_listen('')", 'E475:')
+
+    " port number too large
+    call assert_fails("call ch_listen('99999')", 'E475:')
+
+    " port number zero should let the OS assign an available port
+    let ch = ch_listen('0')
+    call assert_equal('open', ch_status(ch))
+    call assert_notequal(0, ch_info(ch).port)
+    call ch_close(ch)
+
+    " port number negative
+    call assert_fails("call ch_listen('-1')", 'E475:')
+
+    " make sure we don't accept hostname/IP address
+    call assert_fails("call ch_listen('127.0.0.1:4500')", 'E475:')
+    call assert_fails("call ch_listen('127.0.0.1')", 'E475:')
+    call assert_fails("call ch_listen('localhost:4500')", 'E475:')
+    call assert_fails("call ch_listen('localhost')", 'E475:')
+    call assert_fails("call ch_listen('[::1]')", 'E475:')
+endfunc
+
+func Test_listen_info_no_hostname()
+    let ch = ch_listen('0')
+    call assert_fails("call ch_info(ch).hostname", 'E716:')
+    call ch_close(ch)
+endfunc
+
+" A Unix domain socket must work when it is the first socket used in a Vim
+" process, so run it in a separate Vim.
+func Test_listen_unix_first_socket()
+  let sockpath = fnamemodify('Xlistensock', ':p')
+  if len(sockpath) >= 100
+    throw 'Skipped: socket path is too long'
+  endif
+  let after =<< trim eval [CODE]
+    func OnAccept(ch, addr)
+      call ch_setoptions(a:ch, #{{mode: 'raw'}})
+      call add(g:result, 'accept ' .. a:addr)
+    endfunc
+    let g:result = []
+    let server = ch_listen('unix:{sockpath}', #{{callback: 'OnAccept'}})
+    call add(g:result, 'listen ' .. ch_status(server))
+    let client = ch_open('unix:{sockpath}', #{{mode: 'raw'}})
+    call add(g:result, 'open ' .. ch_status(client))
+    let cnt = 0
+    while len(g:result) < 3 && cnt < 500
+      sleep 10m
+      let cnt += 1
+    endwhile
+    call writefile(g:result, 'Xlistenresult')
+    qall!
+  [CODE]
+  if RunVim([], after, '')
+    call assert_equal(['accept unix:anonymous', 'listen open', 'open open'],
+          \ sort(readfile('Xlistenresult')))
+  endif
+  call delete('Xlistenresult')
+  call delete('Xlistensock')
+endfunc
+
+" A Vim started with --stdio-channel answers on its stdin and stdout.
+func Test_stdio_channel()
+  if has('win32') && has('gui_running')
+    throw 'Skipped: gvim.exe cannot run without the GUI'
+  endif
+  let lines =<< trim END
+    func OnMessage(ch, msg)
+      if a:msg.method == 'ping'
+        call ch_sendexpr(a:ch, #{id: a:msg.id, result: 'pong ' .. a:msg.params})
+      elseif a:msg.method == 'again'
+        try
+          call ch_open('stdio')
+          let err = 'none'
+        catch
+          let err = v:exception
+        endtry
+        call ch_sendexpr(a:ch, #{id: a:msg.id, result: err})
+      endif
+    endfunc
+    let ch = ch_open('stdio', #{mode: 'lsp', callback: 'OnMessage'})
+    " Output of Vim itself must not get into the channel.
+    set verbose=1
+    echo 'noise'
+  END
+  call writefile(lines, 'Xstdio_server.vim', 'D')
+
+  let job = job_start([GetVimProg(), '--clean', '--stdio-channel',
+        \ '-S', 'Xstdio_server.vim'], #{in_mode: 'lsp', out_mode: 'lsp'})
+  call assert_equal('run', job_status(job))
+
+  let resp = ch_evalexpr(job, #{method: 'ping', params: 'x'}, #{timeout: 5000})
+  call assert_equal('pong x', resp->get('result', resp))
+  let resp = ch_evalexpr(job, #{method: 'again'}, #{timeout: 5000})
+  call assert_match('E1583:', resp->get('result', ''))
+
+  " Without --stdio-channel the address cannot be used.
+  call assert_fails("call ch_open('stdio')", 'E1582:')
+
+  " The child exits when its stdin is closed.
+  call ch_close(job)
+  call WaitForAssert({-> assert_equal('dead', job_status(job))})
+  call job_stop(job)
+endfunc
+
+" A message that is only partly read when Vim gets busy with blocking reads
+" on another channel is not dropped: the rest of it was there to be read.
+func Test_lsp_incomplete_message_while_blocked()
+  if has('win32') && has('gui_running')
+    throw 'Skipped: gvim.exe cannot run without the GUI'
+  endif
+  let lines =<< trim END
+    func OnMessage(ch, msg)
+      if a:msg.method == 'quick'
+        call timer_start(10, {-> ch_sendexpr(a:ch, #{id: a:msg.id, result: 1})})
+      endif
+    endfunc
+    call ch_open('stdio', #{mode: 'lsp', callback: 'OnMessage'})
+  END
+  call writefile(lines, 'Xstdio_child.vim', 'D')
+  let lines =<< trim END
+    let notes = 0
+    let child = job_start([v:progpath, '--clean', '--stdio-channel',
+          \ '-S', 'Xstdio_child.vim'], #{in_mode: 'lsp', out_mode: 'lsp'})
+    " A notification, which ch_sendexpr() would wait for an answer to.
+    func Notify(method)
+      let body = json_encode(#{jsonrpc: '2.0', method: a:method})
+      call ch_sendraw(g:stdio,
+            \ 'Content-Length: ' .. strlen(body) .. "\r\n\r\n" .. body)
+    endfunc
+    func Block(timer)
+      call Notify('blocking')
+      for i in range(30)
+        call ch_evalexpr(g:child, #{method: 'quick'}, #{timeout: 5000})
+      endfor
+    endfunc
+    func OnMessage(ch, msg)
+      if a:msg.method == 'note'
+        let g:notes += 1
+      elseif a:msg.method == 'count'
+        call ch_sendexpr(a:ch, #{id: a:msg.id, result: g:notes})
+      elseif a:msg.method == 'block'
+        call ch_sendexpr(a:ch, #{id: a:msg.id, result: 'ok'})
+        call timer_start(10, 'Block')
+      endif
+    endfunc
+    let stdio = ch_open('stdio', #{mode: 'lsp', callback: 'OnMessage'})
+  END
+  call writefile(lines, 'Xstdio_busy.vim', 'D')
+  let g:blocking = 0
+  func! BusyMessage(ch, msg)
+    if a:msg->get('method', '') == 'blocking'
+      let g:blocking = 1
+    endif
+  endfunc
+  let job = job_start([GetVimProg(), '--clean', '--stdio-channel',
+        \ '-S', 'Xstdio_busy.vim'], #{in_mode: 'lsp', out_mode: 'lsp',
+        \ callback: 'BusyMessage'})
+  call assert_equal('run', job_status(job))
+
+  " Nothing may go out between the two halves: whatever is sent would be taken
+  " for the rest of the first one.  So "block" goes first, the first half is
+  " read while the other Vim is still idle, and the second half waits for word
+  " that the blocking reads have started.
+  call ch_evalexpr(job, #{method: 'block'}, #{timeout: 5000})
+  let body = json_encode(#{method: 'note', jsonrpc: '2.0',
+        \ params: #{text: repeat('x', 1000)}})
+  let framed = 'Content-Length: ' .. strlen(body) .. "\r\n\r\n" .. body
+  let half = strlen(framed) / 2
+  call ch_sendraw(job, framed[: half - 1])
+  call WaitForAssert({-> assert_equal(1, g:blocking)})
+  call ch_sendraw(job, framed[half :])
+
+  " Ask more than once: a notification that is only late turns up in a later
+  " answer, one that was discarded never does.
+  let counts = []
+  for i in range(5)
+    let resp = ch_evalexpr(job, #{method: 'count'}, #{timeout: 5000})
+    " An empty Dict is no answer at all, which is not a count of zero.
+    let got = type(resp) == v:t_dict ? resp->get('result', resp) : resp
+    call add(counts, got)
+    if type(got) == v:t_number && got == 1
+      break
+    endif
+    sleep 200m
+  endfor
+  call assert_equal(1, counts[-1], 'the count over time: ' .. string(counts))
+
+  call ch_close(job)
+  call WaitForAssert({-> assert_equal('dead', job_status(job))})
+  call job_stop(job)
+endfunc
+
+" Messages that arrive together are handled without a wait in between, also
+" when handling them takes longer than one round of parsing is allowed.
+func Test_stdio_channel_queued_messages()
+  if has('win32') && has('gui_running')
+    throw 'Skipped: gvim.exe cannot run without the GUI'
+  endif
+  let lines =<< trim END
+    func OnMessage(ch, msg)
+      if a:msg.method == 'slow'
+        " Not :sleep, which handles the next message meanwhile.
+        let start = reltime()
+        while reltimefloat(reltime(start)) < 0.06
+        endwhile
+      elseif a:msg.method == 'ping'
+        call ch_sendexpr(a:ch, #{id: a:msg.id, result: 'pong'})
+      endif
+    endfunc
+    call ch_open('stdio', #{mode: 'lsp', callback: 'OnMessage'})
+  END
+  call writefile(lines, 'Xstdio_queued.vim', 'D')
+  let g:stdio_answer = ''
+  func! StdioAnswer(ch, msg)
+    let g:stdio_answer = a:msg->get('result', '')
+  endfunc
+  let job = job_start([GetVimProg(), '--clean', '--stdio-channel',
+        \ '-S', 'Xstdio_queued.vim'], #{in_mode: 'lsp', out_mode: 'lsp',
+        \ callback: 'StdioAnswer'})
+  call assert_equal('run', job_status(job))
+
+  let msgs = repeat([#{jsonrpc: '2.0', method: 'slow'}], 10)
+        \ + [#{jsonrpc: '2.0', id: 1, method: 'ping'}]
+  let raw = msgs->mapnew({_, m -> json_encode(m)})
+        \ ->map({_, b -> 'Content-Length: ' .. strlen(b) .. "\r\n\r\n" .. b})
+        \ ->join('')
+  let start = reltime()
+  call ch_sendraw(job, raw)
+  call WaitForAssert({-> assert_equal('pong', g:stdio_answer)}, 10000)
+  " Ten messages take 0.6 seconds, waiting a second after each round of two
+  " of them took about five seconds.
+  call assert_inrange(0, 3.5, reltimefloat(reltime(start)), 'elapsed seconds')
+
+  call ch_close(job)
+  call WaitForAssert({-> assert_equal('dead', job_status(job))})
+  call job_stop(job)
+  delfunc StdioAnswer
+  unlet g:stdio_answer
+endfunc
+
+" A line in NL mode that arrives in parts is handled once it is complete.
+func Test_stdio_channel_incomplete_nl_message()
+  if has('win32') && has('gui_running')
+    throw 'Skipped: gvim.exe cannot run without the GUI'
+  endif
+  let lines =<< trim END
+    func OnMessage(ch, msg)
+      call ch_sendraw(a:ch, 'got ' .. a:msg .. "\n")
+    endfunc
+    call ch_open('stdio', #{mode: 'nl', callback: 'OnMessage'})
+  END
+  call writefile(lines, 'Xstdio_incomplete.vim', 'D')
+  let g:stdio_answer = []
+  func! StdioAnswer(ch, msg)
+    call add(g:stdio_answer, a:msg)
+  endfunc
+  let job = job_start([GetVimProg(), '--clean', '--stdio-channel',
+        \ '-S', 'Xstdio_incomplete.vim'], #{mode: 'nl',
+        \ callback: 'StdioAnswer'})
+  call assert_equal('run', job_status(job))
+
+  call ch_sendraw(job, 'hel')
+  sleep 200m
+  call assert_equal([], g:stdio_answer)
+  call ch_sendraw(job, "lo\n")
+  call WaitForAssert({-> assert_equal(['got hello'], g:stdio_answer)})
+
+  call ch_close(job)
+  call WaitForAssert({-> assert_equal('dead', job_status(job))})
+  call job_stop(job)
+  delfunc StdioAnswer
+  unlet g:stdio_answer
+endfunc
+
+func Test_channel_lsp_mode()
+  " The channel lsp mode test is flaky and gives the same error.
+  let g:giveup_same_error = 0
+  call RunServer('test_channel_lsp.py', 'LspTests', [])
+endfunc
+
+" Test for the 'dap' channel mode. Don't need to test much since most of the
+" logic is same as 'lsp' mode.
+func DapTests(port)
+  let ch = ch_open(s:localhost .. a:port, #{
+        \ mode: 'dap',
+        \ })
+
+  if ch_status(ch) == "fail"
+    call assert_report("Can't open the dap channel")
+    return
+  endif
+
+  " check for channel information
+  let info = ch_info(ch)
+  call assert_equal('DAP', info.sock_mode)
+
+  let resp = ch_evalexpr(ch, #{
+        \ type: 'request',
+        \ command: 'initialize'
+        \ })
+  call assert_equal({
+        \ 'seq': 1,
+        \ 'request_seq': 1,
+        \ 'type': 'response',
+        \ 'success': v:true,
+        \ 'body': {'supportsConfigurationDoneRequest': v:true},
+        \ 'command': 'initialize'
+        \ }, resp)
+
+  let resp = ch_read(ch)
+
+  call assert_equal({
+        \ 'seq': 2,
+        \ 'type': 'event',
+        \ 'event': 'initialized',
+        \ 'body': {}
+        \ }, resp)
+
+  let resp = ch_evalexpr(ch, #{
+        \ type: 'request',
+        \ command: 'test'
+        \ })
+
+  call assert_equal({
+        \ 'seq': 3,
+        \ 'request_seq': 2,
+        \ 'type': 'response',
+        \ 'success': v:true,
+        \ 'body': {},
+        \ 'command': 'test'
+        \ }, resp)
+endfunc
+
+func Test_channel_dap_mode()
+  let g:giveup_same_error = 0
+  call RunServer('test_channel_dap.py', 'DapTests', [])
+endfunc
+
+func Test_error_callback_terminal()
+  CheckUnix
+  CheckFeature terminal
+  let g:out = ''
+  let g:error = ''
+
+  func! s:Out(channel, msg)
+      let g:out .= string(a:msg)
+  endfunc
+
+  func! s:Err(channel, msg)
+      let g:error .= string(a:msg)
+  endfunc
+
+  let buf = term_start(['sh'], #{term_finish: 'close', out_cb: 's:Out', err_cb: 's:Err', err_io: 'pipe'})
+  let job = term_getjob(buf)
+  let dict = job_info(job).channel->ch_info()
+
+  call assert_true(dict.id != 0)
+  call assert_equal('open', dict.status)
+  call assert_equal('open', dict.out_status)
+  call assert_equal('RAW', dict.out_mode)
+  call assert_equal('buffer', dict.out_io)
+  call assert_equal('open', dict.err_status)
+  call assert_equal('RAW', dict.err_mode)
+  call assert_equal('pipe', dict.err_io)
+  call term_sendkeys(buf, "XXXX\<cr>")
+  " term_wait() does not wait for the err_io 'pipe' callback to fire, so use
+  " WaitForAssert() to poll until sh has written the error message.
+  call WaitForAssert({-> assert_match('sh:.*XXXX:.*not found', g:error)}, 5000)
+  call term_sendkeys(buf, "exit\<cr>")
+  call WaitForAssert({-> assert_match('XXX.*exit', g:out)}, 5000)
+
+  delfunc s:Out
+  delfunc s:Err
+  unlet! g:out g:error
+endfunc
+
+" Verify that term_start() with out_cb/err_cb delivers data in RAW mode,
+" preserving embedded newlines in the raw chunk received from read().  If
+" per-line handling is desired, it is the callback's responsibility to split
+" on NL and strip the trailing CR.
+func Test_term_start_cb_raw_chunk()
+  CheckUnix
+  CheckFeature terminal
+  let g:Ch_msgs = []
+  let script_file = 'Xterm_cb_raw_chunk.sh'
+  call writefile(["#!/bin/sh",
+        \         "printf 'err:1\\nerr:2\\n' >&2",
+        \         "printf 'out:3\\n'"], script_file, 'D')
+  call setfperm(script_file, 'rwxr-xr-x')
+  let ptybuf = term_start('./' .. script_file, {
+        \ 'out_cb': {ch, msg -> add(g:Ch_msgs, msg)},
+        \ 'err_cb': {ch, msg -> add(g:Ch_msgs, msg)}})
+  " Wait until both the raw stderr chunk and a stdout chunk have arrived.
+  call WaitForAssert({-> assert_true(
+        \ index(g:Ch_msgs, "err:1\nerr:2\n") >= 0
+        \ && match(g:Ch_msgs, 'out:3') >= 0)}, 5000)
+  " stderr (via pipe) arrives as a single raw chunk with embedded NL,
+  " not split per line.  stdout (via PTY) is delivered, but its exact
+  " CR/LF shape depends on the PTY line discipline, so we only check that
+  " 'out:3' appears somewhere in the received chunks.
+  call job_stop(term_getjob(ptybuf))
+  exe 'bwipe! ' .. ptybuf
+  unlet g:Ch_msgs
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

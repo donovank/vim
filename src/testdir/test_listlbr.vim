@@ -3,18 +3,17 @@
 set encoding=latin1
 scriptencoding latin1
 
-source check.vim
 CheckOption linebreak
 CheckFeature conceal
 
-source view_util.vim
+source util/screendump.vim
 
 function s:screen_lines(lnum, width) abort
   return ScreenLines(a:lnum, a:width)
 endfunction
 
 func s:compare_lines(expect, actual)
-  call assert_equal(join(a:expect, "\n"), join(a:actual, "\n"))
+  call assert_equal(a:expect, a:actual)
 endfunc
 
 function s:test_windows(...)
@@ -69,6 +68,30 @@ func Test_linebreak_with_nolist()
 \ "+DEFGHIJKLMNOP      ",
 \ ]
   call s:compare_lines(expect, lines)
+  call s:close_windows()
+endfunc
+
+func Test_linebreak_with_list_and_number()
+  call s:test_windows('setl list listchars+=tab:>-')
+  call setline(1, ["abcdefg\thijklmnopqrstu", "v"])
+  let lines = s:screen_lines([1, 4], winwidth(0))
+  let expect_nonumber = [
+\ "abcdefg>------------",
+\ "hijklmnopqrstu$     ",
+\ "v$                  ",
+\ "~                   ",
+\ ]
+  call s:compare_lines(expect_nonumber, lines)
+
+  setl number
+  let lines = s:screen_lines([1, 4], winwidth(0))
+  let expect_number = [
+\ "  1 abcdefg>--------",
+\ "    hijklmnopqrstu$ ",
+\ "  2 v$              ",
+\ "~                   ",
+\ ]
+  call s:compare_lines(expect_number, lines)
   call s:close_windows()
 endfunc
 
@@ -133,14 +156,67 @@ func Test_linebreak_with_visual_operations()
   call s:close_windows()
 endfunc
 
-func Test_virtual_block()
+" Test that cursor is drawn at correct position after an operator when
+" 'linebreak' is enabled.
+func Test_linebreak_reset_restore()
+  CheckScreendump
+
+  " f_wincol() calls validate_cursor()
+  let lines =<< trim END
+    set linebreak showcmd noshowmode formatexpr=wincol()-wincol()
+    call setline(1, repeat('a', &columns - 10) .. ' bbbbbbbbbb c')
+  END
+  call writefile(lines, 'XlbrResetRestore', 'D')
+  let buf = RunVimInTerminal('-S XlbrResetRestore', {'rows': 8})
+
+  call term_sendkeys(buf, '$v$')
+  call WaitForAssert({-> assert_equal(13, term_getcursor(buf)[1])})
+  call term_sendkeys(buf, 'zo')
+  call WaitForAssert({-> assert_equal(12, term_getcursor(buf)[1])})
+
+  call term_sendkeys(buf, '$v$')
+  call WaitForAssert({-> assert_equal(13, term_getcursor(buf)[1])})
+  call term_sendkeys(buf, 'gq')
+  call WaitForAssert({-> assert_equal(12, term_getcursor(buf)[1])})
+
+  call term_sendkeys(buf, "$\<C-V>$")
+  call WaitForAssert({-> assert_equal(13, term_getcursor(buf)[1])})
+  call term_sendkeys(buf, 'I')
+  call WaitForAssert({-> assert_equal(12, term_getcursor(buf)[1])})
+
+  call term_sendkeys(buf, "\<Esc>$v$")
+  call WaitForAssert({-> assert_equal(13, term_getcursor(buf)[1])})
+  call term_sendkeys(buf, 's')
+  call WaitForAssert({-> assert_equal(12, term_getcursor(buf)[1])})
+  call VerifyScreenDump(buf, 'Test_linebreak_reset_restore_1', {})
+
+  " clean up
+  call term_sendkeys(buf, "\<Esc>")
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_visual_block()
   call s:test_windows('setl sbr=+')
   call setline(1, [
 \ "REMOVE: this not",
 \ "REMOVE: aaaaaaaaaaaaa",
 \ ])
+  set showcmd showcmdloc=tabline showtabline=2 tabline=%S
+  if has('gui')
+    set guioptions-=e
+  endif
   exe "norm! 1/^REMOVE:"
-  exe "norm! 0\<C-V>jf x"
+  exe "norm! 0\<C-V>jf "
+  let lines = s:screen_lines([1, 4], winwidth(0))
+  let expect = [
+\ "2x8                 ",
+\ "REMOVE: this not    ",
+\ "REMOVE:             ",
+\ "+aaaaaaaaaaaaa      ",
+\ ]
+  call s:compare_lines(expect, lines)
+  norm! x
+  set showcmd& showcmdloc& showtabline& tabline& guioptions&
   $put
   let lines = s:screen_lines([1, 4], winwidth(0))
   let expect = [
@@ -153,13 +229,13 @@ func Test_virtual_block()
   call s:close_windows()
 endfunc
 
-func Test_virtual_block_and_vbA()
+func Test_visual_block_and_vbA()
   call s:test_windows()
   call setline(1, "long line: " . repeat("foobar ", 40) . "TARGET at end")
   exe "norm! $3B\<C-v>eAx\<Esc>"
   let lines = s:screen_lines([1, 10], winwidth(0))
   let expect = [
-\ "foobar foobar       ",
+\ "<<<bar foobar       ",
 \ "foobar foobar       ",
 \ "foobar foobar       ",
 \ "foobar foobar       ",
@@ -174,7 +250,7 @@ func Test_virtual_block_and_vbA()
   call s:close_windows()
 endfunc
 
-func Test_virtual_char_and_block()
+func Test_visual_char_and_block()
   call s:test_windows()
   call setline(1, "1111-1111-1111-11-1111-1111-1111")
   exe "norm! 0f-lv3lc2222\<Esc>bgj."
@@ -264,6 +340,78 @@ func Test_list_with_tab_and_skipping_first_chars()
 \ "iiiiiiiii>-----aaaaa",
 \ ]
   call s:compare_lines(expect, lines)
+  call s:close_windows()
+endfunc
+
+func Test_ctrl_char_on_wrap_column()
+  call s:test_windows("setl nolbr wrap sbr=")
+  call setline(1, 'aaa' .. repeat("\<C-A>", 150) .. 'bbb')
+  call cursor(1,1)
+  norm! $
+  redraw!
+  let expect=[
+\ '<<<^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^A^A^A^A^A^A^A^A^A^',
+\ 'A^Abbb              ']
+  let lines = s:screen_lines([1, 10], winwidth(0))
+  call s:compare_lines(expect, lines)
+  call assert_equal(len(expect), winline())
+  call assert_equal(strwidth(trim(expect[-1], ' ', 2)), wincol())
+  setl sbr=!!
+  redraw!
+  let expect=[
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^A^A^A^',
+\ '!!A^A^A^A^A^A^Abbb  ']
+  let lines = s:screen_lines([1, 10], winwidth(0))
+  call s:compare_lines(expect, lines)
+  call assert_equal(len(expect), winline())
+  call assert_equal(strwidth(trim(expect[-1], ' ', 2)), wincol())
+  call s:close_windows()
+endfunc
+
+func Test_linebreak_no_break_after_whitespace_only()
+  call s:test_windows('setl ts=4 linebreak wrap')
+  call setline(1, "\t  abcdefghijklmnopqrstuvwxyz" ..
+        \ "abcdefghijklmnopqrstuvwxyz")
+  let lines = s:screen_lines([1, 4], winwidth(0))
+  let expect = [
+\ "      abcdefghijklmn",
+\ "opqrstuvwxyzabcdefgh",
+\ "ijklmnopqrstuvwxyz  ",
+\ "~                   ",
+\ ]
+  call s:compare_lines(expect, lines)
+  call s:close_windows()
+endfunc
+
+func Test_linebreak_with_large_tabstop()
+  call s:test_windows('setl ts=45 linebreak wrap')
+  call setline(1, "foo\tbar")
+  normal! $
+  let lines = s:screen_lines([1, 3], winwidth(0))
+  let expect = [
+\ "foo                 ",
+\ "                    ",
+\ "     bar            ",
+\ ]
+  call s:compare_lines(expect, lines)
+  call assert_equal(3, winline())
+  call assert_equal(8, wincol())
   call s:close_windows()
 endfunc
 

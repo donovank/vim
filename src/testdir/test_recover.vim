@@ -1,6 +1,20 @@
 " Test :recover
 
-source check.vim
+func SetUp()
+  edit XSetUp
+  preserve
+  let sn = swapname('')
+  let b = readblob(sn)
+  bw!
+
+  " Not all fields are written in a system-independent manner.  Detect whether
+  " the test is running on a little or big-endian system.
+  " The B0_MAGIC_LONG field may be 32-bit or 64-bit, depending on the system,
+  " even though the value stored is only 32-bits.  Therefore, need to check
+  " both the high and low 32-bits to compute these values.
+  let s:little_endian = (b[1008:1011] == 0z33323130) || (b[1012:1015] == 0z33323130)
+  let s:system_64bit = s:little_endian ? (b[1012:1015] == 0z00000000) : (b[1008:1011] == 0z00000000)
+endfunc
 
 func Test_recover_root_dir()
   " This used to access invalid memory.
@@ -121,7 +135,6 @@ func Test_nocatch_process_still_running()
   call test_override("uptime", 0)
   sleep 1
 
-  call rename('Xswap', swname)
   call feedkeys('e', 'tL')
   redir => editOutput
   edit Xswaptest
@@ -140,9 +153,9 @@ func Test_recover_multiple_swap_files()
   call setline(1, ['a', 'b', 'c'])
   preserve
   let b = readblob(swapname(''))
-  call writefile(b, '.Xfile1.swm')
-  call writefile(b, '.Xfile1.swn')
-  call writefile(b, '.Xfile1.swo')
+  call writefile(b, '.Xfile1.swm', 'D')
+  call writefile(b, '.Xfile1.swn', 'D')
+  call writefile(b, '.Xfile1.swo', 'D')
   %bw!
   call feedkeys(":recover Xfile1\<CR>3\<CR>q", 'xt')
   call assert_equal(['a', 'b', 'c'], getline(1, '$'))
@@ -156,23 +169,26 @@ func Test_recover_multiple_swap_files()
   call assert_equal('Xfile1', @%)
   call assert_equal([''], getline(1, '$'))
   bw!
-
-  call delete('.Xfile1.swm')
-  call delete('.Xfile1.swn')
-  call delete('.Xfile1.swo')
 endfunc
 
 " Test for :recover using an empty swap file
 func Test_recover_empty_swap_file()
   CheckUnix
-  call writefile([], '.Xfile1.swp')
+  call writefile([], '.Xfile1.swp', 'D')
+  set dir=.
   let msg = execute('recover Xfile1')
   call assert_match('Unable to read block 0 from .Xfile1.swp', msg)
   call assert_equal('Xfile1', @%)
   bw!
+
+  " make sure there are no old swap files laying around
+  for f in glob('.sw?', 0, 1)
+    call delete(f)
+  endfor
+
   " :recover from an empty buffer
   call assert_fails('recover', 'E305:')
-  call delete('.Xfile1.swp')
+  set dir&vim
 endfunc
 
 " Test for :recover using a corrupted swap file
@@ -199,15 +215,8 @@ func Test_recover_corrupted_swap_file()
   let save_b = copy(b)
   bw!
 
-  " Not all fields are written in a system-independent manner.  Detect whether
-  " the test is running on a little or big-endian system, so the correct
-  " corruption values can be set.
-  let little_endian = b[1008:1011] == 0z33323130
-  " The swap file header fields can be either 32-bit or 64-bit.
-  let system_64bit = b[1012:1015] == 0z00000000
-
   " clear the B0_MAGIC_LONG field
-  if system_64bit
+  if s:system_64bit
     let b[1008:1015] = 0z00000000.00000000
   else
     let b[1008:1011] = 0z00000000
@@ -247,12 +256,20 @@ func Test_recover_corrupted_swap_file()
   call assert_equal(['???EMPTY BLOCK'], getline(1, '$'))
   bw!
 
+  " set the number of pointers in a pointer block to a large value
+  let b = copy(save_b)
+  let b[4098:4099] = 0zFFFF
+  call writefile(b, sn)
+  call assert_fails('recover Xfile1', 'E1364:')
+  call assert_equal('Xfile1', @%)
+  bw!
+
   " set the block number in a pointer entry to a negative number
   let b = copy(save_b)
-  if system_64bit
-    let b[4104:4111] = little_endian ? 0z00000000.00000080 : 0z80000000.00000000
+  if s:system_64bit
+    let b[4104:4111] = s:little_endian ? 0z00000000.00000080 : 0z80000000.00000000
   else
-    let b[4104:4107] = little_endian ? 0z00000080 : 0z80000000
+    let b[4104:4107] = s:little_endian ? 0z00000080 : 0z80000000
   endif
   call writefile(b, sn)
   call assert_fails('recover Xfile1', 'E312:')
@@ -271,7 +288,7 @@ func Test_recover_corrupted_swap_file()
 
   " set the number of lines in the data block to zero
   let b = copy(save_b)
-  if system_64bit
+  if s:system_64bit
     let b[8208:8215] = 0z00000000.00000000
   else
     let b[8208:8211] = 0z00000000
@@ -283,9 +300,24 @@ func Test_recover_corrupted_swap_file()
         \ '???END'], getline(1, '$'))
   bw!
 
+  " set the number of lines in the data block to a large value
+  let b = copy(save_b)
+  if s:system_64bit
+    let b[8208:8215] = 0z00FFFFFF.FFFFFF00
+  else
+    let b[8208:8211] = 0z00FFFF00
+  endif
+  call writefile(b, sn)
+  call assert_fails('recover Xfile1', 'E312:')
+  call assert_equal('Xfile1', @%)
+  call assert_equal(['??? from here until ???END lines may have been inserted/deleted',
+        \ '', '???', '??? lines may be missing',
+        \ '???END'], getline(1, '$'))
+  bw!
+
   " use an invalid text start for the lines in a data block
   let b = copy(save_b)
-  if system_64bit
+  if s:system_64bit
     let b[8216:8219] = 0z00000000
   else
     let b[8212:8215] = 0z00000000
@@ -298,7 +330,7 @@ func Test_recover_corrupted_swap_file()
 
   " use an incorrect text end (db_txt_end) for the data block
   let b = copy(save_b)
-  let b[8204:8207] = little_endian ? 0z80000000 : 0z00000080
+  let b[8204:8207] = s:little_endian ? 0z80000000 : 0z00000080
   call writefile(b, sn)
   call assert_fails('recover Xfile1', 'E312:')
   call assert_equal('Xfile1', @%)
@@ -312,13 +344,28 @@ func Test_recover_corrupted_swap_file()
   call assert_fails('recover Xfile1', 'E312:')
   call assert_equal('Xfile1', @%)
   call assert_equal(['???MANY LINES MISSING'], getline(1, '$'))
+  bw!
 
+  " use an out-of-bounds db_txt_start in the data block (would cause OOB
+  " read past dp->db_index[] in ml_recover() without the bounds check)
+  let b = copy(save_b)
+  let b[8200:8203] = s:little_endian ? 0zFEFFFFFF : 0zFFFFFFFE
+  if s:system_64bit
+    let b[8208:8215] = 0z00FFFFFF.FFFFFF00
+  else
+    let b[8208:8211] = 0z00FFFF00
+  endif
+  call writefile(b, sn)
+  call assert_fails('recover Xfile1', 'E312:')
+  call assert_equal('Xfile1', @%)
+  call assert_match('??? block header corrupted', getline(1))
   bw!
   call delete(sn)
 endfunc
 
 " Test for :recover using an encrypted swap file
 func Test_recover_encrypted_swap_file()
+  CheckFeature cryptv
   CheckUnix
 
   " Recover an encrypted file from the swap file without the original file
@@ -352,17 +399,16 @@ func Test_recover_encrypted_swap_file()
   call delete('Xfile1')
 endfunc
 
-" Test for :recover using a unreadable swap file
-func Test_recover_unreadble_swap_file()
+" Test for :recover using an unreadable swap file
+func Test_recover_unreadable_swap_file()
   CheckUnix
   CheckNotRoot
   new Xfile1
   let b = readblob('.Xfile1.swp')
-  call writefile(b, '.Xfile1.swm')
+  call writefile(b, '.Xfile1.swm', 'D')
   bw!
   call setfperm('.Xfile1.swm', '-w-------')
   call assert_fails('recover Xfile1', 'E306:')
-  call delete('.Xfile1.swm')
 endfunc
 
 " Test for using :recover when the original file and the swap file have the
@@ -374,20 +420,19 @@ func Test_recover_unmodified_file()
   preserve
   let b = readblob('.Xfile1.swp')
   %bw!
-  call writefile(b, '.Xfile1.swz')
+  call writefile(b, '.Xfile1.swz', 'D')
   let msg = execute('recover Xfile1')
   call assert_equal(['aaa', 'bbb', 'ccc'], getline(1, '$'))
   call assert_false(&modified)
   call assert_match('Buffer contents equals file contents', msg)
   bw!
   call delete('Xfile1')
-  call delete('.Xfile1.swz')
 endfunc
 
 " Test for recovering a file when editing a symbolically linked file
 func Test_recover_symbolic_link()
   CheckUnix
-  call writefile(['aaa', 'bbb', 'ccc'], 'Xfile1')
+  call writefile(['aaa', 'bbb', 'ccc'], 'Xfile1', 'D')
   silent !ln -s Xfile1 Xfile2
   edit Xfile2
   call assert_equal('.Xfile1.swp', fnamemodify(swapname(''), ':t'))
@@ -402,7 +447,6 @@ func Test_recover_symbolic_link()
   update
   %bw!
   call assert_equal(['aaa', 'bbb', 'ccc'], readfile('Xfile1'))
-  call delete('Xfile1')
   call delete('Xfile2')
   call delete('.Xfile1.swp')
 endfunc
@@ -411,7 +455,7 @@ endfunc
 " line. This used to result in an internal error (E315) which is fixed
 " by 8.2.2966.
 func Test_recover_invalid_cursor_pos()
-  call writefile([], 'Xfile1')
+  call writefile([], 'Xfile1', 'D')
   edit Xfile1
   preserve
   let b = readblob('.Xfile1.swp')
@@ -421,7 +465,7 @@ func Test_recover_invalid_cursor_pos()
     au BufReadPost Xfile1 normal! 3G
   augroup END
   call writefile(range(1, 3), 'Xfile1')
-  call writefile(b, '.Xfile1.swp')
+  call writefile(b, '.Xfile1.swp', 'D')
   try
     recover Xfile1
   catch /E308:/
@@ -433,8 +477,6 @@ func Test_recover_invalid_cursor_pos()
     au!
   augroup END
   augroup! Test
-  call delete('Xfile1')
-  call delete('.Xfile1.swp')
 endfunc
 
 " Test for recovering a buffer without a name
@@ -445,10 +487,63 @@ func Test_noname_buffer()
   let sn = swapname('')
   let b = readblob(sn)
   bw!
-  call writefile(b, sn)
+  call writefile(b, sn, 'D')
   exe "recover " .. sn
   call assert_equal(['one', 'two'], getline(1, '$'))
-  call delete(sn)
+endfunc
+
+" Test for recovering a corrupted swap file, those caused a crash
+func Test_recover_corrupted_swap_file1()
+  CheckUnix
+  " only works correctly on 64bit Unix systems:
+  if !(s:system_64bit && s:little_endian && has('unix'))
+    throw 'Skipped: Corrupt Swap file sample requires a little-endian 64bit Unix build'
+  endif
+  " Test 1: Heap buffer-overflow
+  new
+  let sample = 'samples/recover-crash1.swp'
+  let target = 'Xpoc1.swp'
+  " In an out-of-source-tree build the sample may be a symlink, this copies the
+  " data into a real file.
+  call writefile(readblob(sample), target, 'D')
+  try
+    sil recover! Xpoc1
+  catch /^Vim\%((\S\+)\)\=:E1364:/
+  endtry
+  let content = getline(1, '$')->join()
+  call assert_match('???ILLEGAL BLOCK NUMBER', content)
+  call delete(target)
+  bw!
+
+  " Test 2: Segfault
+  new
+  let sample = 'samples/recover-crash2.swp'
+  let target = 'Xpoc2.swp'
+  " In an out-of-source-tree build the sample may be a symlink, this copies the
+  " data into a real file.
+  call writefile(readblob(sample), target, 'D')
+  try
+    sil recover! Xpoc2
+  catch /^Vim\%((\S\+)\)\=:E1364:/
+  endtry
+  let content = getline(1, '$')->join()
+  call assert_match('???ILLEGAL BLOCK NUMBER', content)
+  call assert_match('???LINES MISSING', content)
+  call delete(target)
+  bw!
+
+  " Test 3: wrong page_count header
+  new
+  let sample = 'samples/recover-mismatch-pc.swp'
+  let target = 'Xmismatch-pc.swp'
+  call writefile(readblob(sample), target, 'bD')
+  try
+    sil noa recover! Xmismatch-pc.swp
+  catch
+  endtry
+  " Verifies no crash occurs. The OOB write is only reliably triggered
+  " interactively due to memory pressure evicting blocks in the test runner.
+  bw!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

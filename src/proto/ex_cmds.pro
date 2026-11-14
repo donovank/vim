@@ -1,7 +1,8 @@
-/* ex_cmds.c */
+// ex_cmds.c
 void do_ascii(exarg_T *eap);
 void ex_align(exarg_T *eap);
 void ex_sort(exarg_T *eap);
+void ex_uniq(exarg_T *eap);
 int do_move(linenr_T line1, linenr_T line2, linenr_T dest);
 void ex_copy(linenr_T line1, linenr_T line2, linenr_T n);
 void free_prev_shellcmd(void);
@@ -41,4 +42,4 @@ void ex_drop(exarg_T *eap);
 char_u *skip_vimgrep_pat(char_u *p, char_u **s, int *flags);
 char_u *skip_vimgrep_pat_ext(char_u *p, char_u **s, int *flags, char_u **nulp, int *cp);
 void ex_oldfiles(exarg_T *eap);
-/* vim: set ft=c : */
+// vim: ft=c

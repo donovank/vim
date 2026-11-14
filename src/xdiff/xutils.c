@@ -20,11 +20,7 @@
  *
  */
 
-#include <limits.h>
-#include <assert.h>
 #include "xinclude.h"
-
-
 
 
 long xdl_bogosqrt(long n) {
@@ -54,7 +50,7 @@ int xdl_emit_diffrec(char const *rec, long size, char const *pre, long psize,
 		mb[2].size = (long)strlen(mb[2].ptr);
 		i++;
 	}
-	if (ecb->outf(ecb->priv, mb, i) < 0) {
+	if (ecb->out_line(ecb->priv, mb, i) < 0) {
 
 		return -1;
 	}
@@ -126,7 +122,7 @@ long xdl_guess_lines(mmfile_t *mf, long sample) {
 	long nl = 0, size, tsize = 0;
 	char const *data, *cur, *top;
 
-	if ((cur = data = xdl_mmfile_first(mf, &size)) != NULL) {
+	if ((cur = data = xdl_mmfile_first(mf, &size))) {
 		for (top = data + size; nl < sample && cur < top; ) {
 			nl++;
 			if (!(cur = memchr(cur, '\n', top - cur)))
@@ -168,7 +164,7 @@ static int ends_with_optional_cr(const char *l, long s, long i)
 		s--;
 	if (s == i)
 		return 1;
-	// do not ignore CR at the end of an incomplete line
+	/* do not ignore CR at the end of an incomplete line */
 	if (complete && s == i + 1 && l[i] == '\r')
 		return 1;
 	return 0;
@@ -208,7 +204,7 @@ int xdl_recmatch(const char *l1, long s1, const char *l2, long s2, long flags)
 	} else if (flags & XDF_IGNORE_WHITESPACE_CHANGE) {
 		while (i1 < s1 && i2 < s2) {
 			if (XDL_ISSPACE(l1[i1]) && XDL_ISSPACE(l2[i2])) {
-				// Skip matching spaces and try again
+				/* Skip matching spaces and try again */
 				while (i1 < s1 && XDL_ISSPACE(l1[i1]))
 					i1++;
 				while (i2 < s2 && XDL_ISSPACE(l2[i2]))
@@ -224,7 +220,7 @@ int xdl_recmatch(const char *l1, long s1, const char *l2, long s2, long flags)
 			i2++;
 		}
 	} else if (flags & XDF_IGNORE_CR_AT_EOL) {
-		// Find the first difference and see how the line ends
+		/* Find the first difference and see how the line ends */
 		while (i1 < s1 && i2 < s2 && l1[i1] == l2[i2]) {
 			i1++;
 			i2++;
@@ -253,7 +249,7 @@ int xdl_recmatch(const char *l1, long s1, const char *l2, long s2, long flags)
 	return 1;
 }
 
-static unsigned long xdl_hash_record_with_whitespace(char const **data,
+unsigned long xdl_hash_record_with_whitespace(char const **data,
 		char const *top, long flags) {
 	unsigned long ha = 5381;
 	char const *ptr = *data;
@@ -261,7 +257,7 @@ static unsigned long xdl_hash_record_with_whitespace(char const **data,
 
 	for (; ptr < top && *ptr != '\n'; ptr++) {
 		if (cr_at_eol_only) {
-			// do not ignore CR at the end of an incomplete line
+			/* do not ignore CR at the end of an incomplete line */
 			if (*ptr == '\r' &&
 			    (ptr + 1 < top && ptr[1] == '\n'))
 				continue;
@@ -274,7 +270,7 @@ static unsigned long xdl_hash_record_with_whitespace(char const **data,
 				ptr++;
 			at_eol = (top <= ptr + 1 || ptr[1] == '\n');
 			if (flags & XDF_IGNORE_WHITESPACE)
-				; // already handled
+				; /* already handled */
 			else if (flags & XDF_IGNORE_WHITESPACE_CHANGE
 				 && !at_eol) {
 				ha += (ha << 5);
@@ -298,19 +294,67 @@ static unsigned long xdl_hash_record_with_whitespace(char const **data,
 	return ha;
 }
 
-unsigned long xdl_hash_record(char const **data, char const *top, long flags) {
-	unsigned long ha = 5381;
+/*
+ * Compiler reassociation barrier: pretend to modify X and Y to disallow
+ * changing evaluation order with respect to following uses of X and Y.
+ */
+#ifdef __GNUC__
+#define REASSOC_FENCE(x, y) __asm__("" : "+r"(x), "+r"(y))
+#else
+#define REASSOC_FENCE(x, y)
+#endif
+
+unsigned long xdl_hash_record_verbatim(char const **data, char const *top) {
+	unsigned long ha = 5381, c0, c1;
 	char const *ptr = *data;
-
-	if (flags & XDF_WHITESPACE_FLAGS)
-		return xdl_hash_record_with_whitespace(data, top, flags);
-
+#if 0
+	/*
+	 * The baseline form of the optimized loop below. This is the djb2
+	 * hash (the above function uses a variant with XOR instead of ADD).
+	 */
 	for (; ptr < top && *ptr != '\n'; ptr++) {
 		ha += (ha << 5);
-		ha ^= (unsigned long) *ptr;
+		ha += (unsigned long) *ptr;
 	}
 	*data = ptr < top ? ptr + 1: ptr;
+#else
+	/* Process two characters per iteration. */
+	if (top - ptr >= 2) do {
+		if ((c0 = ptr[0]) == '\n') {
+			*data = ptr + 1;
+			return ha;
+		}
+		if ((c1 = ptr[1]) == '\n') {
+			*data = ptr + 2;
+			c0 += ha;
+			REASSOC_FENCE(c0, ha);
+			ha = ha * 32 + c0;
+			return ha;
+		}
+		/*
+		 * Combine characters C0 and C1 into the hash HA. We have
+		 * HA = (HA * 33 + C0) * 33 + C1, and we want to ensure
+		 * that dependency chain over HA is just one multiplication
+		 * and one addition, i.e. we want to evaluate this as
+		 * HA = HA * 33 * 33 + (C0 * 33 + C1), and likewise prefer
+		 * (C0 * 32 + (C0 + C1)) for the expression in parenthesis.
+		 */
+		ha *= 33 * 33;
+		c1 += c0;
+		REASSOC_FENCE(c1, c0);
+		c1 += c0 * 32;
+		REASSOC_FENCE(c1, ha);
+		ha += c1;
 
+		ptr += 2;
+	} while (ptr < top - 1);
+	*data = top;
+	if (ptr < top && (c0 = ptr[0]) != '\n') {
+		c0 += ha;
+		REASSOC_FENCE(c0, ha);
+		ha = ha * 32 + c0;
+	}
+#endif
 	return ha;
 }
 
@@ -344,8 +388,9 @@ int xdl_num_out(char *out, long val) {
 	return str - out;
 }
 
-int xdl_emit_hunk_hdr(long s1, long c1, long s2, long c2,
-		      const char *func, long funclen, xdemitcb_t *ecb) {
+static int xdl_format_hunk_hdr(long s1, long c1, long s2, long c2,
+			       const char *func, long funclen,
+			       xdemitcb_t *ecb) {
 	int nb = 0;
 	mmbuffer_t mb;
 	char buf[128];
@@ -378,7 +423,7 @@ int xdl_emit_hunk_hdr(long s1, long c1, long s2, long c2,
 	nb += 3;
 	if (func && funclen) {
 		buf[nb++] = ' ';
-		if (funclen > (long)sizeof(buf) - nb - 1)
+		if ((size_t)funclen > sizeof(buf) - nb - 1)
 			funclen = sizeof(buf) - nb - 1;
 		memcpy(buf + nb, func, funclen);
 		nb += funclen;
@@ -387,9 +432,21 @@ int xdl_emit_hunk_hdr(long s1, long c1, long s2, long c2,
 
 	mb.ptr = buf;
 	mb.size = nb;
-	if (ecb->outf(ecb->priv, &mb, 1) < 0)
+	if (ecb->out_line(ecb->priv, &mb, 1) < 0)
 		return -1;
+	return 0;
+}
 
+int xdl_emit_hunk_hdr(long s1, long c1, long s2, long c2,
+		      const char *func, long funclen,
+		      xdemitcb_t *ecb) {
+	if (!ecb->out_hunk)
+		return xdl_format_hunk_hdr(s1, c1, s2, c2, func, funclen, ecb);
+	if (ecb->out_hunk(ecb->priv,
+			  c1 ? s1 : s1 - 1, c1,
+			  c2 ? s2 : s2 - 1, c2,
+			  func, funclen) < 0)
+		return -1;
 	return 0;
 }
 
@@ -407,19 +464,36 @@ int xdl_fall_back_diff(xdfenv_t *diff_env, xpparam_t const *xpp,
 	mmfile_t subfile1, subfile2;
 	xdfenv_t env;
 
-	subfile1.ptr = (char *)diff_env->xdf1.recs[line1 - 1]->ptr;
-	subfile1.size = diff_env->xdf1.recs[line1 + count1 - 2]->ptr +
-		diff_env->xdf1.recs[line1 + count1 - 2]->size - subfile1.ptr;
-	subfile2.ptr = (char *)diff_env->xdf2.recs[line2 - 1]->ptr;
-	subfile2.size = diff_env->xdf2.recs[line2 + count2 - 2]->ptr +
-		diff_env->xdf2.recs[line2 + count2 - 2]->size - subfile2.ptr;
+	subfile1.ptr = (char *)diff_env->xdf1.recs[line1 - 1].ptr;
+	subfile1.size = diff_env->xdf1.recs[line1 + count1 - 2].ptr +
+		diff_env->xdf1.recs[line1 + count1 - 2].size - subfile1.ptr;
+	subfile2.ptr = (char *)diff_env->xdf2.recs[line2 - 1].ptr;
+	subfile2.size = diff_env->xdf2.recs[line2 + count2 - 2].ptr +
+		diff_env->xdf2.recs[line2 + count2 - 2].size - subfile2.ptr;
 	if (xdl_do_diff(&subfile1, &subfile2, xpp, &env) < 0)
 		return -1;
 
-	memcpy(diff_env->xdf1.rchg + line1 - 1, env.xdf1.rchg, count1);
-	memcpy(diff_env->xdf2.rchg + line2 - 1, env.xdf2.rchg, count2);
+	memcpy(diff_env->xdf1.changed + line1 - 1, env.xdf1.changed, count1);
+	memcpy(diff_env->xdf2.changed + line2 - 1, env.xdf2.changed, count2);
 
 	xdl_free_env(&env);
 
 	return 0;
+}
+
+void* xdl_alloc_grow_helper(void *p, long nr, long *alloc, size_t size)
+{
+	void *tmp = NULL;
+	size_t n = ((LONG_MAX - 16) / 2 >= *alloc) ? 2 * *alloc + 16 : LONG_MAX;
+	if ((size_t)nr > n)
+		n = nr;
+	if (SIZE_MAX / size >= n)
+		tmp = xdl_realloc(p, n * size);
+	if (tmp) {
+		*alloc = (long)n;
+	} else {
+		xdl_free(p);
+		*alloc = 0;
+	}
+	return tmp;
 }

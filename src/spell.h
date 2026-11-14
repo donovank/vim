@@ -17,10 +17,10 @@
 # define SPELL_PRINTTREE
 #endif
 
-// Use SPELL_COMPRESS_ALLWAYS for debugging: compress the word tree after
+// Use SPELL_COMPRESS_ALWAYS for debugging: compress the word tree after
 // adding a word.  Only use it for small word lists!
 #if 0
-# define SPELL_COMPRESS_ALLWAYS
+# define SPELL_COMPRESS_ALWAYS
 #endif
 
 // Use DEBUG_TRIEWALK to print the changes made in suggest_trie_walk() for a
@@ -119,6 +119,7 @@ struct slang_S
     // Info from the .sug file.  Loaded on demand.
     time_t	sl_sugtime;	// timestamp for .sug file
     char_u	*sl_sbyts;	// soundfolded word bytes
+    long	sl_sbyts_len;	// length of sl_sbyts
     idx_T	*sl_sidxs;	// soundfolded word indexes
     buf_T	*sl_sugbuf;	// buffer with word number table
     int		sl_sugloaded;	// TRUE when .sug file was loaded or failed to
@@ -211,9 +212,9 @@ typedef struct salitem_S
 
 // Values for SP_*ERROR are negative, positive values are used by
 // read_cnt_string().
-#define	SP_TRUNCERROR	-1	// spell file truncated error
-#define	SP_FORMERROR	-2	// format error in spell file
-#define SP_OTHERERROR	-3	// other error while reading spell file
+#define	SP_TRUNCERROR	(-1)	// spell file truncated error
+#define	SP_FORMERROR	(-2)	// format error in spell file
+#define SP_OTHERERROR	(-3)	// other error while reading spell file
 
 /*
  * Structure used in "b_langp", filled from 'spelllang'.
@@ -280,8 +281,6 @@ typedef struct spelltab_S
 #endif
 
 #ifdef FEAT_SPELL
-// First language that is loaded, start of the linked list of loaded
-// languages.
 # ifdef IN_SPELL_C
 #  define SPELL_EXTERN
 #  define SPELL_INIT(x) x
@@ -290,21 +289,20 @@ typedef struct spelltab_S
 #  define SPELL_INIT(x)
 # endif
 
+// First language that is loaded, start of the linked list of loaded
+// languages.
 SPELL_EXTERN slang_T	*first_lang SPELL_INIT(= NULL);
 
 // file used for "zG" and "zW"
 SPELL_EXTERN char_u	*int_wordlist SPELL_INIT(= NULL);
 
-
-SPELL_EXTERN char e_format[] SPELL_INIT(= N_("E759: Format error in spell file"));
-
 SPELL_EXTERN spelltab_T   spelltab;
 SPELL_EXTERN int	  did_set_spelltab;
 
 // Values for "what" argument of spell_add_word()
-#define SPELL_ADD_GOOD	0
-#define SPELL_ADD_BAD	1
-#define SPELL_ADD_RARE	2
+# define SPELL_ADD_GOOD	0
+# define SPELL_ADD_BAD	1
+# define SPELL_ADD_RARE	2
 
 typedef struct wordcount_S
 {
@@ -312,9 +310,9 @@ typedef struct wordcount_S
     char_u	wc_word[1];	    // word, actually longer
 } wordcount_T;
 
-#define WC_KEY_OFF  offsetof(wordcount_T, wc_word)
-#define HI2WC(hi)     ((wordcount_T *)((hi)->hi_key - WC_KEY_OFF))
-#define MAXWORDCOUNT 0xffff
+# define WC_KEY_OFF  offsetof(wordcount_T, wc_word)
+# define HI2WC(hi)     ((wordcount_T *)((hi)->hi_key - WC_KEY_OFF))
+# define MAXWORDCOUNT 0xffff
 
 // Remember what "z?" replaced.
 SPELL_EXTERN char_u	*repl_from SPELL_INIT(= NULL);

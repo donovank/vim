@@ -2,18 +2,17 @@
 
 # What is Vim9?
 
-This is an experimental side of [Vim](https://github.com/vim/vim).
-It explores ways of making Vim script faster and better.
+This is a new syntax for Vim script that was introduced with Vim 9.0.
+It intends making Vim script faster and better.
 
-WARNING: The Vim9 script features are still under development, anything can
-break!
 
 # Why Vim9?
 
 ## 1. FASTER VIM SCRIPT
 
 The third item on the poll results of 2018, after popup windows and text
-properties, is faster Vim script.  So how do we do that?
+properties, both of which have been implemented, is faster Vim script.
+So how do we do that?
 
 I have been throwing some ideas around, and soon came to the conclusion
 that the current way functions are called and executed, with
@@ -29,7 +28,7 @@ way:
 * Local variables are not available in an l: dictionary.
 * A few more things that slow us down, such as exception handling details.
 
-I Implemented a "proof of concept" and measured the time to run a simple
+I implemented a "proof of concept" and measured the time to run a simple
 for loop with an addition (Justin used this example in his presentation,
 full code is below):
 
@@ -53,7 +52,7 @@ we can gain, and also that Vim script can be faster than builtin
 interfaces.
 
 LuaJit is much faster at Lua-only instructions.  In practice the script would
-not do something useless as counting but change the text.  For example,
+not do something useless counting, but change the text.  For example,
 reindent all the lines:
 
 ``` vim
@@ -225,7 +224,7 @@ Eventually this will lead to Vim 9!
 
 ## Code for sum time measurements
 
-Vim was build with -O2.
+Vim was built with -O2.
 
 ``` vim
 func VimOld()
@@ -337,7 +336,7 @@ let start = reltime()
 echo Python()
 echo 'Python: ' .. reltimestr(reltime(start))
 bwipe!
- 
+
 new
 call setline(1, range(100000))
 let start = reltime()

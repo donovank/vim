@@ -35,8 +35,12 @@
 static int selinux_enabled = -1;
 #endif
 
+#ifdef FEAT_XATTR
+# include <sys/xattr.h>
+#endif
+
 #ifdef HAVE_SMACK
-# include <attr/xattr.h>
+# include <sys/xattr.h>
 # include <linux/xattr.h>
 # ifndef SMACK_LABEL_LEN
 #  define SMACK_LABEL_LEN 1024
@@ -44,20 +48,36 @@ static int selinux_enabled = -1;
 #endif
 
 #ifdef __CYGWIN__
-# ifndef MSWIN
-#  include <cygwin/version.h>
-#  include <sys/cygwin.h>	// for cygwin_conv_to_posix_path() and/or
+# include <cygwin/version.h>
+# include <sys/cygwin.h>	// for cygwin_conv_to_posix_path() and/or
 				// for cygwin_conv_path()
-#  ifdef FEAT_CYGWIN_WIN32_CLIPBOARD
-#   define WIN32_LEAN_AND_MEAN
-#   include <windows.h>
-#   include "winclip.pro"
-#  endif
+# ifdef FEAT_CYGWIN_WIN32_CLIPBOARD
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+#  include "winclip.pro"
 # endif
 #endif
 
 #ifdef FEAT_MOUSE_GPM
+
 # include <gpm.h>
+
+# ifdef DYNAMIC_GPM
+#  define Gpm_Open     (*dll_Gpm_Open)
+#  define Gpm_Close    (*dll_Gpm_Close)
+#  define Gpm_GetEvent (*dll_Gpm_GetEvent)
+#  define gpm_flag     (dll_gpm_flag != NULL ? *dll_gpm_flag :  0)
+#  define gpm_fd       (dll_gpm_fd   != NULL ? *dll_gpm_fd   : -1)
+
+static int (*dll_Gpm_Open)     (Gpm_Connect *, int);
+static int (*dll_Gpm_Close)    (void);
+static int (*dll_Gpm_GetEvent) (Gpm_Event *);
+static int *dll_gpm_flag;
+static int *dll_gpm_fd;
+
+static void *libgpm_hinst;
+# endif
+
 // <linux/keyboard.h> contains defines conflicting with "keymap.h",
 // I just copied relevant defines here. A cleaner solution would be to put gpm
 // code into separate file and include there linux/keyboard.h
@@ -83,7 +103,7 @@ static int mch_gpm_process(void);
 
 static int sysmouse_open(void);
 static void sysmouse_close(void);
-static RETSIGTYPE sig_sysmouse SIGPROTOARG;
+static void sig_sysmouse SIGPROTOARG;
 #endif
 
 /*
@@ -115,18 +135,14 @@ static RETSIGTYPE sig_sysmouse SIGPROTOARG;
 #  include <X11/StringDefs.h>
 static Widget	xterm_Shell = (Widget)0;
 static void clip_update(void);
-static void xterm_update(void);
 # endif
 
-# if defined(FEAT_XCLIPBOARD) || defined(FEAT_TITLE)
 Window	    x11_window = 0;
-# endif
 Display	    *x11_display = NULL;
 #endif
 
 static int ignore_sigtstp = FALSE;
 
-#ifdef FEAT_TITLE
 static int get_x11_title(int);
 
 static char_u	*oldtitle = NULL;
@@ -134,15 +150,10 @@ static volatile sig_atomic_t oldtitle_outdated = FALSE;
 static int	unix_did_set_title = FALSE;
 static char_u	*oldicon = NULL;
 static int	did_set_icon = FALSE;
-#endif
 
 static void may_core_dump(void);
 
-#ifdef HAVE_UNION_WAIT
-typedef union wait waitstatus;
-#else
 typedef int waitstatus;
-#endif
 static int  WaitForChar(long msec, int *interrupted, int ignore_input);
 static int  WaitForCharOrMouse(long msec, int *interrupted, int ignore_input);
 #ifdef VMS
@@ -159,29 +170,34 @@ static int do_xterm_trace(void);
 static void handle_resize(void);
 
 #if defined(SIGWINCH)
-static RETSIGTYPE sig_winch SIGPROTOARG;
+static void sig_winch SIGPROTOARG;
+#endif
+#if defined(SIGTSTP)
+static void sig_tstp SIGPROTOARG;
+// volatile because it is used in signal handler sig_tstp() and
+// sigcont_handler().
+static volatile sig_atomic_t in_mch_suspend = FALSE;
 #endif
 #if defined(SIGINT)
-static RETSIGTYPE catch_sigint SIGPROTOARG;
+static void catch_sigint SIGPROTOARG;
 #endif
 #if defined(SIGUSR1)
-static RETSIGTYPE catch_sigusr1 SIGPROTOARG;
+static void catch_sigusr1 SIGPROTOARG;
 #endif
 #if defined(SIGPWR)
-static RETSIGTYPE catch_sigpwr SIGPROTOARG;
+static void catch_sigpwr SIGPROTOARG;
 #endif
-#if defined(SIGALRM) && defined(FEAT_X11) \
-	&& defined(FEAT_TITLE) && !defined(FEAT_GUI_GTK)
+#if defined(SIGALRM) && defined(FEAT_X11) && !defined(FEAT_GUI_GTK)
 # define SET_SIG_ALARM
-static RETSIGTYPE sig_alarm SIGPROTOARG;
+static void sig_alarm SIGPROTOARG;
 // volatile because it is used in signal handler sig_alarm().
 static volatile sig_atomic_t sig_alarm_called;
 #endif
-static RETSIGTYPE deathtrap SIGPROTOARG;
+static void deathtrap SIGPROTOARG;
 
 static void catch_int_signal(void);
 static void set_signals(void);
-static void catch_signals(RETSIGTYPE (*func_deadly)(), RETSIGTYPE (*func_other)());
+static void catch_signals(void (*func_deadly)(int), void (*func_other)(int));
 #ifdef HAVE_SIGPROCMASK
 # define SIGSET_DECL(set)	sigset_t set;
 # define BLOCK_SIGNALS(set)	block_signals(set)
@@ -197,11 +213,16 @@ static int  have_dollars(int, char_u **);
 static int save_patterns(int num_pat, char_u **pat, int *num_file, char_u ***file);
 
 #ifndef SIG_ERR
-# define SIG_ERR	((RETSIGTYPE (*)())-1)
+# define SIG_ERR	((sighandler_T)-1)
+#endif
+#ifndef SIG_HOLD
+# define SIG_HOLD	((sighandler_T)-2)
 #endif
 
 // volatile because it is used in signal handler sig_winch().
 static volatile sig_atomic_t do_resize = FALSE;
+// volatile because it is used in signal handler sig_tstp().
+static volatile sig_atomic_t got_tstp = FALSE;
 static char_u	*extra_shell_arg = NULL;
 static int	show_shell_mess = TRUE;
 // volatile because it is used in signal handler deathtrap().
@@ -233,7 +254,7 @@ static xsmp_config_T xsmp;
 /*
  * I have seen
  *  extern char *_sys_siglist[NSIG];
- * on Irix, Linux, NetBSD and Solaris. It contains a nice list of strings
+ * on Linux, NetBSD and Solaris. It contains a nice list of strings
  * that describe the signals. That is nearly what we want here.  But
  * autoconf does only check for sys_siglist (without the underscore), I
  * do not want to change everything today.... jw.
@@ -321,6 +342,62 @@ static struct signalinfo
     {-1,	    "Unknown!", FALSE}
 };
 
+    sighandler_T
+mch_signal(int sig, sighandler_T func)
+{
+#if defined(HAVE_SIGACTION) && defined(HAVE_SIGPROCMASK)
+    // Modern implementation: use sigaction().
+    struct sigaction	sa, old;
+    sigset_t		curset;
+    int			blocked;
+
+    if (sigprocmask(SIG_BLOCK, NULL, &curset) == -1)
+	return SIG_ERR;
+
+    blocked = sigismember(&curset, sig);
+
+    if (func == SIG_HOLD)
+    {
+	if (blocked)
+	    return SIG_HOLD;
+
+	sigemptyset(&curset);
+	sigaddset(&curset, sig);
+
+	if (sigaction(sig, NULL, &old) == -1
+				|| sigprocmask(SIG_BLOCK, &curset, NULL) == -1)
+	    return SIG_ERR;
+	return old.sa_handler;
+    }
+
+    if (blocked)
+    {
+	sigemptyset(&curset);
+	sigaddset(&curset, sig);
+
+	if (sigprocmask(SIG_UNBLOCK, &curset, NULL) == -1)
+	    return SIG_ERR;
+    }
+
+    sa.sa_handler = func;
+    sigemptyset(&sa.sa_mask);
+# ifdef SA_RESTART
+    sa.sa_flags = SA_RESTART;
+# else
+    sa.sa_flags = 0;
+# endif
+    if (sigaction(sig, &sa, &old) == -1)
+	return SIG_ERR;
+    return blocked ? SIG_HOLD: old.sa_handler;
+#elif defined(HAVE_SIGSET)
+    // Using sigset() is preferred above signal().
+    return sigset(sig, func);
+#else
+    // Oldest and most compatible solution.
+    return signal(sig, func);
+#endif
+}
+
     int
 mch_chdir(char *path)
 {
@@ -330,17 +407,15 @@ mch_chdir(char *path)
 	smsg("chdir(%s)", path);
 	verbose_leave();
     }
-# ifdef VMS
+#ifdef VMS
     return chdir(vms_fixfilename(path));
-# else
+#else
     return chdir(path);
-# endif
+#endif
 }
 
-// Why is NeXT excluded here (and not in os_unixx.h)?
 #if defined(ECHOE) && defined(ICANON) \
-    && (defined(HAVE_TERMIO_H) || defined(HAVE_TERMIOS_H)) \
-    && !defined(__NeXT__)
+    && (defined(HAVE_TERMIO_H) || defined(HAVE_TERMIOS_H))
 # define NEW_TTY_SYSTEM
 #endif
 
@@ -366,7 +441,12 @@ resize_func(int check_only)
     if (check_only)
 	return do_resize;
     while (do_resize)
+    {
+#ifdef FEAT_EVAL
+	ch_log(NULL, "calling handle_resize() in resize_func()");
+#endif
 	handle_resize();
+    }
     return FALSE;
 }
 
@@ -405,7 +485,7 @@ mch_char_avail(void)
     return WaitForChar(0L, NULL, FALSE);
 }
 
-#if defined(FEAT_TERMINAL) || defined(PROTO)
+#if defined(FEAT_TERMINAL)
 /*
  * Check for any pending input or messages.
  */
@@ -416,7 +496,7 @@ mch_check_messages(void)
 }
 #endif
 
-#if defined(HAVE_TOTAL_MEM) || defined(PROTO)
+#if defined(HAVE_TOTAL_MEM)
 # ifdef HAVE_SYS_RESOURCE_H
 #  include <sys/resource.h>
 # endif
@@ -649,9 +729,9 @@ mch_delay(long msec, int flags)
 	    // a patch from Sun to fix this.  Reported by Gunnar Pedersen.
 	    select(0, NULL, NULL, NULL, &tv);
 	}
-#  endif // HAVE_SELECT
-# endif // HAVE_NANOSLEEP
-#endif // HAVE_USLEEP
+#  endif
+# endif
+#endif
 #ifdef FEAT_MZSCHEME
 	}
 	while (total > 0);
@@ -691,13 +771,13 @@ check_stack_growth(char *p)
 }
 #endif
 
-#if defined(HAVE_STACK_LIMIT) || defined(PROTO)
+#if defined(HAVE_STACK_LIMIT)
 static char *stack_limit = NULL;
 
-#if defined(_THREAD_SAFE) && defined(HAVE_PTHREAD_NP_H)
-# include <pthread.h>
-# include <pthread_np.h>
-#endif
+# if defined(_THREAD_SAFE) && defined(HAVE_PTHREAD_NP_H)
+#  include <pthread.h>
+#  include <pthread_np.h>
+# endif
 
 /*
  * Find out until how var the stack can grow without getting into trouble.
@@ -715,13 +795,13 @@ get_stack_limit(void)
     // limit doesn't fit in a long (rlim_cur might be "long long").
     if (getrlimit(RLIMIT_STACK, &rlp) == 0
 	    && rlp.rlim_cur < ((rlim_t)1 << (sizeof(long_u) * 8 - 1))
-#  ifdef RLIM_INFINITY
+# ifdef RLIM_INFINITY
 	    && rlp.rlim_cur != RLIM_INFINITY
-#  endif
+# endif
        )
     {
 	lim = (long)rlp.rlim_cur;
-#if defined(_THREAD_SAFE) && defined(HAVE_PTHREAD_NP_H)
+# if defined(_THREAD_SAFE) && defined(HAVE_PTHREAD_NP_H)
 	{
 	    pthread_attr_t  attr;
 	    size_t	    size;
@@ -737,7 +817,7 @@ get_stack_limit(void)
 	    }
 	    pthread_attr_destroy(&attr);
 	}
-#endif
+# endif
 	if (stack_grows_downwards)
 	{
 	    stack_limit = (char *)((long)&i - (lim / 16L * 15L));
@@ -761,16 +841,16 @@ get_stack_limit(void)
     int
 mch_stackcheck(char *p)
 {
-    if (stack_limit != NULL)
+    if (stack_limit == NULL)
+	return OK;
+
+    if (stack_grows_downwards)
     {
-	if (stack_grows_downwards)
-	{
-	    if (p < stack_limit)
-		return FAIL;
-	}
-	else if (p > stack_limit)
+	if (p < stack_limit)
 	    return FAIL;
     }
+    else if (p > stack_limit)
+	return FAIL;
     return OK;
 }
 #endif
@@ -783,48 +863,60 @@ mch_stackcheck(char *p)
  * completely full.
  */
 
-#if !defined SIGSTKSZ && !defined(HAVE_SYSCONF_SIGSTKSZ)
-# define SIGSTKSZ 8000    // just a guess of how much stack is needed...
-#endif
-
 # ifdef HAVE_SIGALTSTACK
 static stack_t sigstk;			// for sigaltstack()
 # else
 static struct sigstack sigstk;		// for sigstack()
 # endif
 
+/*
+ * Get a size of signal stack.
+ * Preference (if available): sysconf > SIGSTKSZ > guessed size
+ */
+static long int get_signal_stack_size(void)
+{
+# ifdef HAVE_SYSCONF_SIGSTKSZ
+    long int size = -1;
+
+    // return size only if sysconf doesn't return an error
+    if ((size = sysconf(_SC_SIGSTKSZ)) > -1)
+	return size;
+# endif
+
+# ifdef SIGSTKSZ
+    // if sysconf() isn't available or gives error, return SIGSTKSZ
+    // if defined
+    return SIGSTKSZ;
+# endif
+
+    // otherwise guess the size
+    return 8000;
+}
+
 static char *signal_stack;
 
     static void
 init_signal_stack(void)
 {
-    if (signal_stack != NULL)
-    {
+    if (signal_stack == NULL)
+	return;
+
 # ifdef HAVE_SIGALTSTACK
 #  ifdef HAVE_SS_BASE
-	sigstk.ss_base = signal_stack;
+    sigstk.ss_base = signal_stack;
 #  else
-	sigstk.ss_sp = signal_stack;
+    sigstk.ss_sp = signal_stack;
 #  endif
-#  ifdef HAVE_SYSCONF_SIGSTKSZ
-	sigstk.ss_size = sysconf(_SC_SIGSTKSZ);
-#  else
-	sigstk.ss_size = SIGSTKSZ;
-#  endif
-	sigstk.ss_flags = 0;
-	(void)sigaltstack(&sigstk, NULL);
+    sigstk.ss_size = get_signal_stack_size();
+    sigstk.ss_flags = 0;
+    (void)sigaltstack(&sigstk, NULL);
 # else
-	sigstk.ss_sp = signal_stack;
-	if (stack_grows_downwards)
-#  ifdef HAVE_SYSCONF_SIGSTKSZ
-	    sigstk.ss_sp += sysconf(_SC_SIGSTKSZ) - 1;
-#  else
-	    sigstk.ss_sp += SIGSTKSZ - 1;
-#  endif
-	sigstk.ss_onstack = 0;
-	(void)sigstack(&sigstk, NULL);
+    sigstk.ss_sp = signal_stack;
+    if (stack_grows_downwards)
+	sigstk.ss_sp += get_signal_stack_size() - 1;
+    sigstk.ss_onstack = 0;
+    (void)sigstack(&sigstk, NULL);
 # endif
-    }
 }
 #endif
 
@@ -834,51 +926,68 @@ init_signal_stack(void)
  * Let me try it with a few tricky defines from my own osdef.h	(jw).
  */
 #if defined(SIGWINCH)
-    static RETSIGTYPE
+    static void
 sig_winch SIGDEFARG(sigarg)
 {
     // this is not required on all systems, but it doesn't hurt anybody
-    signal(SIGWINCH, (RETSIGTYPE (*)())sig_winch);
+    mch_signal(SIGWINCH, sig_winch);
     do_resize = TRUE;
-    SIGRETURN;
+}
+#endif
+
+#if defined(SIGTSTP)
+    static void
+sig_tstp SIGDEFARG(sigarg)
+{
+    // Second time we get called we actually need to suspend
+    if (in_mch_suspend)
+    {
+	mch_signal(SIGTSTP, ignore_sigtstp ? SIG_IGN : SIG_DFL);
+	raise(sigarg);
+    }
+    else
+	got_tstp = TRUE;
+
+# if !defined(__ANDROID__) && !defined(__OpenBSD__) && !defined(__DragonFly__)
+    // This is not required on all systems.  On some systems (at least Android,
+    // OpenBSD, and DragonFlyBSD) this breaks suspending with CTRL-Z.
+    mch_signal(SIGTSTP, sig_tstp);
+# endif
 }
 #endif
 
 #if defined(SIGINT)
-    static RETSIGTYPE
+    static void
 catch_sigint SIGDEFARG(sigarg)
 {
     // this is not required on all systems, but it doesn't hurt anybody
-    signal(SIGINT, (RETSIGTYPE (*)())catch_sigint);
+    mch_signal(SIGINT, catch_sigint);
     got_int = TRUE;
-    SIGRETURN;
 }
 #endif
 
 #if defined(SIGUSR1)
-    static RETSIGTYPE
+    static void
 catch_sigusr1 SIGDEFARG(sigarg)
 {
     // this is not required on all systems, but it doesn't hurt anybody
-    signal(SIGUSR1, (RETSIGTYPE (*)())catch_sigusr1);
+    mch_signal(SIGUSR1, catch_sigusr1);
     got_sigusr1 = TRUE;
-    SIGRETURN;
 }
 #endif
 
 #if defined(SIGPWR)
-    static RETSIGTYPE
+    static void
 catch_sigpwr SIGDEFARG(sigarg)
 {
     // this is not required on all systems, but it doesn't hurt anybody
-    signal(SIGPWR, (RETSIGTYPE (*)())catch_sigpwr);
+    mch_signal(SIGPWR, catch_sigpwr);
     /*
      * I'm not sure we get the SIGPWR signal when the system is really going
      * down or when the batteries are almost empty.  Just preserve the swap
      * files and don't exit, that can't do any harm.
      */
     ml_sync_all(FALSE, FALSE);
-    SIGRETURN;
 }
 #endif
 
@@ -886,19 +995,17 @@ catch_sigpwr SIGDEFARG(sigarg)
 /*
  * signal function for alarm().
  */
-    static RETSIGTYPE
+    static void
 sig_alarm SIGDEFARG(sigarg)
 {
     // doesn't do anything, just to break a system call
     sig_alarm_called = TRUE;
-    SIGRETURN;
 }
 #endif
 
-#if (defined(HAVE_SETJMP_H) \
+#if defined(HAVE_SETJMP_H) \
 	&& ((defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)) \
-	    || defined(FEAT_LIBCALL))) \
-    || defined(PROTO)
+	    || defined(FEAT_LIBCALL))
 # define USING_SETJMP 1
 
 // argument to SETJMP()
@@ -912,7 +1019,7 @@ static volatile sig_atomic_t lc_signal;
 
 // TRUE when lc_jump_env is valid.
 // Volatile because it is used in signal handler deathtrap().
-static volatile sig_atomic_t lc_active INIT(= FALSE);
+static volatile sig_atomic_t lc_active = FALSE;
 
 /*
  * A simplistic version of setjmp() that only allows one level of using.
@@ -969,7 +1076,7 @@ mch_didjmp(void)
  * NOTE: Avoid unsafe functions, such as allocating memory, they can result in
  * a deadlock.
  */
-    static RETSIGTYPE
+    static void
 deathtrap SIGDEFARG(sigarg)
 {
     static int	entered = 0;	    // count the number of times we got here.
@@ -1002,7 +1109,7 @@ deathtrap SIGDEFARG(sigarg)
     // interrupt us.  But in cooked mode we may also get SIGQUIT, e.g., when
     // pressing CTRL-\, but we don't want Vim to exit then.
     if (in_mch_delay && sigarg == SIGQUIT)
-	SIGRETURN;
+	return;
 # endif
 
     // When SIGHUP, SIGQUIT, etc. are blocked: postpone the effect and return
@@ -1030,7 +1137,7 @@ deathtrap SIGDEFARG(sigarg)
 # endif
 		)
 	    && !vim_handle_signal(sigarg))
-	SIGRETURN;
+	return;
 #endif
 
     // Remember how often we have been called.
@@ -1129,8 +1236,6 @@ deathtrap SIGDEFARG(sigarg)
     may_core_dump();
     abort();
 #endif
-
-    SIGRETURN;
 }
 
 /*
@@ -1140,19 +1245,17 @@ deathtrap SIGDEFARG(sigarg)
     static void
 after_sigcont(void)
 {
-# ifdef FEAT_TITLE
     // Don't change "oldtitle" in a signal handler, set a flag to obtain it
     // again later.
     oldtitle_outdated = TRUE;
-# endif
+
     settmode(TMODE_RAW);
     need_check_timestamps = TRUE;
     did_check_timestamps = FALSE;
 }
 
 #if defined(SIGCONT)
-static RETSIGTYPE sigcont_handler SIGPROTOARG;
-static volatile sig_atomic_t in_mch_suspend = FALSE;
+static void sigcont_handler SIGPROTOARG;
 
 /*
  * With multi-threading, suspending might not work immediately.  Catch the
@@ -1166,12 +1269,12 @@ static volatile sig_atomic_t in_mch_suspend = FALSE;
  * volatile because it is used in signal handler sigcont_handler().
  */
 static volatile sig_atomic_t sigcont_received;
-static RETSIGTYPE sigcont_handler SIGPROTOARG;
+static void sigcont_handler SIGPROTOARG;
 
 /*
  * signal handler for SIGCONT
  */
-    static RETSIGTYPE
+    static void
 sigcont_handler SIGDEFARG(sigarg)
 {
     if (in_mch_suspend)
@@ -1185,42 +1288,50 @@ sigcont_handler SIGDEFARG(sigarg)
 	// back to a sane mode. We should redraw, but we can't really do that
 	// in a signal handler, do a redraw later.
 	after_sigcont();
-	redraw_later(CLEAR);
+	redraw_later(UPD_CLEAR);
 	cursor_on_force();
 	out_flush();
     }
-
-    SIGRETURN;
 }
 #endif
 
-#if defined(FEAT_CLIPBOARD) && defined(FEAT_X11)
-# ifdef USE_SYSTEM
+#if defined(FEAT_CLIPBOARD)
+# if defined(USE_SYSTEM) && (defined(FEAT_X11) \
+	|| defined(FEAT_WAYLAND_CLIPBOARD))
 static void *clip_star_save = NULL;
 static void *clip_plus_save = NULL;
 # endif
 
+# if defined(FEAT_CLIPBOARD) && (defined(FEAT_X11) \
+	|| defined(FEAT_WAYLAND_CLIPBOARD))
 /*
  * Called when Vim is going to sleep or execute a shell command.
- * We can't respond to requests for the X selections.  Lose them, otherwise
- * other applications will hang.  But first copy the text to cut buffer 0.
+ * We can't respond to requests for the X or Wayland selections.
+ * Lose them, otherwise other applications will hang.  But first
+ * copy the text to cut buffer 0 (for X11). Wayland users must have
+ * a clipboard manager to replicate such behaviour.
  */
     static void
 loose_clipboard(void)
 {
     if (clip_star.owned || clip_plus.owned)
     {
+#  ifdef FEAT_X11
 	x11_export_final_selection();
+#  endif
 	if (clip_star.owned)
 	    clip_lose_selection(&clip_star);
 	if (clip_plus.owned)
 	    clip_lose_selection(&clip_plus);
+#  ifdef FEAT_X11
 	if (x11_display != NULL)
 	    XFlush(x11_display);
+#  endif
     }
 }
+# endif
 
-# ifdef USE_SYSTEM
+# if defined(USE_SYSTEM) && (defined(FEAT_X11) || defined(FEAT_WAYLAND_CLIPBOARD))
 /*
  * Save clipboard text to restore later.
  */
@@ -1234,7 +1345,7 @@ save_clipboard(void)
 }
 
 /*
- * Restore clipboard text if no one own the X selection.
+ * Restore clipboard text if no one own the X/Wayland selection.
  */
     static void
 restore_clipboard(void)
@@ -1276,7 +1387,8 @@ mch_suspend(void)
     settmode(TMODE_COOK);
     out_flush();	    // needed to disable mouse on some systems
 
-# if defined(FEAT_CLIPBOARD) && defined(FEAT_X11)
+# if defined(FEAT_CLIPBOARD) && (defined(FEAT_X11) \
+	|| defined(FEAT_WAYLAND_CLIPBOARD))
     loose_clipboard();
 # endif
 # if defined(SIGCONT)
@@ -1323,7 +1435,7 @@ mch_init(void)
     // that indicates the shell (or program) that launched us does not support
     // tty job control and thus we should ignore that signal. If invoked as a
     // restricted editor (e.g., as "rvim") SIGTSTP is always ignored.
-    ignore_sigtstp = restricted || SIG_IGN == signal(SIGTSTP, SIG_ERR);
+    ignore_sigtstp = restricted || SIG_IGN == mch_signal(SIGTSTP, SIG_ERR);
 #endif
     set_signals();
 
@@ -1335,6 +1447,14 @@ mch_init(void)
 #endif
 }
 
+    void
+set_sigwinch_handler(void)
+{
+#if defined(SIGWINCH)
+    mch_signal(SIGWINCH, sig_winch);
+#endif
+}
+
     static void
 set_signals(void)
 {
@@ -1342,21 +1462,28 @@ set_signals(void)
     /*
      * WINDOW CHANGE signal is handled with sig_winch().
      */
-    signal(SIGWINCH, (RETSIGTYPE (*)())sig_winch);
+    mch_signal(SIGWINCH, sig_winch);
 #endif
 
 #ifdef SIGTSTP
     // See mch_init() for the conditions under which we ignore SIGTSTP.
-    signal(SIGTSTP, ignore_sigtstp ? SIG_IGN : SIG_DFL);
+    // In the GUI default TSTP processing is OK.
+    // Checking both gui.in_use and gui.starting because gui.in_use is not set
+    // at this point (set after menus are displayed), but gui.starting is set.
+    mch_signal(SIGTSTP, ignore_sigtstp ? SIG_IGN
+# ifdef FEAT_GUI
+				: gui.in_use || gui.starting ? SIG_DFL
+# endif
+				    : sig_tstp);
 #endif
 #if defined(SIGCONT)
-    signal(SIGCONT, sigcont_handler);
+    mch_signal(SIGCONT, sigcont_handler);
 #endif
 #ifdef SIGPIPE
     /*
      * We want to ignore breaking of PIPEs.
      */
-    signal(SIGPIPE, SIG_IGN);
+    mch_signal(SIGPIPE, SIG_IGN);
 #endif
 
 #ifdef SIGINT
@@ -1367,14 +1494,14 @@ set_signals(void)
     /*
      * Call user's handler on SIGUSR1
      */
-    signal(SIGUSR1, (RETSIGTYPE (*)())catch_sigusr1);
+    mch_signal(SIGUSR1, catch_sigusr1);
 #endif
 
     /*
      * Ignore alarm signals (Perl's alarm() generates it).
      */
 #ifdef SIGALRM
-    signal(SIGALRM, SIG_IGN);
+    mch_signal(SIGALRM, SIG_IGN);
 #endif
 
 #ifdef SIGPWR
@@ -1382,7 +1509,7 @@ set_signals(void)
      * Catch SIGPWR (power failure?) to preserve the swap files, so that no
      * work will be lost.
      */
-    signal(SIGPWR, (RETSIGTYPE (*)())catch_sigpwr);
+    mch_signal(SIGPWR, catch_sigpwr);
 #endif
 
     /*
@@ -1395,18 +1522,18 @@ set_signals(void)
      * When the GUI is running, ignore the hangup signal.
      */
     if (gui.in_use)
-	signal(SIGHUP, SIG_IGN);
+	mch_signal(SIGHUP, SIG_IGN);
 #endif
 }
 
-#if defined(SIGINT) || defined(PROTO)
+#if defined(SIGINT)
 /*
  * Catch CTRL-C (only works while in Cooked mode).
  */
     static void
 catch_int_signal(void)
 {
-    signal(SIGINT, (RETSIGTYPE (*)())catch_sigint);
+    mch_signal(SIGINT, catch_sigint);
 }
 #endif
 
@@ -1416,14 +1543,14 @@ reset_signals(void)
     catch_signals(SIG_DFL, SIG_DFL);
 #if defined(SIGCONT)
     // SIGCONT isn't in the list, because its default action is ignore
-    signal(SIGCONT, SIG_DFL);
+    mch_signal(SIGCONT, SIG_DFL);
 #endif
 }
 
     static void
 catch_signals(
-    RETSIGTYPE (*func_deadly)(),
-    RETSIGTYPE (*func_other)())
+    void (*func_deadly)(int),
+    void (*func_other)(int))
 {
     int	    i;
 
@@ -1458,7 +1585,7 @@ catch_signals(
 	    sv.sv_flags = SV_ONSTACK;
 	    sigvec(signal_info[i].sig, &sv, NULL);
 # else
-	    signal(signal_info[i].sig, func_deadly);
+	    mch_signal(signal_info[i].sig, func_deadly);
 # endif
 #endif
 	}
@@ -1466,11 +1593,11 @@ catch_signals(
 	{
 	    // Deal with non-deadly signals.
 #ifdef SIGTSTP
-	    signal(signal_info[i].sig,
+	    mch_signal(signal_info[i].sig,
 		    signal_info[i].sig == SIGTSTP && ignore_sigtstp
 						       ? SIG_IGN : func_other);
 #else
-	    signal(signal_info[i].sig, func_other);
+	    mch_signal(signal_info[i].sig, func_other);
 #endif
 	}
     }
@@ -1567,8 +1694,7 @@ mch_input_isatty(void)
 
 #ifdef FEAT_X11
 
-# if defined(ELAPSED_TIMEVAL) \
-	&& (defined(FEAT_XCLIPBOARD) || defined(FEAT_TITLE))
+# if defined(ELAPSED_TIMEVAL)
 
 /*
  * Give a message about the elapsed time for opening the X window.
@@ -1581,7 +1707,7 @@ xopen_message(long elapsed_msec)
 # endif
 #endif
 
-#if defined(FEAT_X11) && (defined(FEAT_TITLE) || defined(FEAT_XCLIPBOARD))
+#if defined(FEAT_X11)
 /*
  * A few functions shared by X11 title and clipboard code.
  */
@@ -1602,9 +1728,9 @@ x_error_handler(Display *dpy, XErrorEvent *error_event)
     // like the best alternative.  Do preserve files, in case we crash.
     ml_sync_all(FALSE, FALSE);
 
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     if (!gui.in_use)
-#endif
+# endif
 	msg((char *)IObuff);
 
     return 0;		// NOTREACHED
@@ -1630,10 +1756,10 @@ x_connect_to_server(void)
     if (exiting || v_dying)
 	return FALSE;
 
-#if defined(FEAT_CLIENTSERVER)
+# if defined(FEAT_CLIENTSERVER)
     if (x_force_connect)
 	return TRUE;
-#endif
+# endif
     if (x_no_connect)
 	return FALSE;
 
@@ -1652,8 +1778,8 @@ x_connect_to_server(void)
     return TRUE;
 }
 
-#if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)
-# if defined(USING_SETJMP)
+# if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)
+#  if defined(USING_SETJMP)
 /*
  * An X IO Error handler, used to catch error while opening the display.
  */
@@ -1662,11 +1788,11 @@ x_IOerror_check(Display *dpy UNUSED)
 {
     // This function should not return, it causes exit().  Longjump instead.
     LONGJMP(lc_jump_env, 1);
-#  if defined(VMS) || defined(__CYGWIN__)
+#   if defined(VMS) || defined(__CYGWIN__)
     return 0;  // avoid the compiler complains about missing return value
-#  endif
+#   endif
 }
-# endif
+#  endif
 
 /*
  * An X IO Error handler, used to catch terminal errors.
@@ -1684,9 +1810,9 @@ x_IOerror_handler(Display *dpy UNUSED)
 
     // This function should not return, it causes exit().  Longjump instead.
     LONGJMP(x_jump_env, 1);
-# if defined(VMS) || defined(__CYGWIN__)
+#  if defined(VMS) || defined(__CYGWIN__)
     return 0;  // avoid the compiler complains about missing return value
-# endif
+#  endif
 }
 
 /*
@@ -1695,14 +1821,14 @@ x_IOerror_handler(Display *dpy UNUSED)
  * (e.g. through tmux).
  */
     static void
-may_restore_clipboard(void)
+may_restore_x11_clipboard(void)
 {
     // No point in restoring the connecting if we are exiting or dying.
     if (!exiting && !v_dying && xterm_dpy_retry_count > 0)
     {
 	--xterm_dpy_retry_count;
 
-# ifndef LESSTIF_VERSION
+#  ifndef LESSTIF_VERSION
 	// This has been reported to avoid Vim getting stuck.
 	if (app_context != (XtAppContext)NULL)
 	{
@@ -1710,7 +1836,7 @@ may_restore_clipboard(void)
 	    app_context = (XtAppContext)NULL;
 	    x11_display = NULL; // freed by XtDestroyApplicationContext()
 	}
-# endif
+#  endif
 
 	setup_term_clip();
 	get_x11_title(FALSE);
@@ -1720,22 +1846,25 @@ may_restore_clipboard(void)
     void
 ex_xrestore(exarg_T *eap)
 {
-    if (eap->arg != NULL && STRLEN(eap->arg) > 0)
+    size_t  arglen;
+
+    if (eap->arg != NULL && (arglen = STRLEN(eap->arg)) > 0)
     {
-        if (xterm_display_allocated)
-            vim_free(xterm_display);
-        xterm_display = (char *)vim_strsave(eap->arg);
-        xterm_display_allocated = TRUE;
+	if (xterm_display_allocated)
+	    vim_free(xterm_display);
+	xterm_display = (char *)vim_strnsave(eap->arg, arglen);
+	xterm_display_allocated = TRUE;
     }
-    smsg(_("restoring display %s"), xterm_display == NULL
+    smsg(_("restoring X11 display %s"), xterm_display == NULL
 		    ? (char *)mch_getenv((char_u *)"DISPLAY") : xterm_display);
 
     clear_xterm_clip();
     x11_window = 0;
     xterm_dpy_retry_count = 5;  // Try reconnecting five times
-    may_restore_clipboard();
+    may_restore_x11_clipboard();
+    choose_clipmethod();
 }
-#endif
+# endif
 
 /*
  * Test if "dpy" and x11_window are valid by getting the window title.
@@ -1747,7 +1876,7 @@ ex_xrestore(exarg_T *eap)
     static int
 test_x11_window(Display *dpy)
 {
-    int			(*old_handler)();
+    int			(*old_handler)(Display*, XErrorEvent*);
     XTextProperty	text_prop;
 
     old_handler = XSetErrorHandler(x_error_check);
@@ -1764,7 +1893,6 @@ test_x11_window(Display *dpy)
 }
 #endif
 
-#ifdef FEAT_TITLE
 
 #ifdef FEAT_X11
 
@@ -1780,10 +1908,10 @@ get_x11_windis(void)
 {
     char	    *winid;
     static int	    result = -1;
-#define XD_NONE	 0	// x11_display not set here
-#define XD_HERE	 1	// x11_display opened here
-#define XD_GUI	 2	// x11_display used from gui.dpy
-#define XD_XTERM 3	// x11_display used from xterm_dpy
+# define XD_NONE	 0	// x11_display not set here
+# define XD_HERE	 1	// x11_display opened here
+# define XD_GUI	 2	// x11_display used from gui.dpy
+# define XD_XTERM 3	// x11_display used from xterm_dpy
     static int	    x11_display_from = XD_NONE;
     static int	    did_set_error_handler = FALSE;
 
@@ -1794,7 +1922,7 @@ get_x11_windis(void)
 	did_set_error_handler = TRUE;
     }
 
-#if defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK)
+# if defined(FEAT_GUI_X11) || defined(FEAT_GUI_GTK)
     if (gui.in_use)
     {
 	/*
@@ -1821,7 +1949,7 @@ get_x11_windis(void)
 	x11_display = NULL;
 	x11_display_from = XD_NONE;
     }
-#endif
+# endif
 
     // When started with the "-X" argument, don't try connecting.
     if (!x_connect_to_server())
@@ -1836,7 +1964,7 @@ get_x11_windis(void)
     if (x11_window == 0 && (winid = getenv("WINDOWID")) != NULL)
 	x11_window = (Window)atol(winid);
 
-#ifdef FEAT_XCLIPBOARD
+# ifdef FEAT_XCLIPBOARD
     if (xterm_dpy == x11_display)
 	// x11_display may have been set to xterm_dpy elsewhere
 	x11_display_from = XD_XTERM;
@@ -1866,7 +1994,7 @@ get_x11_windis(void)
 	}
 	return OK;
     }
-#endif
+# endif
 
     if (x11_window == 0 || x11_display == NULL)
 	result = -1;
@@ -1876,34 +2004,33 @@ get_x11_windis(void)
 
     if (x11_window != 0 && x11_display == NULL)
     {
-#ifdef SET_SIG_ALARM
-	RETSIGTYPE (*sig_save)();
-#endif
-#ifdef ELAPSED_FUNC
+# ifdef SET_SIG_ALARM
+	sighandler_T sig_save;
+# endif
+# ifdef ELAPSED_FUNC
 	elapsed_T start_tv;
 
 	if (p_verbose > 0)
 	    ELAPSED_INIT(start_tv);
-#endif
+# endif
 
-#ifdef SET_SIG_ALARM
+# ifdef SET_SIG_ALARM
 	/*
 	 * Opening the Display may hang if the DISPLAY setting is wrong, or
 	 * the network connection is bad.  Set an alarm timer to get out.
 	 */
 	sig_alarm_called = FALSE;
-	sig_save = (RETSIGTYPE (*)())signal(SIGALRM,
-						 (RETSIGTYPE (*)())sig_alarm);
+	sig_save = mch_signal(SIGALRM, sig_alarm);
 	alarm(2);
-#endif
+# endif
 	x11_display = XOpenDisplay(NULL);
 
-#ifdef SET_SIG_ALARM
+# ifdef SET_SIG_ALARM
 	alarm(0);
-	signal(SIGALRM, (RETSIGTYPE (*)())sig_save);
+	mch_signal(SIGALRM, sig_save);
 	if (p_verbose > 0 && sig_alarm_called)
 	    verb_msg(_("Opening the X display timed out"));
-#endif
+# endif
 	if (x11_display != NULL)
 	{
 # ifdef ELAPSED_FUNC
@@ -1975,91 +2102,90 @@ get_x11_thing(
     int			retval = FALSE;
     Status		status;
 
-    if (get_x11_windis() == OK)
+    if (get_x11_windis() != OK)
+	return FALSE;
+
+    // Get window/icon name if any
+    if (get_title)
+	status = XGetWMName(x11_display, x11_window, &text_prop);
+    else
+	status = XGetWMIconName(x11_display, x11_window, &text_prop);
+
+    /*
+     * If terminal is xterm, then x11_window may be a child window of the
+     * outer xterm window that actually contains the window/icon name, so
+     * keep traversing up the tree until a window with a title/icon is
+     * found.
+     */
+    // Previously this was only done for xterm and alike.  I don't see a
+    // reason why it would fail for other terminal emulators.
+    // if (term_is_xterm)
+    Window	    root;
+    Window	    parent;
+    Window	    win = x11_window;
+    Window	   *children;
+    unsigned int    num_children;
+
+    while (!status || text_prop.value == NULL)
     {
-	// Get window/icon name if any
+	if (!XQueryTree(x11_display, win, &root, &parent, &children,
+		    &num_children))
+	    break;
+	if (children)
+	    XFree((void *)children);
+	if (parent == root || parent == 0)
+	    break;
+
+	win = parent;
 	if (get_title)
-	    status = XGetWMName(x11_display, x11_window, &text_prop);
+	    status = XGetWMName(x11_display, win, &text_prop);
 	else
-	    status = XGetWMIconName(x11_display, x11_window, &text_prop);
+	    status = XGetWMIconName(x11_display, win, &text_prop);
+    }
 
-	/*
-	 * If terminal is xterm, then x11_window may be a child window of the
-	 * outer xterm window that actually contains the window/icon name, so
-	 * keep traversing up the tree until a window with a title/icon is
-	 * found.
-	 */
-	// Previously this was only done for xterm and alike.  I don't see a
-	// reason why it would fail for other terminal emulators.
-	// if (term_is_xterm)
+    if (status && text_prop.value != NULL)
+    {
+	retval = TRUE;
+	if (!test_only)
 	{
-	    Window	    root;
-	    Window	    parent;
-	    Window	    win = x11_window;
-	    Window	   *children;
-	    unsigned int    num_children;
-
-	    while (!status || text_prop.value == NULL)
+	    if (get_title)
+		vim_free(oldtitle);
+	    else
+		vim_free(oldicon);
+	    if (text_prop.encoding == XA_STRING && !has_mbyte)
 	    {
-		if (!XQueryTree(x11_display, win, &root, &parent, &children,
-							       &num_children))
-		    break;
-		if (children)
-		    XFree((void *)children);
-		if (parent == root || parent == 0)
-		    break;
-
-		win = parent;
 		if (get_title)
-		    status = XGetWMName(x11_display, win, &text_prop);
+		    oldtitle = vim_strsave((char_u *)text_prop.value);
 		else
-		    status = XGetWMIconName(x11_display, win, &text_prop);
+		    oldicon = vim_strsave((char_u *)text_prop.value);
 	    }
-	}
-	if (status && text_prop.value != NULL)
-	{
-	    retval = TRUE;
-	    if (!test_only)
+	    else
 	    {
-		if (get_title)
-		    vim_free(oldtitle);
+		char    **cl;
+		Status  transform_status;
+		int	    n = 0;
+
+		transform_status = XmbTextPropertyToTextList(x11_display,
+			&text_prop,
+			&cl, &n);
+		if (transform_status >= Success && n > 0 && cl[0])
+		{
+		    if (get_title)
+			oldtitle = vim_strsave((char_u *) cl[0]);
+		    else
+			oldicon = vim_strsave((char_u *) cl[0]);
+		    XFreeStringList(cl);
+		}
 		else
-		    vim_free(oldicon);
-		if (text_prop.encoding == XA_STRING && !has_mbyte)
 		{
 		    if (get_title)
 			oldtitle = vim_strsave((char_u *)text_prop.value);
 		    else
 			oldicon = vim_strsave((char_u *)text_prop.value);
 		}
-		else
-		{
-		    char    **cl;
-		    Status  transform_status;
-		    int	    n = 0;
-
-		    transform_status = XmbTextPropertyToTextList(x11_display,
-								 &text_prop,
-								 &cl, &n);
-		    if (transform_status >= Success && n > 0 && cl[0])
-		    {
-			if (get_title)
-			    oldtitle = vim_strsave((char_u *) cl[0]);
-			else
-			    oldicon = vim_strsave((char_u *) cl[0]);
-			XFreeStringList(cl);
-		    }
-		    else
-		    {
-			if (get_title)
-			    oldtitle = vim_strsave((char_u *)text_prop.value);
-			else
-			    oldicon = vim_strsave((char_u *)text_prop.value);
-		    }
-		}
 	    }
-	    XFree((void *)text_prop.value);
 	}
+	XFree((void *)text_prop.value);
     }
     return retval;
 }
@@ -2068,11 +2194,11 @@ get_x11_thing(
 // systems X_HAVE_UTF8_STRING may be defined in a header file but
 // Xutf8SetWMProperties() is not in the X11 library.  Configure checks for
 // that and defines HAVE_XUTF8SETWMPROPERTIES.
-#if defined(X_HAVE_UTF8_STRING)
-# if X_HAVE_UTF8_STRING && HAVE_XUTF8SETWMPROPERTIES
-#  define USE_UTF8_STRING
+# if defined(X_HAVE_UTF8_STRING)
+#  if X_HAVE_UTF8_STRING && HAVE_XUTF8SETWMPROPERTIES
+#   define USE_UTF8_STRING
+#  endif
 # endif
-#endif
 
 /*
  * Set x11 Window Title
@@ -2085,18 +2211,18 @@ set_x11_title(char_u *title)
 	// XmbSetWMProperties() and Xutf8SetWMProperties() should use a STRING
 	// when possible, COMPOUND_TEXT otherwise.  COMPOUND_TEXT isn't
 	// supported everywhere and STRING doesn't work for multi-byte titles.
-#ifdef USE_UTF8_STRING
+# ifdef USE_UTF8_STRING
     if (enc_utf8)
 	Xutf8SetWMProperties(x11_display, x11_window, (const char *)title,
 					     NULL, NULL, 0, NULL, NULL, NULL);
     else
-#endif
+# endif
     {
-#if XtSpecificationRelease >= 4
-# ifdef FEAT_XFONTSET
+# if XtSpecificationRelease >= 4
+#  ifdef FEAT_XFONTSET
 	XmbSetWMProperties(x11_display, x11_window, (const char *)title,
 					     NULL, NULL, 0, NULL, NULL, NULL);
-# else
+#  else
 	XTextProperty	text_prop;
 	char		*c_title = (char *)title;
 
@@ -2104,10 +2230,10 @@ set_x11_title(char_u *title)
 	(void)XStringListToTextProperty(&c_title, 1, &text_prop);
 	XSetWMProperties(x11_display, x11_window, &text_prop,
 					     NULL, NULL, 0, NULL, NULL, NULL);
-# endif
-#else
+#  endif
+# else
 	XStoreName(x11_display, x11_window, (char *)title);
-#endif
+# endif
     }
     XFlush(x11_display);
 }
@@ -2121,28 +2247,28 @@ set_x11_title(char_u *title)
 set_x11_icon(char_u *icon)
 {
     // See above for comments about using X*SetWMProperties().
-#ifdef USE_UTF8_STRING
+# ifdef USE_UTF8_STRING
     if (enc_utf8)
 	Xutf8SetWMProperties(x11_display, x11_window, NULL, (const char *)icon,
 						   NULL, 0, NULL, NULL, NULL);
     else
-#endif
+# endif
     {
-#if XtSpecificationRelease >= 4
-# ifdef FEAT_XFONTSET
+# if XtSpecificationRelease >= 4
+#  ifdef FEAT_XFONTSET
 	XmbSetWMProperties(x11_display, x11_window, NULL, (const char *)icon,
 						   NULL, 0, NULL, NULL, NULL);
-# else
+#  else
 	XTextProperty	text_prop;
 	char		*c_icon = (char *)icon;
 
 	(void)XStringListToTextProperty(&c_icon, 1, &text_prop);
 	XSetWMProperties(x11_display, x11_window, NULL, &text_prop,
 						   NULL, 0, NULL, NULL, NULL);
-# endif
-#else
+#  endif
+# else
 	XSetIconName(x11_display, x11_window, (char *)icon);
-#endif
+# endif
     }
     XFlush(x11_display);
 }
@@ -2208,12 +2334,11 @@ mch_settitle(char_u *title, char_u *icon)
 #ifdef FEAT_X11
     if (get_x11_windis() == OK)
 	type = 1;
-#else
-# if defined(FEAT_GUI_PHOTON) \
+#endif
+#if defined(FEAT_GUI_PHOTON) \
     || defined(FEAT_GUI_GTK) || defined(FEAT_GUI_HAIKU)
     if (gui.in_use)
 	type = 1;
-# endif
 #endif
 
     /*
@@ -2291,10 +2416,20 @@ mch_restore_title(int which)
 {
     int	do_push_pop = unix_did_set_title || did_set_icon;
 
-    // only restore the title or icon when it has been set
-    mch_settitle(((which & SAVE_RESTORE_TITLE) && unix_did_set_title) ?
-			(oldtitle ? oldtitle : p_titleold) : NULL,
+    // Only restore the title or icon when it has been set.
+    // When using "oldtitle" make a copy, it might be freed halfway.
+    char_u *title = ((which & SAVE_RESTORE_TITLE) && unix_did_set_title)
+			? (oldtitle ? oldtitle : p_titleold) : NULL;
+    char_u *tofree = NULL;
+    if (title == oldtitle && oldtitle != NULL)
+    {
+	tofree = vim_strsave(title);
+	if (tofree != NULL)
+	    title = tofree;
+    }
+    mch_settitle(title,
 	       ((which & SAVE_RESTORE_ICON) && did_set_icon) ? oldicon : NULL);
+    vim_free(tofree);
 
     if (do_push_pop)
     {
@@ -2304,10 +2439,12 @@ mch_restore_title(int which)
     }
 }
 
-#endif // FEAT_TITLE
 
 /*
  * Return TRUE if "name" looks like some xterm name.
+ * This matches "xterm.*", thus "xterm-256color", "xterm-kitty", etc.
+ * Do not consider "xterm-kitty" an xterm, it is not fully xterm compatible,
+ * using the "xterm-kitty" terminfo entry should work better.
  * Seiichi Sato mentioned that "mlterm" works like xterm.
  */
     int
@@ -2315,7 +2452,8 @@ vim_is_xterm(char_u *name)
 {
     if (name == NULL)
 	return FALSE;
-    return (STRNICMP(name, "xterm", 5) == 0
+    return ((STRNICMP(name, "xterm", 5) == 0
+				     && STRNICMP(name, "xterm-kitty", 11) != 0)
 		|| STRNICMP(name, "nxterm", 6) == 0
 		|| STRNICMP(name, "kterm", 5) == 0
 		|| STRNICMP(name, "mlterm", 6) == 0
@@ -2324,7 +2462,7 @@ vim_is_xterm(char_u *name)
 		|| STRCMP(name, "builtin_xterm") == 0);
 }
 
-#if defined(FEAT_MOUSE_XTERM) || defined(PROTO)
+#if defined(FEAT_MOUSE_XTERM)
 /*
  * Return TRUE if "name" appears to be that of a terminal
  * known to support the xterm-style mouse protocol.
@@ -2337,6 +2475,7 @@ use_xterm_like_mouse(char_u *name)
 	    && (term_is_xterm
 		|| STRNICMP(name, "screen", 6) == 0
 		|| STRNICMP(name, "tmux", 4) == 0
+		|| STRNICMP(name, "gnome", 5) == 0
 		|| STRICMP(name, "st") == 0
 		|| STRNICMP(name, "st-", 3) == 0
 		|| STRNICMP(name, "stterm", 6) == 0));
@@ -2364,6 +2503,9 @@ use_xterm_mouse(void)
     return 0;
 }
 
+/*
+ * Return TRUE if "name" is an iris-ansi terminal name.
+ */
     int
 vim_is_iris(char_u *name)
 {
@@ -2373,34 +2515,22 @@ vim_is_iris(char_u *name)
 	    || STRCMP(name, "builtin_iris-ansi") == 0);
 }
 
+#if defined(VMS)
+/*
+ * Return TRUE if "name" is a vt300-like terminal name.
+ */
     int
 vim_is_vt300(char_u *name)
 {
     if (name == NULL)
-	return FALSE;	       // actually all ANSI comp. terminals should be here
-    // catch VT100 - VT5xx
+	return FALSE;
+    // Actually all ANSI compatible terminals should be here.
+    // Catch at least VT1xx - VT5xx
     return ((STRNICMP(name, "vt", 2) == 0
-		&& vim_strchr((char_u *)"12345", name[2]) != NULL)
+			     && vim_strchr((char_u *)"12345", name[2]) != NULL)
 	    || STRCMP(name, "builtin_vt320") == 0);
 }
-
-/*
- * Return TRUE if "name" is a terminal for which 'ttyfast' should be set.
- * This should include all windowed terminal emulators.
- */
-    int
-vim_is_fastterm(char_u *name)
-{
-    if (name == NULL)
-	return FALSE;
-    if (vim_is_xterm(name) || vim_is_vt300(name) || vim_is_iris(name))
-	return TRUE;
-    return (   STRNICMP(name, "hpterm", 6) == 0
-	    || STRNICMP(name, "sun-cmd", 7) == 0
-	    || STRNICMP(name, "screen", 6) == 0
-	    || STRNICMP(name, "tmux", 4) == 0
-	    || STRNICMP(name, "dtterm", 6) == 0);
-}
+#endif
 
 /*
  * Insert user name in s[len].
@@ -2509,7 +2639,7 @@ strerror(int err)
 
     if (err > 0 && err < sys_nerr)
 	return (sys_errlist[err]);
-    sprintf(er, "Error %d", err);
+    snprintf(er, sizeof(er), "Error %d", err);
     return er;
 }
 #endif
@@ -2546,7 +2676,7 @@ mch_FullName(
     int		len,
     int		force)		// also expand when already absolute path
 {
-    int		l;
+    int		buflen = 0;
 #ifdef HAVE_FCHDIR
     int		fd = -1;
     static int	dont_fchdir = FALSE;	// TRUE when fchdir() doesn't work
@@ -2583,6 +2713,9 @@ mch_FullName(
     if ((force || !mch_isFullName(fname))
 	    && ((p = vim_strrchr(fname, '/')) == NULL || p != fname))
     {
+	if (p == NULL && STRCMP(fname, "..") == 0)
+	    // Handle ".." without path separators.
+	    p = fname + 2;
 	/*
 	 * If the file name has a path, change to that directory for a moment,
 	 * and then get the directory (and get back to where we were).
@@ -2590,6 +2723,10 @@ mch_FullName(
 	 */
 	if (p != NULL)
 	{
+	    if (STRCMP(p, "/..") == 0)
+		// For "/path/dir/.." include the "/..".
+		p += 3;
+
 #ifdef HAVE_FCHDIR
 	    /*
 	     * Use fchdir() if possible, it's said to be faster and more
@@ -2631,9 +2768,19 @@ mch_FullName(
 		{
 		    vim_strncpy(buf, fname, p - fname);
 		    if (mch_chdir((char *)buf))
-			retval = FAIL;
-		    else
+		    {
+			// Path does not exist (yet).  For a full path fail,
+			// will use the path as-is.  For a relative path use
+			// the current directory and append the file name.
+			if (mch_isFullName(fname))
+			    retval = FAIL;
+			else
+			    p = NULL;
+		    }
+		    else if (*p == '/')
 			fname = p + 1;
+		    else
+			fname = p;
 		    *buf = NUL;
 		}
 	    }
@@ -2645,6 +2792,8 @@ mch_FullName(
 	}
 	if (p != NULL)
 	{
+	    int	l;
+
 #ifdef HAVE_FCHDIR
 	    if (fd >= 0)
 	    {
@@ -2655,32 +2804,41 @@ mch_FullName(
 		    verbose_leave();
 		}
 		l = fchdir(fd);
-		close(fd);
 	    }
 	    else
 #endif
 		l = mch_chdir((char *)olddir);
 	    if (l != 0)
-		emsg(_(e_prev_dir));
+		emsg(_(e_cannot_go_back_to_previous_directory));
 	}
+#ifdef HAVE_FCHDIR
+	if (fd >= 0)
+	    close(fd);
+#endif
 
-	l = STRLEN(buf);
-	if (l >= len - 1)
+	buflen = (int)STRLEN(buf);
+	if (buflen >= len - 1)
 	    retval = FAIL; // no space for trailing "/"
 #ifndef VMS
-	else if (l > 0 && buf[l - 1] != '/' && *fname != NUL
+	else if (buflen > 0 && buf[buflen - 1] != PATHSEP && *fname != NUL
 						   && STRCMP(fname, ".") != 0)
-	    STRCAT(buf, "/");
+	{
+	    STRCPY(buf + buflen, PATHSEPSTR);
+	    buflen += sizeof(PATHSEP);
+	}
 #endif
     }
 
+    if (buflen == 0)
+	buflen = (int)STRLEN(buf);
+
     // Catch file names which are too long.
-    if (retval == FAIL || (int)(STRLEN(buf) + STRLEN(fname)) >= len)
+    if (retval == FAIL || (int)(buflen + STRLEN(fname)) >= len)
 	return FAIL;
 
     // Do not append ".", "/dir/." is equal to "/dir".
     if (STRCMP(fname, ".") != 0)
-	STRCAT(buf, fname);
+	STRCPY(buf + buflen, fname);
 
     return OK;
 }
@@ -2701,7 +2859,7 @@ mch_isFullName(char_u *fname)
 #endif
 }
 
-#if defined(USE_FNAME_CASE) || defined(PROTO)
+#if defined(USE_FNAME_CASE)
 /*
  * Set the case of the file name, if it already exists.  This will cause the
  * file name to remain exactly the same.
@@ -2714,55 +2872,57 @@ fname_case(
 {
     struct stat st;
     char_u	*slash, *tail;
+    size_t	taillen;
     DIR		*dirp;
     struct dirent *dp;
 
-    if (mch_lstat((char *)name, &st) >= 0)
+    if (mch_lstat((char *)name, &st) < 0)
+	return;
+
+    // Open the directory where the file is located.
+    slash = vim_strrchr(name, '/');
+    if (slash == NULL)
     {
-	// Open the directory where the file is located.
-	slash = vim_strrchr(name, '/');
-	if (slash == NULL)
-	{
-	    dirp = opendir(".");
-	    tail = name;
-	}
-	else
-	{
-	    *slash = NUL;
-	    dirp = opendir((char *)name);
-	    *slash = '/';
-	    tail = slash + 1;
-	}
+	dirp = opendir(".");
+	tail = name;
+    }
+    else
+    {
+	*slash = NUL;
+	dirp = opendir((char *)name);
+	*slash = '/';
+	tail = slash + 1;
+    }
 
-	if (dirp != NULL)
+    if (dirp == NULL)
+	return;
+
+    taillen = STRLEN(tail);
+    while ((dp = readdir(dirp)) != NULL)
+    {
+	// Only accept names that differ in case and are the same byte
+	// length. TODO: accept different length name.
+	if (STRICMP(tail, dp->d_name) == 0
+		&& taillen == STRLEN(dp->d_name))
 	{
-	    while ((dp = readdir(dirp)) != NULL)
+	    char_u	newname[MAXPATHL + 1];
+	    struct stat st2;
+
+	    // Verify the inode is equal.
+	    vim_strncpy(newname, name, MAXPATHL);
+	    vim_strncpy(newname + (tail - name), (char_u *)dp->d_name,
+		    MAXPATHL - (tail - name));
+	    if (mch_lstat((char *)newname, &st2) >= 0
+		    && st.st_ino == st2.st_ino
+		    && st.st_dev == st2.st_dev)
 	    {
-		// Only accept names that differ in case and are the same byte
-		// length. TODO: accept different length name.
-		if (STRICMP(tail, dp->d_name) == 0
-			&& STRLEN(tail) == STRLEN(dp->d_name))
-		{
-		    char_u	newname[MAXPATHL + 1];
-		    struct stat st2;
-
-		    // Verify the inode is equal.
-		    vim_strncpy(newname, name, MAXPATHL);
-		    vim_strncpy(newname + (tail - name), (char_u *)dp->d_name,
-						    MAXPATHL - (tail - name));
-		    if (mch_lstat((char *)newname, &st2) >= 0
-			    && st.st_ino == st2.st_ino
-			    && st.st_dev == st2.st_dev)
-		    {
-			STRCPY(tail, dp->d_name);
-			break;
-		    }
-		}
+		STRCPY(tail, dp->d_name);
+		break;
 	    }
-
-	    closedir(dirp);
 	}
     }
+
+    closedir(dirp);
 }
 #endif
 
@@ -2807,7 +2967,7 @@ mch_setperm(char_u *name, long perm)
 		    (mode_t)perm) == 0 ? OK : FAIL);
 }
 
-#if defined(HAVE_FCHMOD) || defined(PROTO)
+#if defined(HAVE_FCHMOD)
 /*
  * Set file permission for open file "fd" to "perm".
  * Return FAIL for failure, OK otherwise.
@@ -2819,7 +2979,7 @@ mch_fsetperm(int fd, long perm)
 }
 #endif
 
-#if defined(HAVE_ACL) || defined(PROTO)
+#if defined(HAVE_ACL)
 # ifdef HAVE_SYS_ACL_H
 #  include <sys/acl.h>
 # endif
@@ -2834,7 +2994,7 @@ typedef struct vim_acl_solaris_T {
 } vim_acl_solaris_T;
 # endif
 
-#if defined(HAVE_SELINUX) || defined(PROTO)
+# if defined(HAVE_SELINUX)
 /*
  * Copy security info from "from_file" to "to_file".
  */
@@ -2847,50 +3007,50 @@ mch_copy_sec(char_u *from_file, char_u *to_file)
     if (selinux_enabled == -1)
 	selinux_enabled = is_selinux_enabled();
 
-    if (selinux_enabled > 0)
+    if (selinux_enabled <= 0)
+	return;
+
+    // Use "char *" instead of "security_context_t" to avoid a deprecation
+    // warning.
+    char *from_context = NULL;
+    char *to_context = NULL;
+
+    if (getfilecon((char *)from_file, &from_context) < 0)
     {
-	// Use "char *" instead of "security_context_t" to avoid a deprecation
-	// warning.
-	char *from_context = NULL;
-	char *to_context = NULL;
-
-	if (getfilecon((char *)from_file, &from_context) < 0)
-	{
-	    // If the filesystem doesn't support extended attributes,
-	    // the original had no special security context and the
-	    // target cannot have one either.
-	    if (errno == EOPNOTSUPP)
-		return;
-
-	    msg_puts(_("\nCould not get security context for "));
-	    msg_outtrans(from_file);
-	    msg_putchar('\n');
+	// If the filesystem doesn't support extended attributes,
+	// the original had no special security context and the
+	// target cannot have one either.
+	if (errno == EOPNOTSUPP)
 	    return;
-	}
-	if (getfilecon((char *)to_file, &to_context) < 0)
+
+	msg_puts(_("\nCould not get security context for "));
+	msg_outtrans(from_file);
+	msg_putchar('\n');
+	return;
+    }
+    if (getfilecon((char *)to_file, &to_context) < 0)
+    {
+	msg_puts(_("\nCould not get security context for "));
+	msg_outtrans(to_file);
+	msg_putchar('\n');
+	freecon (from_context);
+	return ;
+    }
+    if (strcmp(from_context, to_context) != 0)
+    {
+	if (setfilecon((char *)to_file, from_context) < 0)
 	{
-	    msg_puts(_("\nCould not get security context for "));
+	    msg_puts(_("\nCould not set security context for "));
 	    msg_outtrans(to_file);
 	    msg_putchar('\n');
-	    freecon (from_context);
-	    return ;
 	}
-	if (strcmp(from_context, to_context) != 0)
-	{
-	    if (setfilecon((char *)to_file, from_context) < 0)
-	    {
-		msg_puts(_("\nCould not set security context for "));
-		msg_outtrans(to_file);
-		msg_putchar('\n');
-	    }
-	}
-	freecon(to_context);
-	freecon(from_context);
     }
+    freecon(to_context);
+    freecon(from_context);
 }
-#endif // HAVE_SELINUX
+# endif // HAVE_SELINUX
 
-#if defined(HAVE_SMACK) && !defined(PROTO)
+# if defined(HAVE_SMACK) && !defined(PROTO)
 /*
  * Copy security info from "from_file" to "to_file".
  */
@@ -2913,8 +3073,12 @@ mch_copy_sec(char_u *from_file, char_u *to_file)
     if (from_file == NULL)
 	return;
 
-    for (index = 0 ; index < (int)(sizeof(smack_copied_attributes)
-			      / sizeof(smack_copied_attributes)[0]) ; index++)
+    size = listxattr((char *)from_file, NULL, 0);
+    // not supported or no attributes to copy
+    if (size <= 0)
+	return;
+
+    for (index = 0 ; index < (int)ARRAY_LENGTH(smack_copied_attributes); index++)
     {
 	// get the name of the attribute to copy
 	name = smack_copied_attributes[index];
@@ -2964,7 +3128,98 @@ mch_copy_sec(char_u *from_file, char_u *to_file)
 	}
     }
 }
-#endif // HAVE_SMACK
+# endif // HAVE_SMACK
+
+# if defined(FEAT_XATTR)
+/*
+ * Copy extended attributes from_file to to_file
+ */
+    void
+mch_copy_xattr(char_u *from_file, char_u *to_file)
+{
+    char	*xattr_buf;
+    ssize_t	size;
+    ssize_t	tsize;
+    ssize_t	keylen, vallen, max_vallen = 0;
+    char	*key;
+    char	*val = NULL;
+    char	*errmsg = NULL;
+
+    if (from_file == NULL)
+	return;
+
+    // get the length of the extended attributes
+    size = listxattr((char *)from_file, NULL, 0);
+    // not supported or no attributes to copy
+    if (size <= 0)
+	return;
+    xattr_buf = (char*)alloc(size);
+    if (xattr_buf == NULL)
+	return;
+    size = listxattr((char *)from_file, xattr_buf, size);
+    tsize = size;
+
+    errno = 0;
+
+    for (int round = 0; round < 2; round++)
+    {
+
+	key = xattr_buf;
+	if (round == 1)
+	    size = tsize;
+
+	while (size > 0)
+	{
+	    vallen = getxattr((char *)from_file, key,
+		    val, round ? max_vallen : 0);
+	    // only set the attribute in the second round
+	    if (vallen >= 0 && round &&
+		setxattr((char *)to_file, key, val, vallen, 0) == 0)
+		;
+	    else if (errno)
+	    {
+		switch (errno)
+		{
+		    case E2BIG:
+			errmsg = e_xattr_e2big;
+			goto error_exit;
+		    case ENOTSUP:
+		    case EACCES:
+		    case EPERM:
+			break;
+		    case ERANGE:
+			errmsg = e_xattr_erange;
+			goto error_exit;
+		    default:
+			errmsg = e_xattr_other;
+			goto error_exit;
+		}
+	    }
+
+	    if (round == 0 && vallen > max_vallen)
+		max_vallen = vallen;
+
+	    // add one for terminating null
+	    keylen = STRLEN(key) + 1;
+	    size -= keylen;
+	    key += keylen;
+	}
+	if (round)
+	    break;
+
+	val = (char*)alloc(max_vallen + 1);
+	if (val == NULL)
+	    goto error_exit;
+
+    }
+error_exit:
+    vim_free(xattr_buf);
+    vim_free(val);
+
+    if (errmsg != NULL)
+	emsg(_(errmsg));
+}
+# endif
 
 /*
  * Return a pointer to the ACL of file "fname" in allocated memory.
@@ -2974,26 +3229,33 @@ mch_copy_sec(char_u *from_file, char_u *to_file)
 mch_get_acl(char_u *fname UNUSED)
 {
     vim_acl_T	ret = NULL;
-#ifdef HAVE_POSIX_ACL
+# ifdef HAVE_POSIX_ACL
     ret = (vim_acl_T)acl_get_file((char *)fname, ACL_TYPE_ACCESS);
-#else
-#ifdef HAVE_SOLARIS_ZFS_ACL
+# else
+#  ifdef HAVE_SOLARIS_ZFS_ACL
     acl_t *aclent;
 
     if (acl_get((char *)fname, 0, &aclent) < 0)
 	return NULL;
     ret = (vim_acl_T)aclent;
-#else
-#ifdef HAVE_SOLARIS_ACL
+#  else
+#   ifdef HAVE_SOLARIS_ACL
     vim_acl_solaris_T   *aclent;
 
     aclent = malloc(sizeof(vim_acl_solaris_T));
+    if (aclent == NULL)
+	return NULL;
     if ((aclent->acl_cnt = acl((char *)fname, GETACLCNT, 0, NULL)) < 0)
     {
 	free(aclent);
 	return NULL;
     }
     aclent->acl_entry = malloc(aclent->acl_cnt * sizeof(aclent_t));
+    if (aclent->acl_entry == NULL)
+    {
+	free(aclent);
+	return NULL;
+    }
     if (acl((char *)fname, GETACL, aclent->acl_cnt, aclent->acl_entry) < 0)
     {
 	free(aclent->acl_entry);
@@ -3001,20 +3263,22 @@ mch_get_acl(char_u *fname UNUSED)
 	return NULL;
     }
     ret = (vim_acl_T)aclent;
-#else
-#if defined(HAVE_AIX_ACL)
+#   else
+#    if defined(HAVE_AIX_ACL)
     int		aclsize;
     struct acl *aclent;
 
     aclsize = sizeof(struct acl);
     aclent = malloc(aclsize);
+    if (aclent == NULL)
+	return NULL;
     if (statacl((char *)fname, STX_NORMAL, aclent, aclsize) < 0)
     {
 	if (errno == ENOSPC)
 	{
 	    aclsize = aclent->acl_len;
 	    aclent = realloc(aclent, aclsize);
-	    if (statacl((char *)fname, STX_NORMAL, aclent, aclsize) < 0)
+	    if (aclent == NULL || statacl((char *)fname, STX_NORMAL, aclent, aclsize) < 0)
 	    {
 		free(aclent);
 		return NULL;
@@ -3027,10 +3291,10 @@ mch_get_acl(char_u *fname UNUSED)
 	}
     }
     ret = (vim_acl_T)aclent;
-#endif // HAVE_AIX_ACL
-#endif // HAVE_SOLARIS_ACL
-#endif // HAVE_SOLARIS_ZFS_ACL
-#endif // HAVE_POSIX_ACL
+#    endif // HAVE_AIX_ACL
+#   endif // HAVE_SOLARIS_ACL
+#  endif // HAVE_SOLARIS_ZFS_ACL
+# endif // HAVE_POSIX_ACL
     return ret;
 }
 
@@ -3042,22 +3306,22 @@ mch_set_acl(char_u *fname UNUSED, vim_acl_T aclent)
 {
     if (aclent == NULL)
 	return;
-#ifdef HAVE_POSIX_ACL
+# ifdef HAVE_POSIX_ACL
     acl_set_file((char *)fname, ACL_TYPE_ACCESS, (acl_t)aclent);
-#else
-#ifdef HAVE_SOLARIS_ZFS_ACL
+# else
+#  ifdef HAVE_SOLARIS_ZFS_ACL
     acl_set((char *)fname, (acl_t *)aclent);
-#else
-#ifdef HAVE_SOLARIS_ACL
+#  else
+#   ifdef HAVE_SOLARIS_ACL
     acl((char *)fname, SETACL, ((vim_acl_solaris_T *)aclent)->acl_cnt,
 	    ((vim_acl_solaris_T *)aclent)->acl_entry);
-#else
-#ifdef HAVE_AIX_ACL
+#   else
+#    ifdef HAVE_AIX_ACL
     chacl((char *)fname, aclent, ((struct acl *)aclent)->acl_len);
-#endif // HAVE_AIX_ACL
-#endif // HAVE_SOLARIS_ACL
-#endif // HAVE_SOLARIS_ZFS_ACL
-#endif // HAVE_POSIX_ACL
+#    endif // HAVE_AIX_ACL
+#   endif // HAVE_SOLARIS_ACL
+#  endif // HAVE_SOLARIS_ZFS_ACL
+# endif // HAVE_POSIX_ACL
 }
 
     void
@@ -3065,22 +3329,22 @@ mch_free_acl(vim_acl_T aclent)
 {
     if (aclent == NULL)
 	return;
-#ifdef HAVE_POSIX_ACL
+# ifdef HAVE_POSIX_ACL
     acl_free((acl_t)aclent);
-#else
-#ifdef HAVE_SOLARIS_ZFS_ACL
+# else
+#  ifdef HAVE_SOLARIS_ZFS_ACL
     acl_free((acl_t *)aclent);
-#else
-#ifdef HAVE_SOLARIS_ACL
+#  else
+#   ifdef HAVE_SOLARIS_ACL
     free(((vim_acl_solaris_T *)aclent)->acl_entry);
     free(aclent);
-#else
-#ifdef HAVE_AIX_ACL
+#   else
+#    ifdef HAVE_AIX_ACL
     free(aclent);
-#endif // HAVE_AIX_ACL
-#endif // HAVE_SOLARIS_ACL
-#endif // HAVE_SOLARIS_ZFS_ACL
-#endif // HAVE_POSIX_ACL
+#    endif // HAVE_AIX_ACL
+#   endif // HAVE_SOLARIS_ACL
+#  endif // HAVE_SOLARIS_ZFS_ACL
+# endif // HAVE_POSIX_ACL
 }
 #endif
 
@@ -3144,7 +3408,7 @@ executable_file(char_u *name)
     // Therefore, this check does not have any sense - let keep us to the
     // conventions instead:
     // *.COM and *.EXE files are the executables - the rest are not. This is
-    // not ideal but better then it was.
+    // not ideal but better than it was.
     int vms_executable = 0;
     if (S_ISREG(st.st_mode) && mch_access((char *)name, X_OK) == 0)
     {
@@ -3167,7 +3431,11 @@ executable_file(char_u *name)
 mch_can_exe(char_u *name, char_u **path, int use_path)
 {
     char_u	*buf;
+    size_t	bufsize;
+    size_t	buflen;
     char_u	*p, *e;
+    char_u	*p_end;
+    size_t	elen;
     int		retval;
 
     // When "use_path" is false and if it's an absolute or relative path don't
@@ -3193,7 +3461,9 @@ mch_can_exe(char_u *name, char_u **path, int use_path)
     p = (char_u *)getenv("PATH");
     if (p == NULL || *p == NUL)
 	return -1;
-    buf = alloc(STRLEN(name) + STRLEN(p) + 2);
+    p_end = p + STRLEN(p);
+    bufsize = STRLEN(name) + (size_t)(p_end - p) + 2;
+    buf = alloc(bufsize);
     if (buf == NULL)
 	return -1;
 
@@ -3205,15 +3475,18 @@ mch_can_exe(char_u *name, char_u **path, int use_path)
     {
 	e = (char_u *)strchr((char *)p, ':');
 	if (e == NULL)
-	    e = p + STRLEN(p);
-	if (e - p <= 1)		// empty entry means current dir
-	    STRCPY(buf, "./");
-	else
+	    e = p_end;
+	elen = (size_t)(e - p);
+	if (elen <= 1)		// empty entry means current dir
 	{
-	    vim_strncpy(buf, p, e - p);
-	    add_pathsep(buf);
+	    p = (char_u *)"./";
+	    elen = STRLEN_LITERAL("./");
 	}
-	STRCAT(buf, name);
+	buflen = vim_snprintf((char *)buf, bufsize, "%.*s%s%s",
+		(int)elen,
+		p,
+		(after_pathsep(p, p + elen)) ? "" : PATHSEPSTR,
+		name);
 	retval = executable_file(buf);
 	if (retval == 1)
 	{
@@ -3222,7 +3495,7 @@ mch_can_exe(char_u *name, char_u **path, int use_path)
 		if (buf[0] != '/')
 		    *path = FullName_save(buf, TRUE);
 		else
-		    *path = vim_strsave(buf);
+		    *path = vim_strnsave(buf, buflen);
 	    }
 	    break;
 	}
@@ -3278,16 +3551,23 @@ mch_early_init(void)
      * Ignore any errors.
      */
 #if defined(HAVE_SIGALTSTACK) || defined(HAVE_SIGSTACK)
-# ifdef HAVE_SYSCONF_SIGSTKSZ
-    signal_stack = alloc(sysconf(_SC_SIGSTKSZ));
-# else
-    signal_stack = alloc(SIGSTKSZ);
-# endif
+    signal_stack = alloc(get_signal_stack_size());
     init_signal_stack();
+#endif
+
+    /*
+     * Inform the macOS scheduler that Vim renders UI, and so shouldn’t have its
+     * threads’ quality of service classes clamped.
+     */
+#ifdef MACOS_X
+# ifdef MAC_OS_X_VERSION_10_7
+    integer_t policy = TASK_DEFAULT_APPLICATION;
+    task_policy_set(mach_task_self(), TASK_CATEGORY_POLICY, &policy, 1);
+# endif
 #endif
 }
 
-#if defined(EXITFREE) || defined(PROTO)
+#if defined(EXITFREE)
     void
 mch_free_mem(void)
 {
@@ -3324,10 +3604,8 @@ mch_free_mem(void)
 # if defined(HAVE_SIGALTSTACK) || defined(HAVE_SIGSTACK)
     VIM_CLEAR(signal_stack);
 # endif
-# ifdef FEAT_TITLE
     vim_free(oldtitle);
     vim_free(oldicon);
-# endif
 }
 #endif
 
@@ -3356,12 +3634,20 @@ exit_scroll(void)
     {
 	restore_cterm_colors();		// get original colors back
 	msg_clr_eos_force();		// clear the rest of the display
-	windgoto((int)Rows - 1, 0);	// may have moved the cursor
+	windgoto((int)Rows - 1, cmdline_col_off); // may have moved the cursor
     }
 }
 
 #ifdef USE_GCOV_FLUSH
-extern void __gcov_flush();
+# if (defined(__GNUC__) \
+	    && ((__GNUC__ == 11 && __GNUC_MINOR__ >= 1) || (__GNUC__ >= 12))) \
+	|| (defined(__clang__) && (__clang_major__ >= 12))
+extern void __gcov_dump(void);
+extern void __gcov_reset(void);
+#  define __gcov_flush() do { __gcov_dump(); __gcov_reset(); } while (0)
+# else
+extern void __gcov_flush(void);
+# endif
 #endif
 
     void
@@ -3378,14 +3664,13 @@ mch_exit(int r)
 #endif
     {
 	settmode(TMODE_COOK);
-#ifdef FEAT_TITLE
 	if (!is_not_a_term())
 	{
 	    // restore xterm title and icon name
 	    mch_restore_title(SAVE_RESTORE_BOTH);
 	    term_pop_title(SAVE_RESTORE_BOTH);
 	}
-#endif
+
 	/*
 	 * When t_ti is not empty but it doesn't cause swapping terminal
 	 * pages, need to output a newline when msg_didout is set.  But when
@@ -3452,7 +3737,7 @@ may_core_dump(void)
 {
     if (deadly_signal != 0)
     {
-	signal(deadly_signal, SIG_DFL);
+	mch_signal(deadly_signal, SIG_DFL);
 	kill(getpid(), deadly_signal);	// Die using the signal we caught
     }
 }
@@ -3467,7 +3752,7 @@ get_tty_fd(int fd)
 {
     int		tty_fd = fd;
 
-#if defined(HAVE_SVR4_PTYS) && defined(SUN_SYSTEM)
+# if defined(HAVE_SVR4_PTYS) && defined(SUN_SYSTEM)
     // On SunOS: Get the terminal parameters from "fd", or the slave device of
     // "fd" when it is a master device.
     if (mch_isatty(fd) > 1)
@@ -3482,7 +3767,7 @@ get_tty_fd(int fd)
 	if (tty_fd < 0)
 	    return -1;
     }
-#endif
+# endif
     return tty_fd;
 }
 
@@ -3493,21 +3778,21 @@ mch_tcgetattr(int fd, void *term)
     int		retval = -1;
 
     tty_fd = get_tty_fd(fd);
-    if (tty_fd >= 0)
-    {
-#ifdef NEW_TTY_SYSTEM
-# ifdef HAVE_TERMIOS_H
-	retval = tcgetattr(tty_fd, (struct termios *)term);
+    if (tty_fd < 0)
+	return -1;
+
+# ifdef NEW_TTY_SYSTEM
+#  ifdef HAVE_TERMIOS_H
+    retval = tcgetattr(tty_fd, (struct termios *)term);
+#  else
+    retval = ioctl(tty_fd, TCGETA, (struct termio *)term);
+#  endif
 # else
-	retval = ioctl(tty_fd, TCGETA, (struct termio *)term);
+    // for "old" tty systems
+    retval = ioctl(tty_fd, TIOCGETP, (struct sgttyb *)term);
 # endif
-#else
-	// for "old" tty systems
-	retval = ioctl(tty_fd, TIOCGETP, (struct sgttyb *)term);
-#endif
-	if (tty_fd != fd)
-	    close(tty_fd);
-    }
+    if (tty_fd != fd)
+	close(tty_fd);
     return retval;
 }
 
@@ -3516,14 +3801,14 @@ mch_settmode(tmode_T tmode)
 {
     static int first = TRUE;
 
-#ifdef NEW_TTY_SYSTEM
-# ifdef HAVE_TERMIOS_H
+# ifdef NEW_TTY_SYSTEM
+#  ifdef HAVE_TERMIOS_H
     static struct termios told;
 	   struct termios tnew;
-# else
+#  else
     static struct termio told;
 	   struct termio tnew;
-# endif
+#  endif
 
     if (first)
     {
@@ -3536,25 +3821,26 @@ mch_settmode(tmode_T tmode)
     {
 	// ~ICRNL enables typing ^V^M
 	// ~IXON disables CTRL-S stopping output, so that it can be mapped.
-	tnew.c_iflag &= ~(ICRNL | IXON);
+	tnew.c_iflag &= ~(ICRNL |
+		(T_XON == NULL || *T_XON == NUL ? IXON : 0));
 	tnew.c_lflag &= ~(ICANON | ECHO | ISIG | ECHOE
-# if defined(IEXTEN)
+#  if defined(IEXTEN)
 		    | IEXTEN	    // IEXTEN enables typing ^V on SOLARIS
-# endif
+#  endif
 				);
-# ifdef ONLCR
+#  ifdef ONLCR
 	// Don't map NL -> CR NL, we do it ourselves.
 	// Also disable expanding tabs if possible.
-#  ifdef XTABS
+#   ifdef XTABS
 	tnew.c_oflag &= ~(ONLCR | XTABS);
-#  else
-#   ifdef TAB3
-	tnew.c_oflag &= ~(ONLCR | TAB3);
 #   else
+#    ifdef TAB3
+	tnew.c_oflag &= ~(ONLCR | TAB3);
+#    else
 	tnew.c_oflag &= ~ONLCR;
+#    endif
 #   endif
 #  endif
-# endif
 	tnew.c_cc[VMIN] = 1;		// return after 1 char
 	tnew.c_cc[VTIME] = 0;		// don't wait
     }
@@ -3567,7 +3853,7 @@ mch_settmode(tmode_T tmode)
 	tnew.c_cc[VTIME] = 0;		// don't wait
     }
 
-# if defined(HAVE_TERMIOS_H)
+#  if defined(HAVE_TERMIOS_H)
     {
 	int	n = 10;
 
@@ -3577,17 +3863,17 @@ mch_settmode(tmode_T tmode)
 						   && errno == EINTR && n > 0)
 	    --n;
     }
-# else
+#  else
     ioctl(read_cmd_fd, TCSETA, &tnew);
-# endif
+#  endif
 
-#else
+# else
     /*
      * for "old" tty systems
      */
-# ifndef TIOCSETN
-#  define TIOCSETN TIOCSETP	// for hpux 9.0
-# endif
+#  ifndef TIOCSETN
+#   define TIOCSETN TIOCSETP	// for hpux 9.0
+#  endif
     static struct sgttyb ttybold;
 	   struct sgttyb ttybnew;
 
@@ -3606,7 +3892,7 @@ mch_settmode(tmode_T tmode)
     else if (tmode == TMODE_SLEEP)
 	ttybnew.sg_flags &= ~(ECHO);
     ioctl(read_cmd_fd, TIOCSETN, &ttybnew);
-#endif
+# endif
     mch_cur_tmode = tmode;
 }
 
@@ -3626,18 +3912,18 @@ get_stty(void)
     char_u	buf[2];
     char_u	*p;
 
-    if (get_tty_info(read_cmd_fd, &info) == OK)
-    {
-	intr_char = info.interrupt;
-	buf[0] = info.backspace;
-	buf[1] = NUL;
-	add_termcode((char_u *)"kb", buf, FALSE);
+    if (get_tty_info(read_cmd_fd, &info) != OK)
+	return;
 
-	// If <BS> and <DEL> are now the same, redefine <DEL>.
-	p = find_termcode((char_u *)"kD");
-	if (p != NULL && p[0] == buf[0] && p[1] == buf[1])
-	    do_fixdel(NULL);
-    }
+    intr_char = info.interrupt;
+    buf[0] = info.backspace;
+    buf[1] = NUL;
+    add_termcode((char_u *)"kb", buf, FALSE);
+
+    // If <BS> and <DEL> are now the same, redefine <DEL>.
+    p = find_termcode((char_u *)"kD");
+    if (p != NULL && p[0] == buf[0] && p[1] == buf[1])
+	do_fixdel(NULL);
 }
 
 /*
@@ -3647,12 +3933,12 @@ get_stty(void)
     int
 get_tty_info(int fd, ttyinfo_T *info)
 {
-#ifdef NEW_TTY_SYSTEM
-# ifdef HAVE_TERMIOS_H
+# ifdef NEW_TTY_SYSTEM
+#  ifdef HAVE_TERMIOS_H
     struct termios keys;
-# else
+#  else
     struct termio keys;
-# endif
+#  endif
 
     if (mch_tcgetattr(fd, &keys) != -1)
     {
@@ -3668,7 +3954,7 @@ get_tty_info(int fd, ttyinfo_T *info)
 	    info->nl_does_cr = FALSE;
 	return OK;
     }
-#else
+# else
     // for "old" tty systems
     struct sgttyb keys;
 
@@ -3680,7 +3966,7 @@ get_tty_info(int fd, ttyinfo_T *info)
 	info->nl_does_cr = TRUE;
 	return OK;
     }
-#endif
+# endif
     return FAIL;
 }
 
@@ -3689,7 +3975,7 @@ get_tty_info(int fd, ttyinfo_T *info)
 static int	mouse_ison = FALSE;
 
 /*
- * Set mouse clicks on or off.
+ * Set mouse clicks on or off and possible enable mouse movement events.
  */
     void
 mch_setmouse(int on)
@@ -3719,21 +4005,19 @@ mch_setmouse(int on)
 #ifdef FEAT_MOUSE_URXVT
     if (ttym_flags == TTYM_URXVT)
     {
-	out_str_nf((char_u *)
-		   (on
-		   ? IF_EB("\033[?1015h", ESC_STR "[?1015h")
-		   : IF_EB("\033[?1015l", ESC_STR "[?1015l")));
+	out_str_nf((char_u *)(on ? "\033[?1015h" : "\033[?1015l"));
 	mouse_ison = on;
     }
 #endif
 
-    if (ttym_flags == TTYM_SGR)
+    if (T_CXM != NULL && *T_CXM != NUL)
+    {
+	term_enable_mouse(on);
+    }
+    else if (ttym_flags == TTYM_SGR)
     {
 	// SGR mode supports columns above 223
-	out_str_nf((char_u *)
-		   (on
-		   ? IF_EB("\033[?1006h", ESC_STR "[?1006h")
-		   : IF_EB("\033[?1006l", ESC_STR "[?1006l")));
+	out_str_nf((char_u *)(on ? "\033[?1006h" : "\033[?1006l"));
 	mouse_ison = on;
     }
 
@@ -3743,8 +4027,7 @@ mch_setmouse(int on)
 	bevalterm_ison = (p_bevalterm && on);
 	if (xterm_mouse_vers > 1 && !bevalterm_ison)
 	    // disable mouse movement events, enabling is below
-	    out_str_nf((char_u *)
-			(IF_EB("\033[?1003l", ESC_STR "[?1003l")));
+	    out_str_nf((char_u *)("\033[?1003l"));
     }
 #endif
 
@@ -3755,16 +4038,13 @@ mch_setmouse(int on)
 		       (xterm_mouse_vers > 1
 			? (
 #ifdef FEAT_BEVAL_TERM
-			    bevalterm_ison
-			       ? IF_EB("\033[?1003h", ESC_STR "[?1003h") :
+			    bevalterm_ison ? "\033[?1003h" :
 #endif
-			      IF_EB("\033[?1002h", ESC_STR "[?1002h"))
-			: IF_EB("\033[?1000h", ESC_STR "[?1000h")));
+			      "\033[?1002h")
+			: "\033[?1000h"));
 	else	// disable mouse events, could probably always send the same
 	    out_str_nf((char_u *)
-		       (xterm_mouse_vers > 1
-			? IF_EB("\033[?1002l", ESC_STR "[?1002l")
-			: IF_EB("\033[?1000l", ESC_STR "[?1000l")));
+		       (xterm_mouse_vers > 1 ? "\033[?1002l" : "\033[?1000l"));
 	mouse_ison = on;
     }
 
@@ -3832,18 +4112,15 @@ mch_setmouse(int on)
 	    //	  5 = Windows UP Arrow
 # ifdef JSBTERM_MOUSE_NONADVANCED
 	    // Disables full feedback of pointer movements
-	    out_str_nf((char_u *)IF_EB("\033[0~ZwLMRK1Q\033\\",
-					 ESC_STR "[0~ZwLMRK1Q" ESC_STR "\\"));
+	    out_str_nf((char_u *)"\033[0~ZwLMRK1Q\033\\");
 # else
-	    out_str_nf((char_u *)IF_EB("\033[0~ZwLMRK+1Q\033\\",
-					ESC_STR "[0~ZwLMRK+1Q" ESC_STR "\\"));
+	    out_str_nf((char_u *)"\033[0~ZwLMRK+1Q\033\\");
 # endif
 	    mouse_ison = TRUE;
 	}
 	else
 	{
-	    out_str_nf((char_u *)IF_EB("\033[0~ZwQ\033\\",
-					      ESC_STR "[0~ZwQ" ESC_STR "\\"));
+	    out_str_nf((char_u *)"\033[0~ZwQ\033\\");
 	    mouse_ison = FALSE;
 	}
     }
@@ -3861,7 +4138,7 @@ mch_setmouse(int on)
 #endif
 }
 
-#if defined(FEAT_BEVAL_TERM) || defined(PROTO)
+#if defined(FEAT_BEVAL_TERM)
 /*
  * Called when 'balloonevalterm' changed.
  */
@@ -3878,19 +4155,18 @@ mch_bevalterm_changed(void)
     void
 check_mouse_termcode(void)
 {
-# ifdef FEAT_MOUSE_XTERM
+#ifdef FEAT_MOUSE_XTERM
     if (use_xterm_mouse()
 # ifdef FEAT_MOUSE_URXVT
 	    && use_xterm_mouse() != 3
 # endif
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
     {
 	set_mouse_termcode(KS_MOUSE, (char_u *)(term_is_8bit(T_NAME)
-		    ? IF_EB("\233M", CSI_STR "M")
-		    : IF_EB("\033[M", ESC_STR "[M")));
+							? "\233M" : "\033[M"));
 	if (*p_mouse != NUL)
 	{
 	    // force mouse off and maybe on to send possibly new mouse
@@ -3901,90 +4177,85 @@ check_mouse_termcode(void)
     }
     else
 	del_mouse_termcode(KS_MOUSE);
-# endif
+#endif
 
-# ifdef FEAT_MOUSE_GPM
+#ifdef FEAT_MOUSE_GPM
     if (!use_xterm_mouse()
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
-	set_mouse_termcode(KS_GPM_MOUSE,
-				      (char_u *)IF_EB("\033MG", ESC_STR "MG"));
+	set_mouse_termcode(KS_GPM_MOUSE, (char_u *)"\033MG");
     else
 	del_mouse_termcode(KS_GPM_MOUSE);
-# endif
+#endif
 
-# ifdef FEAT_SYSMOUSE
+#ifdef FEAT_SYSMOUSE
     if (!use_xterm_mouse()
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
-	    )
-	set_mouse_termcode(KS_MOUSE, (char_u *)IF_EB("\033MS", ESC_STR "MS"));
 # endif
+	    )
+	set_mouse_termcode(KS_MOUSE, (char_u *)"\033MS");
+#endif
 
-# ifdef FEAT_MOUSE_JSB
+#ifdef FEAT_MOUSE_JSB
     // Conflicts with xterm mouse: "\033[" and "\033[M" ???
     if (!use_xterm_mouse()
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
-	set_mouse_termcode(KS_JSBTERM_MOUSE,
-			       (char_u *)IF_EB("\033[0~zw", ESC_STR "[0~zw"));
+	set_mouse_termcode(KS_JSBTERM_MOUSE, (char_u *)"\033[0~zw");
     else
 	del_mouse_termcode(KS_JSBTERM_MOUSE);
-# endif
+#endif
 
-# ifdef FEAT_MOUSE_NET
+#ifdef FEAT_MOUSE_NET
     // There is no conflict, but one may type "ESC }" from Insert mode.  Don't
     // define it in the GUI or when using an xterm.
     if (!use_xterm_mouse()
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
-	set_mouse_termcode(KS_NETTERM_MOUSE,
-				       (char_u *)IF_EB("\033}", ESC_STR "}"));
+	set_mouse_termcode(KS_NETTERM_MOUSE, (char_u *)"\033}");
     else
 	del_mouse_termcode(KS_NETTERM_MOUSE);
-# endif
+#endif
 
-# ifdef FEAT_MOUSE_DEC
+#ifdef FEAT_MOUSE_DEC
     // Conflicts with xterm mouse: "\033[" and "\033[M"
     if (!use_xterm_mouse()
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
 	set_mouse_termcode(KS_DEC_MOUSE, (char_u *)(term_is_8bit(T_NAME)
-		     ? IF_EB("\233", CSI_STR) : IF_EB("\033[", ESC_STR "[")));
+							  ? "\233" : "\033["));
     else
 	del_mouse_termcode(KS_DEC_MOUSE);
-# endif
-# ifdef FEAT_MOUSE_PTERM
+#endif
+#ifdef FEAT_MOUSE_PTERM
     // same conflict as the dec mouse
     if (!use_xterm_mouse()
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
-	set_mouse_termcode(KS_PTERM_MOUSE,
-				      (char_u *) IF_EB("\033[", ESC_STR "["));
+	set_mouse_termcode(KS_PTERM_MOUSE, (char_u *)"\033[");
     else
 	del_mouse_termcode(KS_PTERM_MOUSE);
-# endif
-# ifdef FEAT_MOUSE_URXVT
+#endif
+#ifdef FEAT_MOUSE_URXVT
     if (use_xterm_mouse() == 3
-#  ifdef FEAT_GUI
+# ifdef FEAT_GUI
 	    && !gui.in_use
-#  endif
+# endif
 	    )
     {
 	set_mouse_termcode(KS_URXVT_MOUSE, (char_u *)(term_is_8bit(T_NAME)
-		    ? IF_EB("\233*M", CSI_STR "*M")
-		    : IF_EB("\033[*M", ESC_STR "[*M")));
+						      ? "\233*M" : "\033[*M"));
 
 	if (*p_mouse != NUL)
 	{
@@ -3994,20 +4265,18 @@ check_mouse_termcode(void)
     }
     else
 	del_mouse_termcode(KS_URXVT_MOUSE);
-# endif
+#endif
     if (use_xterm_mouse() == 4
-# ifdef FEAT_GUI
+#ifdef FEAT_GUI
 	    && !gui.in_use
-# endif
+#endif
 	    )
     {
 	set_mouse_termcode(KS_SGR_MOUSE, (char_u *)(term_is_8bit(T_NAME)
-		    ? IF_EB("\233<*M", CSI_STR "<*M")
-		    : IF_EB("\033[<*M", ESC_STR "[<*M")));
+						    ? "\233<*M" : "\033[<*M"));
 
 	set_mouse_termcode(KS_SGR_MOUSE_RELEASE, (char_u *)(term_is_8bit(T_NAME)
-		    ? IF_EB("\233<*m", CSI_STR "<*m")
-		    : IF_EB("\033[<*m", ESC_STR "[<*m")));
+						    ? "\233<*m" : "\033[<*m"));
 
 	if (*p_mouse != NUL)
 	{
@@ -4057,6 +4326,9 @@ mch_get_shellsize(void)
 	{
 	    columns = ws.ws_col;
 	    rows = ws.ws_row;
+#  ifdef FEAT_EVAL
+	    ch_log(NULL, "Got size with TIOCGWINSZ: %ld x %ld", columns, rows);
+#  endif
 	}
     }
 # else // TIOCGWINSZ
@@ -4072,6 +4344,9 @@ mch_get_shellsize(void)
 	{
 	    columns = ts.ts_cols;
 	    rows = ts.ts_lines;
+#   ifdef FEAT_EVAL
+	    ch_log(NULL, "Got size with TIOCGSIZE: %ld x %ld", columns, rows);
+#   endif
 	}
     }
 #  endif // TIOCGSIZE
@@ -4085,18 +4360,33 @@ mch_get_shellsize(void)
     if (columns == 0 || rows == 0 || vim_strchr(p_cpo, CPO_TSIZE) != NULL)
     {
 	if ((p = (char_u *)getenv("LINES")))
+	{
 	    rows = atoi((char *)p);
+# ifdef FEAT_EVAL
+	    ch_log(NULL, "Got 'lines' from $LINES: %ld", rows);
+# endif
+	}
 	if ((p = (char_u *)getenv("COLUMNS")))
+	{
 	    columns = atoi((char *)p);
+# ifdef FEAT_EVAL
+	    ch_log(NULL, "Got 'columns' from $COLUMNS: %ld", columns);
+# endif
+	}
     }
 
-#ifdef HAVE_TGETENT
+# ifdef HAVE_TGETENT
     /*
      * 3. try reading "co" and "li" entries from termcap
      */
     if (columns == 0 || rows == 0)
+    {
 	getlinecol(&columns, &rows);
-#endif
+#  ifdef FEAT_EVAL
+	ch_log(NULL, "Got size from termcap: %ld x %ld", columns, rows);
+#  endif
+    }
+# endif
 
     /*
      * 4. If everything fails, use the old values
@@ -4110,7 +4400,53 @@ mch_get_shellsize(void)
     return OK;
 }
 
-#if defined(FEAT_TERMINAL) || defined(PROTO)
+# if defined(FEAT_EVAL) || defined(FEAT_IMAGE)
+/*
+ * Try to get the current terminal cell size. May return -1 x -1.
+ */
+    void
+mch_calc_cell_size(struct cellsize *cs_out)
+{
+   struct winsize   ws;
+   int		    retval;
+   int		    x_cell_size;
+   int		    y_cell_size;
+
+   // If fd is not a terminal, then -1 is returned
+   retval = ioctl(read_cmd_fd, TIOCGWINSZ, &ws);
+
+#  ifdef FEAT_EVAL
+   ch_log(NULL, "ioctl(TIOCGWINSZ) %s", retval == 0 ? "success" : "failed");
+#  endif
+
+   if (retval == -1 || ws.ws_col == 0 || ws.ws_row == 0)
+   {
+	cs_out->cs_xpixel = -1;
+	cs_out->cs_ypixel = -1;
+	return;
+   }
+
+   // Calculate parent tty's pixel per cell.
+   x_cell_size = ws.ws_xpixel / ws.ws_col;
+   y_cell_size = ws.ws_ypixel / ws.ws_row;
+
+   cs_out->cs_xpixel = x_cell_size > 0 ? x_cell_size : -1;
+   cs_out->cs_ypixel = y_cell_size > 0 ? y_cell_size : -1;
+
+   // Some terminals do not handle TIOCGWINSZ, send CSI 14 t (query terminal
+   // size in pixels), and CSI 16 t (less common, gets cell size in pixels
+   // directly).
+   if (x_cell_size <= 0 || y_cell_size <= 0)
+   {
+       // Default to 8x16 pixels for now until we receive a response.
+       OUT_STR("\033[14t");
+       OUT_STR("\033[16t");
+       out_flush();
+   }
+}
+# endif
+
+# if defined(FEAT_TERMINAL)
 /*
  * Report the windows size "rows" and "cols" to tty "fd".
  */
@@ -4121,33 +4457,32 @@ mch_report_winsize(int fd, int rows, int cols)
     int		retval = -1;
 
     tty_fd = get_tty_fd(fd);
-    if (tty_fd >= 0)
-    {
-# if defined(TIOCSWINSZ)
-	struct winsize ws;
+    if (tty_fd < 0)
+	return FAIL;
 
-	ws.ws_col = cols;
-	ws.ws_row = rows;
-	ws.ws_xpixel = cols * 5;
-	ws.ws_ypixel = rows * 10;
-	retval = ioctl(tty_fd, TIOCSWINSZ, &ws);
-	ch_log(NULL, "ioctl(TIOCSWINSZ) %s",
-					  retval == 0 ? "success" : "failed");
-# elif defined(TIOCSSIZE)
-	struct ttysize ts;
+#  if defined(TIOCSWINSZ)
+    struct winsize ws;
 
-	ts.ts_cols = cols;
-	ts.ts_lines = rows;
-	retval = ioctl(tty_fd, TIOCSSIZE, &ts);
-	ch_log(NULL, "ioctl(TIOCSSIZE) %s",
-					  retval == 0 ? "success" : "failed");
-# endif
-	if (tty_fd != fd)
-	    close(tty_fd);
-    }
+    ws.ws_col = cols;
+    ws.ws_row = rows;
+    ws.ws_xpixel = cols * cell_width;
+    ws.ws_ypixel = rows * cell_height;
+
+    retval = ioctl(tty_fd, TIOCSWINSZ, &ws);
+    ch_log(NULL, "ioctl(TIOCSWINSZ) %s", retval == 0 ? "success" : "failed");
+#  elif defined(TIOCSSIZE)
+    struct ttysize ts;
+
+    ts.ts_cols = cols;
+    ts.ts_lines = rows;
+    retval = ioctl(tty_fd, TIOCSSIZE, &ts);
+    ch_log(NULL, "ioctl(TIOCSSIZE) %s", retval == 0 ? "success" : "failed");
+#  endif
+    if (tty_fd != fd)
+	close(tty_fd);
     return retval == 0 ? OK : FAIL;
 }
-#endif
+# endif
 
 /*
  * Try to set the window size to Rows and Columns.
@@ -4195,11 +4530,7 @@ wait4pid(pid_t child, waitstatus *status)
 	// wait() sometimes hangs for no obvious reason.  Use waitpid()
 	// instead and loop (like the GUI). Also needed for other interfaces,
 	// they might call system().
-# ifdef __NeXT__
-	wait_pid = wait4(child, status, WNOHANG, (struct rusage *)0);
-# else
 	wait_pid = waitpid(child, status, WNOHANG);
-# endif
 	if (wait_pid == 0)
 	{
 	    // Wait for 1 to 10 msec before trying again.
@@ -4209,9 +4540,9 @@ wait4pid(pid_t child, waitstatus *status)
 	    continue;
 	}
 	if (wait_pid <= 0
-# ifdef ECHILD
+#ifdef ECHILD
 		&& errno == ECHILD
-# endif
+#endif
 	   )
 	    break;
     }
@@ -4323,28 +4654,28 @@ open_pty(int *pty_master_fd, int *pty_slave_fd, char_u **name1, char_u **name2)
 	*name2 = NULL;
 
     *pty_master_fd = mch_openpty(&tty_name);	    // open pty
-    if (*pty_master_fd >= 0)
+    if (*pty_master_fd < 0)
+	return;
+
+    // Leaving out O_NOCTTY may lead to waitpid() always returning
+    // 0 on Mac OS X 10.7 thereby causing freezes. Let's assume
+    // adding O_NOCTTY always works when defined.
+# ifdef O_NOCTTY
+    *pty_slave_fd = open(tty_name, O_RDWR | O_NOCTTY | O_EXTRA, 0);
+# else
+    *pty_slave_fd = open(tty_name, O_RDWR | O_EXTRA, 0);
+# endif
+    if (*pty_slave_fd < 0)
     {
-	// Leaving out O_NOCTTY may lead to waitpid() always returning
-	// 0 on Mac OS X 10.7 thereby causing freezes. Let's assume
-	// adding O_NOCTTY always works when defined.
-#ifdef O_NOCTTY
-	*pty_slave_fd = open(tty_name, O_RDWR | O_NOCTTY | O_EXTRA, 0);
-#else
-	*pty_slave_fd = open(tty_name, O_RDWR | O_EXTRA, 0);
-#endif
-	if (*pty_slave_fd < 0)
-	{
-	    close(*pty_master_fd);
-	    *pty_master_fd = -1;
-	}
-	else
-	{
-	    if (name1 != NULL)
-		*name1 = vim_strsave((char_u *)tty_name);
-	    if (name2 != NULL)
-		*name2 = vim_strsave((char_u *)tty_name);
-	}
+	close(*pty_master_fd);
+	*pty_master_fd = -1;
+    }
+    else
+    {
+	if (name1 != NULL)
+	    *name1 = vim_strsave((char_u *)tty_name);
+	if (name2 != NULL)
+	    *name2 = vim_strsave((char_u *)tty_name);
     }
 }
 #endif
@@ -4355,21 +4686,21 @@ open_pty(int *pty_master_fd, int *pty_slave_fd, char_u **name1, char_u **name2)
     static void
 may_send_sigint(int c UNUSED, pid_t pid UNUSED, pid_t wpid UNUSED)
 {
-# ifdef SIGINT
+#ifdef SIGINT
     if (c == Ctrl_C || c == intr_char)
     {
-#  ifdef HAVE_SETSID
+# ifdef HAVE_SETSID
 	kill(-pid, SIGINT);
-#  else
+# else
 	kill(0, SIGINT);
-#  endif
+# endif
 	if (wpid > 0)
 	    kill(wpid, SIGINT);
     }
-# endif
+#endif
 }
 
-#if !defined(USE_SYSTEM) || defined(FEAT_TERMINAL) || defined(PROTO)
+#if !defined(USE_SYSTEM) || defined(FEAT_TERMINAL)
 
 /*
  * Parse "cmd" and return the result in "argvp" which is an allocated array of
@@ -4458,29 +4789,35 @@ mch_call_shell_terminal(
 
     // Find a window to make "buf" curbuf.
     aucmd_prepbuf(&aco, buf);
-
-    clear_oparg(&oa);
-    while (term_use_loop())
+    if (curbuf == buf)
     {
-	if (oa.op_type == OP_NOP && oa.regname == NUL && !VIsual_active)
+	// Only when managed to find a window for "buf",
+	clear_oparg(&oa);
+	while (term_use_loop())
 	{
-	    // If terminal_loop() returns OK we got a key that is handled
-	    // in Normal model. We don't do redrawing anyway.
-	    if (terminal_loop(TRUE) == OK)
+	    if (oa.op_type == OP_NOP && oa.regname == NUL && !VIsual_active)
+	    {
+		// If terminal_loop() returns OK we got a key that is handled
+		// in Normal model. We don't do redrawing anyway.
+		if (terminal_loop(TRUE) == OK)
+		    normal_cmd(&oa, TRUE);
+	    }
+	    else
 		normal_cmd(&oa, TRUE);
 	}
-	else
-	    normal_cmd(&oa, TRUE);
+	retval = job->jv_exitval;
+	ch_log(NULL, "system command finished");
+
+	job_unref(job);
+
+	// restore curwin/curbuf and a few other things
+	aucmd_restbuf(&aco);
     }
-    retval = job->jv_exitval;
-    ch_log(NULL, "system command finished");
 
-    job_unref(job);
-
-    // restore curwin/curbuf and a few other things
-    aucmd_restbuf(&aco);
-
-    wait_return(TRUE);
+    // Only require pressing Enter when redrawing, to avoid that system() gets
+    // the hit-enter prompt even though it didn't output anything.
+    if (RedrawingDisabled == 0)
+	wait_return(TRUE);
     do_buffer(DOBUF_WIPE, DOBUF_FIRST, FORWARD, buf->b_fnum, TRUE);
 
 theend:
@@ -4500,10 +4837,10 @@ mch_call_shell_system(
     char_u	*cmd,
     int		options)	// SHELL_*, see vim.h
 {
-#ifdef VMS
+# ifdef VMS
     char	*ifn = NULL;
     char	*ofn = NULL;
-#endif
+# endif
     tmode_T	tmode = cur_tmode;
     char_u	*newcmd;	// only needed for unix
     int		x;
@@ -4513,8 +4850,11 @@ mch_call_shell_system(
     if (options & SHELL_COOKED)
 	settmode(TMODE_COOK);	    // set to normal mode
 
-# if defined(FEAT_CLIPBOARD) && defined(FEAT_X11)
+# if defined(FEAT_CLIPBOARD) && (defined(FEAT_X11) \
+	|| defined(FEAT_WAYLAND_CLIPBOARD))
+#  if defined(FEAT_X11) || defined(FEAT_WAYLAND_CLIPBOARD)
     save_clipboard();
+#  endif
     loose_clipboard();
 # endif
 
@@ -4575,10 +4915,9 @@ mch_call_shell_system(
 	cur_tmode = TMODE_UNKNOWN;
 	settmode(TMODE_RAW);	// set to raw mode
     }
-# ifdef FEAT_TITLE
     resettitle();
-# endif
-# if defined(FEAT_CLIPBOARD) && defined(FEAT_X11)
+# if defined(FEAT_CLIPBOARD) && (defined(FEAT_X11) \
+	|| defined(FEAT_WAYLAND_CLIPBOARD))
     restore_clipboard();
 # endif
     return x;
@@ -4602,11 +4941,7 @@ mch_call_shell_fork(
     pid_t	pid;
     pid_t	wpid = 0;
     pid_t	wait_pid = 0;
-# ifdef HAVE_UNION_WAIT
-    union wait	status;
-# else
     int		status = -1;
-# endif
     int		retval = -1;
     char	**argv = NULL;
     char_u	*tofree1 = NULL;
@@ -4711,7 +5046,7 @@ mch_call_shell_fork(
 	    reset_signals();		// handle signals normally
 	    UNBLOCK_SIGNALS(&curset);
 
-# ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_EVAL
 	    if (ch_log_active())
 	    {
 		ch_log(NULL, "closing channel log in the child process");
@@ -4774,7 +5109,7 @@ mch_call_shell_fork(
 		    // will exit and send SIGHUP to all processes in its
 		    // group, killing the just started process.  Ignore SIGHUP
 		    // to avoid that. (suggested by Simon Schubert)
-		    signal(SIGHUP, SIG_IGN);
+		    mch_signal(SIGHUP, SIG_IGN);
 #  endif
 		}
 # endif
@@ -4784,6 +5119,11 @@ mch_call_shell_fork(
 		    // push stream discipline modules
 		    if (options & SHELL_COOKED)
 			setup_slavepty(pty_slave_fd);
+#  ifdef TIOCSCTTY
+		    // Try to become controlling tty (probably doesn't work,
+		    // unless run by root)
+		    ioctl(pty_slave_fd, TIOCSCTTY, (char *)NULL);
+#  endif
 		}
 # endif
 		set_default_child_environment(FALSE);
@@ -4842,7 +5182,7 @@ mch_call_shell_fork(
 	     * different on different machines. This may cause a warning
 	     * message with strict compilers, don't worry about it.
 	     * Call _exit() instead of exit() to avoid closing the connection
-	     * to the X server (esp. with GTK, which uses atexit()).
+	     * to the X/Wayland server (esp. with GTK, which uses atexit()).
 	     */
 	    execvp(argv[0], argv);
 	    _exit(EXEC_FAILED);	    // exec failed, return failure code
@@ -4921,7 +5261,7 @@ mch_call_shell_fork(
 		p_more_save = p_more;
 		p_more = FALSE;
 		old_State = State;
-		State = EXTERNCMD;	// don't redraw at window resize
+		State = MODE_EXTERNCMD;	// don't redraw at window resize
 
 		if ((options & SHELL_WRITE) && toshell_fd >= 0)
 		{
@@ -4934,15 +5274,14 @@ mch_call_shell_fork(
 		    else if (wpid == 0) // child
 		    {
 			linenr_T    lnum = curbuf->b_op_start.lnum;
-			int	    written = 0;
+			size_t	    written = 0;
 			char_u	    *lp = ml_get(lnum);
-			size_t	    l;
+			size_t	    lplen = (size_t)ml_get_len(lnum);
 
 			close(fromshell_fd);
 			for (;;)
 			{
-			    l = STRLEN(lp + written);
-			    if (l == 0)
+			    if (lplen == 0)
 				len = 0;
 			    else if (lp[written] == NL)
 				// NL -> NUL translation
@@ -4952,10 +5291,10 @@ mch_call_shell_fork(
 				char_u	*s = vim_strchr(lp + written, NL);
 
 				len = write(toshell_fd, (char *)lp + written,
-					   s == NULL ? l
+					   s == NULL ? lplen - written
 					      : (size_t)(s - (lp + written)));
 			    }
-			    if (len == (int)l)
+			    if (len == (int)(lplen - written))
 			    {
 				// Finished a line, add a NL, unless this line
 				// should not have one.
@@ -4963,8 +5302,7 @@ mch_call_shell_fork(
 					|| (!curbuf->b_p_bin
 					    && curbuf->b_p_fixeol)
 					|| (lnum != curbuf->b_no_eol_lnum
-					    && (lnum !=
-						    curbuf->b_ml.ml_line_count
+					    && (lnum != curbuf->b_ml.ml_line_count
 						    || curbuf->b_p_eol)))
 				    vim_ignored = write(toshell_fd, "\n",
 								   (size_t)1);
@@ -4973,14 +5311,14 @@ mch_call_shell_fork(
 				{
 				    // finished all the lines, close pipe
 				    close(toshell_fd);
-				    toshell_fd = -1;
 				    break;
 				}
 				lp = ml_get(lnum);
+				lplen = ml_get_len(lnum);
 				written = 0;
 			    }
 			    else if (len > 0)
-				written += len;
+				written += (size_t)len;
 			}
 			_exit(0);
 		    }
@@ -5059,7 +5397,8 @@ mch_call_shell_fork(
 			    }
 			}
 
-			term_replace_bs_del_keycode(ta_buf, ta_len, len);
+			// Remove Vim-specific codes from the input.
+			len = term_replace_keycodes(ta_buf, ta_len, len);
 
 			/*
 			 * For pipes: echo the typed characters.
@@ -5081,7 +5420,7 @@ mch_call_shell_fork(
 				else
 				    msg_outtrans_len(ta_buf + i, 1);
 			    }
-			    windgoto(msg_row, msg_col);
+			    windgoto(msg_row, cmdline_col_off + msg_col);
 			    out_flush();
 			}
 
@@ -5112,11 +5451,11 @@ mch_call_shell_fork(
 		    {
 			// CTRL-C sends a signal to the child, we ignore it
 			// ourselves
-#  ifdef HAVE_SETSID
+# ifdef HAVE_SETSID
 			kill(-pid, SIGINT);
-#  else
+# else
 			kill(0, SIGINT);
-#  endif
+# endif
 			if (wpid > 0)
 			    kill(wpid, SIGINT);
 			got_int = FALSE;
@@ -5203,7 +5542,7 @@ mch_call_shell_fork(
 			    msg_puts((char *)buffer);
 			}
 
-			windgoto(msg_row, msg_col);
+			windgoto(msg_row, cmdline_col_off + msg_col);
 			cursor_on();
 			out_flush();
 			if (got_int)
@@ -5240,11 +5579,7 @@ mch_call_shell_fork(
 		     * Check if the child still exists, before checking for
 		     * typed characters (otherwise we would lose typeahead).
 		     */
-# ifdef __NeXT__
-		    wait_pid = wait4(pid, &status, WNOHANG, (struct rusage *)0);
-# else
 		    wait_pid = waitpid(pid, &status, WNOHANG);
-# endif
 		    if ((wait_pid == (pid_t)-1 && errno == ECHILD)
 			    || (wait_pid == pid && WIFEXITED(status)))
 		    {
@@ -5260,6 +5595,11 @@ mch_call_shell_fork(
 # if defined(FEAT_XCLIPBOARD) && defined(FEAT_X11)
 		    // Handle any X events, e.g. serving the clipboard.
 		    clip_update();
+# endif
+# ifdef FEAT_WAYLAND
+		    // Handle Wayland events such as sending data as the source
+		    // client.
+		    wayland_update();
 # endif
 		}
 finished:
@@ -5287,19 +5627,19 @@ finished:
 		    close(toshell_fd);
 		close(fromshell_fd);
 	    }
-# if defined(FEAT_XCLIPBOARD) && defined(FEAT_X11)
+# if (defined(FEAT_XCLIPBOARD) && defined(FEAT_X11)) || defined(FEAT_WAYLAND)
 	    else
 	    {
 		long delay_msec = 1;
 
 		if (tmode == TMODE_RAW)
-		    // possibly disables modifyOtherKeys, so that the system
-		    // can recognize CTRL-C
-		    out_str(T_CTE);
+		    // Possibly disables modifyOtherKeys, so that the system
+		    // can recognize CTRL-C.
+		    out_str_t_TE();
 
 		/*
-		 * Similar to the loop above, but only handle X events, no
-		 * I/O.
+		 * Similar to the loop above, but only handle X and Wayland
+		 * events, no I/O.
 		 */
 		for (;;)
 		{
@@ -5314,11 +5654,7 @@ finished:
 #  endif
 			got_int = FALSE;
 		    }
-# ifdef __NeXT__
-		    wait_pid = wait4(pid, &status, WNOHANG, (struct rusage *)0);
-# else
 		    wait_pid = waitpid(pid, &status, WNOHANG);
-# endif
 		    if ((wait_pid == (pid_t)-1 && errno == ECHILD)
 			    || (wait_pid == pid && WIFEXITED(status)))
 		    {
@@ -5326,8 +5662,15 @@ finished:
 			break;
 		    }
 
+#  if defined(FEAT_XCLIPBOARD) && defined(FEAT_X11)
 		    // Handle any X events, e.g. serving the clipboard.
 		    clip_update();
+#  endif
+#  ifdef FEAT_WAYLAND
+		    // Handle Wayland events such as sending data as the source
+		    // client.
+		    wayland_update();
+#  endif
 
 		    // Wait for 1 to 10 msec. 1 is faster but gives the child
 		    // less time, gradually wait longer.
@@ -5339,7 +5682,7 @@ finished:
 
 		if (tmode == TMODE_RAW)
 		    // possibly enables modifyOtherKeys again
-		    out_str(T_CTI);
+		    out_str_t_TI();
 	    }
 # endif
 
@@ -5351,7 +5694,7 @@ finished:
 	     * child already exited.
 	     */
 	    if (wait_pid != pid)
-		wait_pid = wait4pid(pid, &status);
+		(void)wait4pid(pid, &status);
 
 # ifdef FEAT_GUI
 	    // Close slave side of pty.  Only do this after the child has
@@ -5411,9 +5754,7 @@ error:
     if (!did_settmode)
 	if (tmode == TMODE_RAW)
 	    settmode(TMODE_RAW);	// set to raw mode
-# ifdef FEAT_TITLE
     resettitle();
-# endif
     vim_free(argv);
     vim_free(tofree1);
     vim_free(tofree2);
@@ -5427,8 +5768,12 @@ mch_call_shell(
     char_u	*cmd,
     int		options)	// SHELL_*, see vim.h
 {
+#ifdef FEAT_EVAL
+    ch_log(NULL, "executing shell command: %s", cmd);
+#endif
 #if defined(FEAT_GUI) && defined(FEAT_TERMINAL)
-    if (gui.in_use && vim_strchr(p_go, GO_TERMINAL) != NULL)
+    if (gui.in_use && vim_strchr(p_go, GO_TERMINAL) != NULL
+					      && (options & SHELL_SILENT) == 0)
 	return mch_call_shell_terminal(cmd, options);
 #endif
 #ifdef USE_SYSTEM
@@ -5438,7 +5783,160 @@ mch_call_shell(
 #endif
 }
 
-#if defined(FEAT_JOB_CHANNEL) || defined(PROTO)
+#if defined(FEAT_EVAL)
+/*
+ * Execute "argv" directly without the shell and return the output.
+ * Used by system() and systemlist() when the command is a List.
+ * "infile" is an optional temp file for stdin input.
+ * "flags" is SHELL_SILENT etc.
+ * When "ret_len" is not NULL, set it to the length of the output.
+ * Returns the output in allocated memory (or NULL on error).
+ * Sets v:shell_error to the exit status.
+ */
+    char_u *
+mch_get_cmd_output_direct(
+    char	**argv,
+    char_u	*infile,
+    int		flags UNUSED,
+    int		*ret_len)
+{
+    pid_t	pid;
+    int		fd_out[2] = {-1, -1};
+    int		status = -1;
+    char_u	*buffer = NULL;
+    garray_T	ga;
+    SIGSET_DECL(curset)
+
+    ga_init2(&ga, 1, 4096);
+
+    ch_log(NULL, "directly executing: %s", argv[0]);
+
+    if (pipe(fd_out) < 0)
+    {
+	emsg(_(e_cannot_create_pipes));
+	return NULL;
+    }
+
+    BLOCK_SIGNALS(&curset);
+# ifdef VMS
+    pid = 0; // VMS does not have fork
+# else
+    pid = fork();
+# endif
+    if (pid == -1)
+    {
+	UNBLOCK_SIGNALS(&curset);
+	close(fd_out[0]);
+	close(fd_out[1]);
+	emsg(_("\nCannot fork\n"));
+	return NULL;
+    }
+
+    if (pid == 0)
+    {
+	// child process
+	reset_signals();
+	UNBLOCK_SIGNALS(&curset);
+
+	if (ch_log_active())
+	{
+	    ch_log(NULL, "closing channel log in the child process");
+	    ch_logfile((char_u *)"", (char_u *)"");
+	}
+
+	// Set up stdin.
+	if (infile != NULL)
+	{
+	    int fd_in = open((char *)infile, O_RDONLY);
+	    if (fd_in >= 0)
+	    {
+		close(0);
+		vim_ignored = dup(fd_in);
+		close(fd_in);
+	    }
+	}
+	else
+	{
+	    int nullfd = open("/dev/null", O_RDONLY);
+	    if (nullfd >= 0)
+	    {
+		close(0);
+		vim_ignored = dup(nullfd);
+		close(nullfd);
+	    }
+	}
+
+	// Set up stdout: write end of pipe.
+	close(fd_out[0]);
+	close(1);
+	vim_ignored = dup(fd_out[1]);
+	// Also redirect stderr to the pipe.
+	close(2);
+	vim_ignored = dup(fd_out[1]);
+	close(fd_out[1]);
+
+	execvp(argv[0], argv);
+	_exit(127);
+	// NOTREACHED
+    }
+
+    // parent process
+    UNBLOCK_SIGNALS(&curset);
+    close(fd_out[1]);
+
+    // Read output from child.
+    for (;;)
+    {
+	char	buf[4096];
+	int	n;
+
+	n = (int)read(fd_out[0], buf, sizeof(buf));
+	if (n <= 0)
+	    break;
+	if (ga_grow(&ga, n) == FAIL)
+	    break;
+	mch_memmove((char *)ga.ga_data + ga.ga_len, buf, n);
+	ga.ga_len += n;
+    }
+    close(fd_out[0]);
+
+    // Wait for child to finish.
+    (void)waitpid(pid, &status, 0);
+    if (WIFEXITED(status))
+	status = WEXITSTATUS(status);
+    else
+	status = -1;
+    set_vim_var_nr(VV_SHELL_ERROR, (long)status);
+
+    if (ga.ga_len > 0)
+    {
+	buffer = alloc(ga.ga_len + 1);
+	if (buffer != NULL)
+	{
+	    mch_memmove(buffer, ga.ga_data, ga.ga_len);
+	    if (ret_len == NULL)
+	    {
+		int	i;
+
+		// Change NUL into SOH, otherwise the string is truncated.
+		for (i = 0; i < ga.ga_len; ++i)
+		    if (buffer[i] == NUL)
+			buffer[i] = 1;
+		buffer[ga.ga_len] = NUL;
+	    }
+	    else
+		*ret_len = ga.ga_len;
+	}
+    }
+    else if (ret_len != NULL)
+	*ret_len = 0;
+
+    ga_clear(&ga);
+    return buffer;
+}
+#endif
+
+#if defined(FEAT_JOB_CHANNEL)
     void
 mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 {
@@ -5481,7 +5979,7 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	fd_in[0] = mch_open((char *)fname, O_RDONLY, 0);
 	if (fd_in[0] < 0)
 	{
-	    semsg(_(e_notopen), fname);
+	    semsg(_(e_cant_open_file_str), fname);
 	    goto failed;
 	}
     }
@@ -5499,7 +5997,7 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	fd_out[1] = mch_open((char *)fname, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd_out[1] < 0)
 	{
-	    semsg(_(e_notopen), fname);
+	    semsg(_(e_cant_open_file_str), fname);
 	    goto failed;
 	}
     }
@@ -5513,12 +6011,15 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	fd_err[1] = mch_open((char *)fname, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (fd_err[1] < 0)
 	{
-	    semsg(_(e_notopen), fname);
+	    semsg(_(e_cant_open_file_str), fname);
 	    goto failed;
 	}
     }
+    // only create a pipe for the error fd, when either a callback has been setup
+    // or pty is not used (e.g. terminal uses pty by default)
     else if (!use_out_for_err && !use_null_for_err
-				      && pty_master_fd < 0 && pipe(fd_err) < 0)
+		&& (pty_master_fd < 0 || (options->jo_set & JO_ERR_CALLBACK))
+			    && pipe(fd_err) < 0)
 	goto failed;
 
     if (!use_null_for_in || !use_null_for_out || !use_null_for_err)
@@ -5555,7 +6056,7 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	reset_signals();		// handle signals normally
 	UNBLOCK_SIGNALS(&curset);
 
-# ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_EVAL
 	if (ch_log_active())
 	    // close the log file in the child
 	    ch_logfile((char_u *)"", (char_u *)"");
@@ -5573,11 +6074,11 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	{
 	    char *term = (char *)T_NAME;
 
-#ifdef FEAT_GUI
+#  ifdef FEAT_GUI
 	    if (term_is_gui(T_NAME))
 		// In the GUI 'term' is not what we want, use $TERM.
 		term = getenv("TERM");
-#endif
+#  endif
 	    // Use 'term' or $TERM if it starts with "xterm", otherwise fall
 	    // back to "xterm" or "xterm-color".
 	    if (term == NULL || *term == NUL || STRNCMP(term, "xterm", 5) != 0)
@@ -5606,12 +6107,12 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	    hashitem_T	*hi;
 	    int		todo = (int)dict->dv_hashtab.ht_used;
 
-	    for (hi = dict->dv_hashtab.ht_array; todo > 0; ++hi)
+	    FOR_ALL_HASHTAB_ITEMS(&dict->dv_hashtab, hi, todo)
 		if (!HASHITEM_EMPTY(hi))
 		{
 		    typval_T *item = &dict_lookup(hi)->di_tv;
 
-		    vim_setenv((char_u*)hi->hi_key, tv_get_string(item));
+		    vim_setenv(hi->hi_key, tv_get_string(item));
 		    --todo;
 		}
 	}
@@ -5630,11 +6131,11 @@ mch_job_start(char **argv, job_T *job, jobopt_T *options, int is_terminal)
 	{
 	    // push stream discipline modules
 	    setup_slavepty(pty_slave_fd);
-#  ifdef TIOCSCTTY
+# ifdef TIOCSCTTY
 	    // Try to become controlling tty (probably doesn't work,
 	    // unless run by root)
 	    ioctl(pty_slave_fd, TIOCSCTTY, (char *)NULL);
-#  endif
+# endif
 	}
 
 	// set up stdin for the child
@@ -5788,37 +6289,36 @@ get_signal_name(int sig)
     char_u	numbuf[NUMBUFLEN];
 
     if (sig == SIGKILL)
-	return vim_strsave((char_u *)"kill");
+	return vim_strnsave((char_u *)"kill", STRLEN_LITERAL("kill"));
 
     for (i = 0; signal_info[i].sig != -1; i++)
 	if (sig == signal_info[i].sig)
 	    return strlow_save((char_u *)signal_info[i].name);
 
-    vim_snprintf((char *)numbuf, NUMBUFLEN, "%d", sig);
-    return vim_strsave(numbuf);
+    i = vim_snprintf((char *)numbuf, NUMBUFLEN, "%d", sig);
+    return vim_strnsave(numbuf, i);
 }
 
     char *
 mch_job_status(job_T *job)
 {
-# ifdef HAVE_UNION_WAIT
-    union wait	status;
-# else
     int		status = -1;
-# endif
     pid_t	wait_pid = 0;
 
-# ifdef __NeXT__
-    wait_pid = wait4(job->jv_pid, &status, WNOHANG, (struct rusage *)0);
-# else
     wait_pid = waitpid(job->jv_pid, &status, WNOHANG);
-# endif
     if (wait_pid == -1)
     {
+	int waitpid_errno = errno;
+	if (waitpid_errno == ECHILD && mch_process_running(job->jv_pid))
+	    // The process is alive, but it was probably reparented (for
+	    // example by ptrace called by a debugger like lldb or gdb).
+	    // Note: This assumes that process IDs are not reused.
+	    return "run";
+
 	// process must have exited
 	if (job->jv_status < JOB_ENDED)
 	    ch_log(job->jv_channel, "Job no longer exists: %s",
-							      strerror(errno));
+						      strerror(waitpid_errno));
 	goto return_dead;
     }
     if (wait_pid == 0)
@@ -5851,11 +6351,7 @@ return_dead:
     job_T *
 mch_detect_ended_job(job_T *job_list)
 {
-# ifdef HAVE_UNION_WAIT
-    union wait	status;
-# else
     int		status = -1;
-# endif
     pid_t	wait_pid = 0;
     job_T	*job;
 
@@ -5867,11 +6363,7 @@ mch_detect_ended_job(job_T *job_list)
 	return NULL;
 # endif
 
-# ifdef __NeXT__
-    wait_pid = wait4(-1, &status, WNOHANG, (struct rusage *)0);
-# else
     wait_pid = waitpid(-1, &status, WNOHANG);
-# endif
     if (wait_pid <= 0)
 	// no process ended
 	return NULL;
@@ -5917,11 +6409,11 @@ mch_signal_job(job_T *job, char_u *how)
 	sig = SIGINT;
     else if (STRCMP(how, "kill") == 0)
 	sig = SIGKILL;
-#ifdef SIGWINCH
+# ifdef SIGWINCH
     else if (STRCMP(how, "winch") == 0)
 	sig = SIGWINCH;
-#endif
-    else if (isdigit(*how))
+# endif
+    else if (SAFE_isdigit(*how))
 	sig = atoi((char *)how);
     else
 	return FAIL;
@@ -5944,15 +6436,11 @@ mch_signal_job(job_T *job, char_u *how)
 mch_clear_job(job_T *job)
 {
     // call waitpid because child process may become zombie
-# ifdef __NeXT__
-    (void)wait4(job->jv_pid, NULL, WNOHANG, (struct rusage *)0);
-# else
     (void)waitpid(job->jv_pid, NULL, WNOHANG);
-# endif
 }
 #endif
 
-#if defined(FEAT_TERMINAL) || defined(PROTO)
+#if defined(FEAT_TERMINAL)
     int
 mch_create_pty_channel(job_T *job, jobopt_T *options)
 {
@@ -6049,7 +6537,7 @@ WaitForCharOrMouse(long msec, int *interrupted, int ignore_input)
     {
 	WantQueryMouse = FALSE;
 	if (!no_query_mouse_for_testing)
-	    mch_write((char_u *)IF_EB("\033[1'|", ESC_STR "[1'|"), 5);
+	    mch_write((char_u *)"\033[1'|", 5);
     }
 #endif
 
@@ -6074,6 +6562,10 @@ WaitForCharOrMouse(long msec, int *interrupted, int ignore_input)
 	    if (rest >= 0)
 		rest -= msec;
 	}
+# endif
+# ifdef FEAT_SOUND_MACOSX
+	// Invoke any pending sound callbacks.
+	process_cfrunloop();
 # endif
 # ifdef FEAT_SOUND_CANBERRA
 	// Invoke any pending sound callbacks.
@@ -6130,13 +6622,13 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 {
     int		ret;
     int		result;
-#if defined(FEAT_XCLIPBOARD) || defined(USE_XSMP) || defined(FEAT_MZSCHEME)
+# if defined(FEAT_XCLIPBOARD) || defined(USE_XSMP) || defined(FEAT_MZSCHEME)
     static int	busy = FALSE;
 
     // May retry getting characters after an event was handled.
-# define MAY_LOOP
+#  define MAY_LOOP
 
-# ifdef ELAPSED_FUNC
+#  ifdef ELAPSED_FUNC
     // Remember at what time we started, so that we know how much longer we
     // should wait after being interrupted.
     long	start_msec = msec;
@@ -6144,52 +6636,67 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 
     if (msec > 0)
 	ELAPSED_INIT(start_tv);
-# endif
+#  endif
 
     // Handle being called recursively.  This may happen for the session
     // manager stuff, it may save the file, which does a breakcheck.
     if (busy)
 	return 0;
-#endif
+# endif
 
-#ifdef MAY_LOOP
+# ifdef MAY_LOOP
     for (;;)
-#endif
+# endif
     {
-#ifdef MAY_LOOP
+# ifdef MAY_LOOP
 	int		finished = TRUE; // default is to 'loop' just once
-# ifdef FEAT_MZSCHEME
+#  ifdef FEAT_MZSCHEME
 	int		mzquantum_used = FALSE;
+#  endif
 # endif
-#endif
-#ifndef HAVE_SELECT
+# ifdef FEAT_WAYLAND
+	int		wayland_fd = -1;
+# endif
+# ifndef HAVE_SELECT
 			// each channel may use in, out and err
-	struct pollfd   fds[6 + 3 * MAX_OPEN_CHANNELS];
+	struct pollfd   fds[7 + 3 * MAX_OPEN_CHANNELS + 2 * MAX_CLIENT_CHANNELS];
 	int		nfd;
-# ifdef FEAT_XCLIPBOARD
+#  ifdef FEAT_WAYLAND_CLIPBOARD
+	int             wayland_idx = -1;
+#  endif
+#  ifdef FEAT_XCLIPBOARD
 	int		xterm_idx = -1;
-# endif
-# ifdef FEAT_MOUSE_GPM
+#  endif
+#  ifdef FEAT_MOUSE_GPM
 	int		gpm_idx = -1;
-# endif
-# ifdef USE_XSMP
+#  endif
+#  ifdef USE_XSMP
 	int		xsmp_idx = -1;
-# endif
+#  endif
 	int		towait = (int)msec;
 
-# ifdef FEAT_MZSCHEME
+#  ifdef FEAT_MZSCHEME
 	mzvim_check_threads();
 	if (mzthreads_allowed() && p_mzq > 0 && (msec < 0 || msec > p_mzq))
 	{
 	    towait = (int)p_mzq;    // don't wait longer than 'mzquantum'
 	    mzquantum_used = TRUE;
 	}
-# endif
+#  endif
 	fds[0].fd = fd;
 	fds[0].events = POLLIN;
 	nfd = 1;
 
-# ifdef FEAT_XCLIPBOARD
+#  ifdef FEAT_WAYLAND
+	if ((wayland_fd = wayland_prepare_read()) >= 0)
+	{
+	    wayland_idx = nfd;
+	    fds[nfd].fd = wayland_fd;
+	    fds[nfd].events = POLLIN;
+	    nfd++;
+	}
+#  endif
+#  ifdef FEAT_XCLIPBOARD
 	may_restore_clipboard();
 	if (xterm_Shell != (Widget)0)
 	{
@@ -6198,8 +6705,8 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	    fds[nfd].events = POLLIN;
 	    nfd++;
 	}
-# endif
-# ifdef FEAT_MOUSE_GPM
+#  endif
+#  ifdef FEAT_MOUSE_GPM
 	if (check_for_gpm != NULL && gpm_flag && gpm_fd >= 0)
 	{
 	    gpm_idx = nfd;
@@ -6207,8 +6714,8 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	    fds[nfd].events = POLLIN;
 	    nfd++;
 	}
-# endif
-# ifdef USE_XSMP
+#  endif
+#  ifdef USE_XSMP
 	if (xsmp_icefd != -1)
 	{
 	    xsmp_idx = nfd;
@@ -6216,10 +6723,10 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	    fds[nfd].events = POLLIN;
 	    nfd++;
 	}
-# endif
-#ifdef FEAT_JOB_CHANNEL
+#  endif
+#  ifdef FEAT_JOB_CHANNEL
 	nfd = channel_poll_setup(nfd, &fds, &towait);
-#endif
+#  endif
 	if (interrupted != NULL)
 	    *interrupted = FALSE;
 
@@ -6229,13 +6736,18 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	if (result == 0 && interrupted != NULL && ret > 0)
 	    *interrupted = TRUE;
 
-# ifdef FEAT_MZSCHEME
+#  ifdef FEAT_MZSCHEME
 	if (ret == 0 && mzquantum_used)
 	    // MzThreads scheduling is required and timeout occurred
 	    finished = FALSE;
-# endif
+#  endif
 
-# ifdef FEAT_XCLIPBOARD
+#  ifdef FEAT_WAYLAND
+	if (wayland_idx >= 0)
+	    wayland_poll_check(fds[wayland_idx].revents);
+#  endif
+
+#  ifdef FEAT_XCLIPBOARD
 	if (xterm_Shell != (Widget)0 && (fds[xterm_idx].revents & POLLIN))
 	{
 	    xterm_update();      // Maybe we should hand out clipboard
@@ -6243,12 +6755,12 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 		// Try again
 		finished = FALSE;
 	}
-# endif
-# ifdef FEAT_MOUSE_GPM
+#  endif
+#  ifdef FEAT_MOUSE_GPM
 	if (gpm_idx >= 0 && (fds[gpm_idx].revents & POLLIN))
 	    *check_for_gpm = 1;
-# endif
-# ifdef USE_XSMP
+#  endif
+#  ifdef USE_XSMP
 	if (xsmp_idx >= 0 && (fds[xsmp_idx].revents & (POLLIN | POLLHUP)))
 	{
 	    if (fds[xsmp_idx].revents & POLLIN)
@@ -6266,14 +6778,14 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	    if (--ret == 0)
 		finished = FALSE;	// Try again
 	}
-# endif
-#ifdef FEAT_JOB_CHANNEL
+#  endif
+#  ifdef FEAT_JOB_CHANNEL
 	// also call when ret == 0, we may be polling a keep-open channel
 	if (ret >= 0)
 	    channel_poll_check(ret, &fds);
-#endif
+#  endif
 
-#else // HAVE_SELECT
+# else // HAVE_SELECT
 
 	struct timeval  tv;
 	struct timeval	*tvp;
@@ -6283,14 +6795,14 @@ RealWaitForChar(int fd, long msec, int *check_for_gpm UNUSED, int *interrupted)
 	int		maxfd;
 	long		towait = msec;
 
-# ifdef FEAT_MZSCHEME
+#  ifdef FEAT_MZSCHEME
 	mzvim_check_threads();
 	if (mzthreads_allowed() && p_mzq > 0 && (msec < 0 || msec > p_mzq))
 	{
 	    towait = p_mzq;	// don't wait longer than 'mzquantum'
 	    mzquantum_used = TRUE;
 	}
-# endif
+#  endif
 
 	if (towait >= 0)
 	{
@@ -6309,14 +6821,24 @@ select_eintr:
 	FD_ZERO(&wfds);
 	FD_ZERO(&efds);
 	FD_SET(fd, &rfds);
-# if !defined(__QNX__) && !defined(__CYGWIN32__)
+#  ifndef __QNX__
 	// For QNX select() always returns 1 if this is set.  Why?
 	FD_SET(fd, &efds);
-# endif
+#  endif
 	maxfd = fd;
 
-# ifdef FEAT_XCLIPBOARD
-	may_restore_clipboard();
+#  ifdef FEAT_WAYLAND
+	if ((wayland_fd = wayland_prepare_read()) >= 0)
+	{
+	    FD_SET(wayland_fd, &rfds);
+
+	    if (maxfd < wayland_fd)
+		maxfd = wayland_fd;
+	}
+#  endif
+
+#  ifdef FEAT_XCLIPBOARD
+	may_restore_x11_clipboard();
 	if (xterm_Shell != (Widget)0)
 	{
 	    FD_SET(ConnectionNumber(xterm_dpy), &rfds);
@@ -6327,8 +6849,8 @@ select_eintr:
 	    // particularly, XFlush may cause this.
 	    xterm_update();
 	}
-# endif
-# ifdef FEAT_MOUSE_GPM
+#  endif
+#  ifdef FEAT_MOUSE_GPM
 	if (check_for_gpm != NULL && gpm_flag && gpm_fd >= 0)
 	{
 	    FD_SET(gpm_fd, &rfds);
@@ -6336,8 +6858,8 @@ select_eintr:
 	    if (maxfd < gpm_fd)
 		maxfd = gpm_fd;
 	}
-# endif
-# ifdef USE_XSMP
+#  endif
+#  ifdef USE_XSMP
 	if (xsmp_icefd != -1)
 	{
 	    FD_SET(xsmp_icefd, &rfds);
@@ -6345,10 +6867,10 @@ select_eintr:
 	    if (maxfd < xsmp_icefd)
 		maxfd = xsmp_icefd;
 	}
-# endif
-# ifdef FEAT_JOB_CHANNEL
+#  endif
+#  ifdef FEAT_JOB_CHANNEL
 	maxfd = channel_select_setup(maxfd, &rfds, &wfds, &tv, &tvp);
-# endif
+#  endif
 	if (interrupted != NULL)
 	    *interrupted = FALSE;
 
@@ -6360,13 +6882,28 @@ select_eintr:
 	else if (interrupted != NULL && ret > 0)
 	    *interrupted = TRUE;
 
-# ifdef EINTR
+#  ifdef EINTR
 	if (ret == -1 && errno == EINTR)
 	{
+	    // Check whether the EINTR is caused by SIGTSTP
+	    if (got_tstp && !in_mch_suspend)
+	    {
+		exarg_T ea;
+
+		ea.forceit = TRUE;
+		ex_stop(&ea);
+		got_tstp = FALSE;
+	    }
+
 	    // Check whether window has been resized, EINTR may be caused by
 	    // SIGWINCH.
 	    if (do_resize)
+	    {
+#   ifdef FEAT_EVAL
+		ch_log(NULL, "calling handle_resize() in RealWaitForChar()");
+#   endif
 		handle_resize();
+	    }
 
 	    // Interrupted by a signal, need to try again.  We ignore msec
 	    // here, because we do want to check even after a timeout if
@@ -6374,22 +6911,27 @@ select_eintr:
 	    // external command after the process has finished.
 	    goto select_eintr;
 	}
-# endif
-# ifdef __TANDEM
+#  endif
+#  ifdef __TANDEM
 	if (ret == -1 && errno == ENOTSUP)
 	{
 	    FD_ZERO(&rfds);
 	    FD_ZERO(&efds);
 	    ret = 0;
 	}
-# endif
-# ifdef FEAT_MZSCHEME
+#  endif
+#  ifdef FEAT_MZSCHEME
 	if (ret == 0 && mzquantum_used)
 	    // loop if MzThreads must be scheduled and timeout occurred
 	    finished = FALSE;
-# endif
+#  endif
 
-# ifdef FEAT_XCLIPBOARD
+#  ifdef FEAT_WAYLAND
+	if (wayland_fd != -1)
+	    wayland_select_check(ret > 0 && FD_ISSET(wayland_fd, &rfds));
+#  endif
+
+#  ifdef FEAT_XCLIPBOARD
 	if (ret > 0 && xterm_Shell != (Widget)0
 		&& FD_ISSET(ConnectionNumber(xterm_dpy), &rfds))
 	{
@@ -6402,17 +6944,17 @@ select_eintr:
 		finished = FALSE;
 	    }
 	}
-# endif
-# ifdef FEAT_MOUSE_GPM
-	if (ret > 0 && gpm_flag && check_for_gpm != NULL && gpm_fd >= 0)
+#  endif
+#  ifdef FEAT_MOUSE_GPM
+	if (ret > 0 && check_for_gpm != NULL && gpm_flag && gpm_fd >= 0)
 	{
 	    if (FD_ISSET(gpm_fd, &efds))
 		gpm_close();
 	    else if (FD_ISSET(gpm_fd, &rfds))
 		*check_for_gpm = 1;
 	}
-# endif
-# ifdef USE_XSMP
+#  endif
+#  ifdef USE_XSMP
 	if (ret > 0 && xsmp_icefd != -1)
 	{
 	    if (FD_ISSET(xsmp_icefd, &efds))
@@ -6432,38 +6974,38 @@ select_eintr:
 		    finished = FALSE;   // keep going if event was only one
 	    }
 	}
-# endif
-#ifdef FEAT_JOB_CHANNEL
+#  endif
+#  ifdef FEAT_JOB_CHANNEL
 	// also call when ret == 0, we may be polling a keep-open channel
 	if (ret >= 0)
-	    ret = channel_select_check(ret, &rfds, &wfds);
-#endif
+	    (void)channel_select_check(ret, &rfds, &wfds);
+#  endif
 
-#endif // HAVE_SELECT
+# endif // HAVE_SELECT
 
-#ifdef MAY_LOOP
+# ifdef MAY_LOOP
 	if (finished || msec == 0)
 	    break;
 
-# ifdef FEAT_CLIENTSERVER
-	if (server_waiting())
+#  if defined(FEAT_CLIENTSERVER) && defined(FEAT_X11)
+	if (clientserver_method == CLIENTSERVER_METHOD_X11 && server_waiting())
 	    break;
-# endif
+#  endif
 
 	// We're going to loop around again, find out for how long
 	if (msec > 0)
 	{
-# ifdef ELAPSED_FUNC
+#  ifdef ELAPSED_FUNC
 	    // Compute remaining wait time.
 	    msec = start_msec - ELAPSED_FUNC(start_tv);
-# else
+#  else
 	    // Guess we got interrupted halfway.
 	    msec = msec / 2;
-# endif
+#  endif
 	    if (msec <= 0)
 		break;	// waited long enough
 	}
-#endif
+# endif
     }
 
     return result;
@@ -6497,14 +7039,14 @@ mch_expandpath(
  * file is pointer to array of pointers to matched file names
  */
 
-#ifndef SEEK_SET
-# define SEEK_SET 0
-#endif
-#ifndef SEEK_END
-# define SEEK_END 2
-#endif
+# ifndef SEEK_SET
+#  define SEEK_SET 0
+# endif
+# ifndef SEEK_END
+#  define SEEK_END 2
+# endif
 
-#define SHELL_SPECIAL (char_u *)"\t \"&'$;<>()\\|"
+# define SHELL_SPECIAL (char_u *)"\t \"&'$;<>()\\|\n"
 
     int
 mch_expand_wildcards(
@@ -6525,21 +7067,27 @@ mch_expand_wildcards(
      */
     int		j;
     char_u	*tempname;
+    size_t	tempnamelen;
     char_u	*command;
+    size_t	commandlen;
     FILE	*fd;
     char_u	*buffer;
-#define STYLE_ECHO	0	// use "echo", the default
-#define STYLE_GLOB	1	// use "glob", for csh
-#define STYLE_VIMGLOB	2	// use "vimglob", for Posix sh
-#define STYLE_PRINT	3	// use "print -N", for zsh
-#define STYLE_BT	4	// `cmd` expansion, execute the pattern
-				// directly
+# define STYLE_ECHO	0	// use "echo", the default
+# define STYLE_GLOB	1	// use "glob", for csh
+# define STYLE_VIMGLOB	2	// use "vimglob", for Posix sh
+# define STYLE_PRINT	3	// use "print -N", for zsh
+# define STYLE_BT	4	// `cmd` expansion, execute the pattern directly
+# define STYLE_GLOBSTAR	5	// use extended shell glob for bash (this uses extended
+				// globbing functionality using globstar, needs bash > 4)
     int		shell_style = STYLE_ECHO;
     int		check_spaces;
     static int	did_find_nul = FALSE;
     int		ampersand = FALSE;
-		// vimglob() function to define for Posix shell
-    static char *sh_vimglob_func = "vimglob() { while [ $# -ge 1 ]; do echo \"$1\"; shift; done }; vimglob >";
+				// vimglob() function to define for Posix shell
+    static string_T sh_vimglob_func = STR_LITERAL_INIT("vimglob() { while [ $# -ge 1 ]; do printf '%s\n' \"$1\"; shift; done }; vimglob >");
+				// vimglob() function with globstar setting enabled, only for bash >= 4.X
+    static string_T sh_globstar_opt = STR_LITERAL_INIT("[[ ${BASH_VERSINFO[0]} -ge 4 ]] && shopt -s globstar; ");
+
 
     *num_file = 0;	// default: no files found
     *file = NULL;
@@ -6571,7 +7119,7 @@ mch_expand_wildcards(
      */
     if ((tempname = vim_tempname('o', FALSE)) == NULL)
     {
-	emsg(_(e_notmp));
+	emsg(_(e_cant_get_temp_file_name));
 	return FAIL;
     }
 
@@ -6586,6 +7134,8 @@ mch_expand_wildcards(
      *	    If we use *zsh, "print -N" will work better than "glob".
      * STYLE_VIMGLOB:	NL separated
      *	    If we use *sh*, we define "vimglob()".
+     * STYLE_GLOBSTAR:	NL separated
+     *	    If we use *bash*, we define "vimglob() and enable globstar option".
      * STYLE_ECHO:	space separated.
      *	    A shell we don't know, stay safe and use "echo".
      */
@@ -6600,24 +7150,31 @@ mch_expand_wildcards(
 	else if (STRCMP(p_sh + len - 3, "zsh") == 0)
 	    shell_style = STYLE_PRINT;
     }
-    if (shell_style == STYLE_ECHO && strstr((char *)gettail(p_sh),
-								"sh") != NULL)
-	shell_style = STYLE_VIMGLOB;
+    if (shell_style == STYLE_ECHO)
+    {
+	if (strstr((char *)gettail(p_sh), "bash") != NULL)
+	    shell_style = STYLE_GLOBSTAR;
+	else if (strstr((char *)gettail(p_sh), "sh") != NULL)
+	    shell_style = STYLE_VIMGLOB;
+    }
 
     // Compute the length of the command.  We need 2 extra bytes: for the
     // optional '&' and for the NUL.
     // Worst case: "unset nonomatch; print -N >" plus two is 29
-    len = STRLEN(tempname) + 29;
+    tempnamelen = STRLEN(tempname);
+    len = tempnamelen + 29;
     if (shell_style == STYLE_VIMGLOB)
-	len += STRLEN(sh_vimglob_func);
+	len += sh_vimglob_func.length;
+    else if (shell_style == STYLE_GLOBSTAR)
+	len += sh_vimglob_func.length + sh_globstar_opt.length;
 
     for (i = 0; i < num_pat; ++i)
     {
 	// Count the length of the patterns in the same way as they are put in
 	// "command" below.
-#ifdef USE_SYSTEM
+# ifdef USE_SYSTEM
 	len += STRLEN(pat[i]) + 3;	// add space and two quotes
-#else
+# else
 	++len;				// add space
 	for (j = 0; pat[i][j] != NUL; ++j)
 	{
@@ -6625,7 +7182,7 @@ mch_expand_wildcards(
 		++len;		// may add a backslash
 	    ++len;
 	}
-#endif
+# endif
     }
     command = alloc(len);
     if (command == NULL)
@@ -6646,51 +7203,62 @@ mch_expand_wildcards(
     if (shell_style == STYLE_BT)
     {
 	// change `command; command& ` to (command; command )
-	STRCPY(command, "(");
-	STRCAT(command, pat[0] + 1);		// exclude first backtick
-	p = command + STRLEN(command) - 1;
-	*p-- = ')';				// remove last backtick
-	while (p > command && VIM_ISWHITE(*p))
-	    --p;
-	if (*p == '&')				// remove trailing '&'
+	commandlen = vim_snprintf((char *)command, len, "(%s)>%s", pat[0] + 1, tempname);   // +1 to exclude first backtick
+
+	p = (char_u *)strstr((char *)command, ")>");
+	if (p == NULL)
 	{
-	    ampersand = TRUE;
-	    *p = ' ';
+	    ;					    // can't happen ;-)
 	}
-	STRCAT(command, ">");
+	else
+	{
+	    --p;
+	    while (p > command && VIM_ISWHITE(*p))
+		--p;
+	    if (*p == '`')			    // remove backtick
+		*p = ' ';
+
+	    --p;
+	    while (p > command && VIM_ISWHITE(*p))
+		--p;
+	    if (*p == '&')			    // remove ampersand
+	    {
+		ampersand = TRUE;
+		*p = ' ';
+	    }
+	}
     }
     else
     {
-	if (flags & EW_NOTFOUND)
-	    STRCPY(command, "set nonomatch; ");
-	else
-	    STRCPY(command, "unset nonomatch; ");
 	if (shell_style == STYLE_GLOB)
-	    STRCAT(command, "glob >");
+	{
+	    // Assume the nonomatch option is valid only for csh like shells,
+	    // otherwise, this may set the positional parameters for the shell,
+	    // e.g. "$*".
+	    commandlen = vim_snprintf((char *)command, len, "%sset nonomatch; glob >%s",
+				(flags & EW_NOTFOUND) ? "" : "un", tempname);
+	}
 	else if (shell_style == STYLE_PRINT)
-	    STRCAT(command, "print -N >");
+	    commandlen = vim_snprintf((char *)command, len, "print -N >%s", tempname);
 	else if (shell_style == STYLE_VIMGLOB)
-	    STRCAT(command, sh_vimglob_func);
+	    commandlen = vim_snprintf((char *)command, len, "%s%s", sh_vimglob_func.string, tempname);
+	else if (shell_style == STYLE_GLOBSTAR)
+	    commandlen = vim_snprintf((char *)command, len, "%s%s%s", sh_globstar_opt.string,
+				sh_vimglob_func.string, tempname);
 	else
-	    STRCAT(command, "echo >");
-    }
+	    commandlen = vim_snprintf((char *)command, len, "echo >%s", tempname);
 
-    STRCAT(command, tempname);
-
-    if (shell_style != STYLE_BT)
 	for (i = 0; i < num_pat; ++i)
 	{
 	    // When using system() always add extra quotes, because the shell
 	    // is started twice.  Otherwise put a backslash before special
 	    // characters, except inside ``.
-#ifdef USE_SYSTEM
-	    STRCAT(command, " \"");
-	    STRCAT(command, pat[i]);
-	    STRCAT(command, "\"");
-#else
+# ifdef USE_SYSTEM
+	    commandlen += vim_snprintf((char *)command + commandlen, len, " \"%s\"", pat[i]);
+# else
 	    int intick = FALSE;
 
-	    p = command + STRLEN(command);
+	    p = command + commandlen;
 	    *p++ = ' ';
 	    for (j = 0; pat[i][j] != NUL; ++j)
 	    {
@@ -6719,12 +7287,14 @@ mch_expand_wildcards(
 		*p++ = pat[i][j];
 	    }
 	    *p = NUL;
-#endif
+	    commandlen = (size_t)(p - command);
+# endif
 	}
+    }
     if (flags & EW_SILENT)
 	show_shell_mess = FALSE;
     if (ampersand)
-	STRCAT(command, "&");		// put the '&' after the redirection
+	STRCPY(command + commandlen, "&");		// put the '&' after the redirection
 
     /*
      * Using zsh -G: If a pattern has no matches, it is just deleted from
@@ -6765,18 +7335,18 @@ mch_expand_wildcards(
 	 * However with USE_SYSTEM, I don't know how to turn off error messages
 	 * from the shell, so screen may still get messed up -- webb.
 	 */
-#ifndef USE_SYSTEM
+# ifndef USE_SYSTEM
 	if (!(flags & EW_SILENT))
-#endif
+# endif
 	{
 	    redraw_later_clear();	// probably messed up screen
 	    msg_putchar('\n');		// clear bottom line quickly
 	    cmdline_row = Rows - 1;	// continue on last line
-#ifdef USE_SYSTEM
+# ifdef USE_SYSTEM
 	    if (!(flags & EW_SILENT))
-#endif
+# endif
 	    {
-		msg(_(e_wildexpand));
+		msg(_(e_cannot_expand_wildcards));
 		msg_start();		// don't overwrite this message
 	    }
 	}
@@ -6796,7 +7366,7 @@ mch_expand_wildcards(
 	// Something went wrong, perhaps a file name with a special char.
 	if (!(flags & EW_SILENT))
 	{
-	    msg(_(e_wildexpand));
+	    msg(_(e_cannot_expand_wildcards));
 	    msg_start();		// don't overwrite this message
 	}
 	vim_free(tempname);
@@ -6825,7 +7395,7 @@ mch_expand_wildcards(
     if (i != (int)len)
     {
 	// unexpected read error
-	semsg(_(e_notread), tempname);
+	semsg(_(e_cant_read_file_str), tempname);
 	vim_free(tempname);
 	vim_free(buffer);
 	return FAIL;
@@ -6855,7 +7425,9 @@ mch_expand_wildcards(
 	}
     }
     // file names are separated with NL
-    else if (shell_style == STYLE_BT || shell_style == STYLE_VIMGLOB)
+    else if (shell_style == STYLE_BT ||
+	    shell_style == STYLE_VIMGLOB ||
+	    shell_style == STYLE_GLOBSTAR)
     {
 	buffer[len] = NUL;		// make sure the buffer ends in NUL
 	p = buffer;
@@ -6936,7 +7508,7 @@ mch_expand_wildcards(
 	(*file)[i] = p;
 	// Space or NL separates
 	if (shell_style == STYLE_ECHO || shell_style == STYLE_BT
-					      || shell_style == STYLE_VIMGLOB)
+		|| shell_style == STYLE_VIMGLOB || shell_style == STYLE_GLOBSTAR)
 	{
 	    while (!(shell_style == STYLE_ECHO && *p == ' ')
 						   && *p != '\n' && *p != NUL)
@@ -7101,7 +7673,7 @@ have_dollars(int num, char_u **file)
     return FALSE;
 }
 
-#if !defined(HAVE_RENAME) || defined(PROTO)
+#if !defined(HAVE_RENAME)
 /*
  * Scaled-down version of rename(), which is missing in Xenix.
  * This version can only move regular files and will fail if the
@@ -7122,7 +7694,50 @@ mch_rename(const char *src, const char *dest)
 }
 #endif // !HAVE_RENAME
 
-#if defined(FEAT_MOUSE_GPM) || defined(PROTO)
+#if defined(FEAT_MOUSE_GPM)
+# if defined(DYNAMIC_GPM)
+/*
+ * Initialize Gpm's symbols for dynamic linking.
+ * Must be called only if libgpm_hinst is NULL.
+ */
+    static int
+load_libgpm(void)
+{
+    libgpm_hinst = dlopen("libgpm.so", RTLD_LAZY|RTLD_GLOBAL);
+
+    if (libgpm_hinst == NULL)
+    {
+	if (p_verbose > 0)
+	    smsg_attr(HL_ATTR(HLF_W),
+			       _("Could not load gpm library: %s"), dlerror());
+	return FAIL;
+    }
+
+    if (
+	    (dll_Gpm_Open     = dlsym(libgpm_hinst, "Gpm_Open"))     == NULL
+	||  (dll_Gpm_Close    = dlsym(libgpm_hinst, "Gpm_Close"))    == NULL
+	||  (dll_Gpm_GetEvent = dlsym(libgpm_hinst, "Gpm_GetEvent")) == NULL
+	||  (dll_gpm_flag     = dlsym(libgpm_hinst, "gpm_flag"))     == NULL
+	||  (dll_gpm_fd       = dlsym(libgpm_hinst, "gpm_fd"))       == NULL
+      )
+    {
+	semsg(_(e_could_not_load_library_str_str), "gpm", dlerror());
+	dlclose(libgpm_hinst);
+	libgpm_hinst = NULL;
+	dll_gpm_flag = NULL;
+	dll_gpm_fd   = NULL;
+	return FAIL;
+    }
+    return OK;
+}
+
+    int
+gpm_available(void)
+{
+    return libgpm_hinst != NULL || load_libgpm() == OK;
+}
+# endif // DYNAMIC_GPM
+
 /*
  * Initializes connection with gpm (if it isn't already opened)
  * Return 1 if succeeded (or connection already opened), 0 if failed
@@ -7132,29 +7747,45 @@ gpm_open(void)
 {
     static Gpm_Connect gpm_connect; // Must it be kept till closing ?
 
-    if (!gpm_flag)
-    {
-	gpm_connect.eventMask = (GPM_UP | GPM_DRAG | GPM_DOWN);
-	gpm_connect.defaultMask = ~GPM_HARD;
-	// Default handling for mouse move
-	gpm_connect.minMod = 0; // Handle any modifier keys
-	gpm_connect.maxMod = 0xffff;
-	if (Gpm_Open(&gpm_connect, 0) > 0)
-	{
-	    // gpm library tries to handling TSTP causes
-	    // problems. Anyways, we close connection to Gpm whenever
-	    // we are going to suspend or starting an external process
-	    // so we shouldn't  have problem with this
-# ifdef SIGTSTP
-	    signal(SIGTSTP, restricted ? SIG_IGN : SIG_DFL);
-# endif
-	    return 1; // succeed
-	}
-	if (gpm_fd == -2)
-	    Gpm_Close(); // We don't want to talk to xterm via gpm
+# ifdef DYNAMIC_GPM
+    if (!gpm_available())
 	return 0;
+# endif
+
+    if (gpm_flag)
+	return 1; // already open
+
+    gpm_connect.eventMask = (GPM_UP | GPM_DRAG | GPM_DOWN);
+    gpm_connect.defaultMask = ~GPM_HARD;
+    // Default handling for mouse move
+    gpm_connect.minMod = 0; // Handle any modifier keys
+    gpm_connect.maxMod = 0xffff;
+    if (Gpm_Open(&gpm_connect, 0) > 0)
+    {
+	// gpm library tries to handling TSTP causes
+	// problems. Anyways, we close connection to Gpm whenever
+	// we are going to suspend or starting an external process
+	// so we shouldn't  have problem with this
+# ifdef SIGTSTP
+	mch_signal(SIGTSTP, restricted ? SIG_IGN : sig_tstp);
+# endif
+	return 1; // succeed
     }
-    return 1; // already open
+    if (gpm_fd == -2)
+    {
+	Gpm_Close(); // We don't want to talk to xterm via gpm
+
+	// Gpm_Close fails to properly restore the WINCH and TSTP handlers,
+	// leading to Vim ignoring resize signals. We have to re-initialize
+	// these handlers again here.
+# ifdef SIGWINCH
+	mch_signal(SIGWINCH, sig_winch);
+# endif
+# ifdef SIGTSTP
+	mch_signal(SIGTSTP, restricted ? SIG_IGN : sig_tstp);
+# endif
+    }
+    return 0;
 }
 
 /*
@@ -7195,11 +7826,11 @@ mch_gpm_process(void)
 
     Gpm_GetEvent(&gpm_event);
 
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     // Don't put events in the input queue now.
     if (hold_gui_events)
 	return 0;
-#endif
+# endif
 
     row = gpm_event.y - 1;
     col = gpm_event.x - 1;
@@ -7277,14 +7908,13 @@ sysmouse_open(void)
     mouse.operation = MOUSE_MODE;
     mouse.u.mode.mode = 0;
     mouse.u.mode.signal = SIGUSR2;
-    if (ioctl(1, CONS_MOUSECTL, &mouse) != -1)
-    {
-	signal(SIGUSR2, (RETSIGTYPE (*)())sig_sysmouse);
-	mouse.operation = MOUSE_SHOW;
-	ioctl(1, CONS_MOUSECTL, &mouse);
-	return OK;
-    }
-    return FAIL;
+    if (ioctl(1, CONS_MOUSECTL, &mouse) == -1)
+	return FAIL;
+
+    mch_signal(SIGUSR2, sig_sysmouse);
+    mouse.operation = MOUSE_SHOW;
+    ioctl(1, CONS_MOUSECTL, &mouse);
+    return OK;
 }
 
 /*
@@ -7296,7 +7926,7 @@ sysmouse_close(void)
 {
     struct mouse_info	mouse;
 
-    signal(SIGUSR2, restricted ? SIG_IGN : SIG_DFL);
+    mch_signal(SIGUSR2, restricted ? SIG_IGN : SIG_DFL);
     mouse.operation = MOUSE_MODE;
     mouse.u.mode.mode = 0;
     mouse.u.mode.signal = 0;
@@ -7306,7 +7936,7 @@ sysmouse_close(void)
 /*
  * Gets info from sysmouse and adds special keys to input buf.
  */
-    static RETSIGTYPE
+    static void
 sig_sysmouse SIGDEFARG(sigarg)
 {
     struct mouse_info	mouse;
@@ -7317,11 +7947,11 @@ sig_sysmouse SIGDEFARG(sigarg)
     int			buttons;
     static int		oldbuttons = 0;
 
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     // Don't put events in the input queue now.
     if (hold_gui_events)
 	return;
-#endif
+# endif
 
     mouse.operation = MOUSE_GETINFO;
     if (ioctl(1, FBIO_GETMODE, &video.vi_mode) != -1
@@ -7369,7 +7999,38 @@ sig_sysmouse SIGDEFARG(sigarg)
 }
 #endif // FEAT_SYSMOUSE
 
-#if defined(FEAT_LIBCALL) || defined(PROTO)
+/*
+ * Fill the buffer 'buf' with 'len' random bytes.
+ * Returns FAIL if the OS PRNG is not available or something went wrong.
+ */
+    int
+mch_get_random(char_u *buf, int len)
+{
+    static int dev_urandom_state = NOTDONE;
+
+    if (dev_urandom_state == FAIL)
+	return FAIL;
+
+    int fd = open("/dev/urandom", O_RDONLY);
+
+    // Attempt reading /dev/urandom.
+    if (fd == -1)
+	dev_urandom_state = FAIL;
+    else if (read(fd, buf, len) == len)
+    {
+	dev_urandom_state = OK;
+	close(fd);
+    }
+    else
+    {
+	dev_urandom_state = FAIL;
+	close(fd);
+    }
+
+    return dev_urandom_state;
+}
+
+#if defined(FEAT_LIBCALL)
 typedef char_u * (*STRPROCSTR)(char_u *);
 typedef char_u * (*INTPROCSTR)(int);
 typedef int (*STRPROCINT)(char_u *);
@@ -7415,7 +8076,7 @@ mch_libcall(
     if (hinstLib == NULL)
     {
 	// "dlerr" must be used before dlclose()
-	dlerr = (char *)dlerror();
+	dlerr = dlerror();
 	if (dlerr != NULL)
 	    semsg(_("dlerror = \"%s\""), dlerr);
     }
@@ -7450,7 +8111,7 @@ mch_libcall(
 	    {
 # if defined(USE_DLOPEN)
 		*(void **)(&ProcAdd) = dlsym(hinstLib, (const char *)funcname);
-		dlerr = (char *)dlerror();
+		dlerr = dlerror();
 # else
 		if (shl_findsym(&hinstLib, (const char *)funcname,
 					TYPE_PROCEDURE, (void *)&ProcAdd) < 0)
@@ -7472,7 +8133,7 @@ mch_libcall(
 	    {
 # if defined(USE_DLOPEN)
 		*(void **)(&ProcAddI) = dlsym(hinstLib, (const char *)funcname);
-		dlerr = (char *)dlerror();
+		dlerr = dlerror();
 # else
 		if (shl_findsym(&hinstLib, (const char *)funcname,
 				       TYPE_PROCEDURE, (void *)&ProcAddI) < 0)
@@ -7512,7 +8173,7 @@ mch_libcall(
 	    for (i = 0; signal_info[i].sig != -1; i++)
 		if (lc_signal == signal_info[i].sig)
 		    break;
-	    semsg("E368: got SIG%s in libcall()", signal_info[i].name);
+	    semsg(_(e_got_sig_str_in_libcall), signal_info[i].name);
 	}
 #  endif
 # endif
@@ -7531,7 +8192,7 @@ mch_libcall(
 
     if (!success)
     {
-	semsg(_(e_libcall), funcname);
+	semsg(_(e_library_call_failed_for_str), funcname);
 	return FAIL;
     }
 
@@ -7539,7 +8200,7 @@ mch_libcall(
 }
 #endif
 
-#if (defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)) || defined(PROTO)
+#if defined(FEAT_X11) && defined(FEAT_XCLIPBOARD)
 static int	xterm_trace = -1;	// default: disabled
 static int	xterm_button;
 
@@ -7559,9 +8220,9 @@ setup_term_clip(void)
     open_app_context();
     if (app_context != NULL && xterm_Shell == (Widget)0)
     {
-	int (*oldhandler)();
+	int (*oldhandler)(Display*, XErrorEvent*);
 # if defined(USING_SETJMP)
-	int (*oldIOhandler)();
+	int (*oldIOhandler)(Display*);
 # endif
 # ifdef ELAPSED_FUNC
 	elapsed_T start_tv;
@@ -7691,7 +8352,8 @@ do_xterm_trace(void)
     char_u		buf[50];
     char_u		*strp;
     long		got_hints;
-    static char_u	*mouse_code;
+    static char_u	*mouse_code = NULL;
+    static size_t	mouse_codelen = 0;
     static char_u	mouse_name[2] = {KS_MOUSE, KE_FILLER};
     static int		prev_row = 0, prev_col = 0;
     static XSizeHints	xterm_hints;
@@ -7714,6 +8376,8 @@ do_xterm_trace(void)
 
 	// Rely on the same mouse code for the duration of this
 	mouse_code = find_termcode(mouse_name);
+	if (mouse_code != NULL)
+	    mouse_codelen = STRLEN(mouse_code);
 	prev_row = mouse_row;
 	prev_col = mouse_col;
 	xterm_trace = 2;
@@ -7732,7 +8396,8 @@ do_xterm_trace(void)
 	    xterm_hints.x = 2;
 	return TRUE;
     }
-    if (mouse_code == NULL || STRLEN(mouse_code) > 45)
+
+    if (mouse_code == NULL || mouse_codelen > 45)
     {
 	xterm_trace = 0;
 	return FALSE;
@@ -7747,19 +8412,19 @@ do_xterm_trace(void)
 	return TRUE;
 
     STRCPY(buf, mouse_code);
-    strp = buf + STRLEN(buf);
+    strp = buf + mouse_codelen;
     *strp++ = (xterm_button | MOUSE_DRAG) & ~0x20;
     *strp++ = (char_u)(col + ' ' + 1);
     *strp++ = (char_u)(row + ' ' + 1);
-    *strp = 0;
-    add_to_input_buf(buf, STRLEN(buf));
+    *strp = NUL;
+    add_to_input_buf(buf, strp - buf);
 
     prev_row = row;
     prev_col = col;
     return TRUE;
 }
 
-# if defined(FEAT_GUI) || defined(FEAT_XCLIPBOARD) || defined(PROTO)
+# if defined(FEAT_GUI) || defined(FEAT_XCLIPBOARD)
 /*
  * Destroy the display, window and app_context.  Required for GTK.
  */
@@ -7813,7 +8478,7 @@ clip_update(void)
  * nothing in the X event queue (& no timers pending), then we return
  * immediately.
  */
-    static void
+    void
 xterm_update(void)
 {
     XEvent event;
@@ -7829,7 +8494,7 @@ xterm_update(void)
 	{
 	    // There is an event to process.
 	    XtAppNextEvent(app_context, &event);
-#ifdef FEAT_CLIENTSERVER
+# ifdef FEAT_CLIENTSERVER
 	    {
 		XPropertyEvent *e = (XPropertyEvent *)&event;
 
@@ -7837,7 +8502,7 @@ xterm_update(void)
 		   && e->atom == commProperty && e->state == PropertyNewValue)
 		    serverEventProc(xterm_dpy, &event, 0);
 	    }
-#endif
+# endif
 	    XtDispatchEvent(&event);
 	}
 	else
@@ -7878,7 +8543,7 @@ clip_xterm_set_selection(Clipboard_T *cbd)
 #endif
 
 
-#if defined(USE_XSMP) || defined(PROTO)
+#if defined(USE_XSMP)
 /*
  * Code for X Session Management Protocol.
  */
@@ -8046,11 +8711,11 @@ xsmp_init(void)
 {
     char		errorstring[80];
     SmcCallbacks	smcallbacks;
-#if 0
+# if 0
     SmPropValue		smname;
     SmProp		smnameprop;
     SmProp		*smprops[1];
-#endif
+# endif
 
     if (p_verbose > 0)
 	verb_msg(_("XSMP opening connection"));
@@ -8106,7 +8771,7 @@ xsmp_init(void)
     }
     xsmp.iceconn = SmcGetIceConnection(xsmp.smcconn);
 
-#if 0
+# if 0
     // ID ourselves
     smname.value = "vim";
     smname.length = 3;
@@ -8117,7 +8782,7 @@ xsmp_init(void)
 
     smprops[0] = &smnameprop;
     SmcSetProperties(xsmp.smcconn, 1, smprops);
-#endif
+# endif
 }
 
 
@@ -8125,124 +8790,242 @@ xsmp_init(void)
     void
 xsmp_close(void)
 {
-    if (xsmp_icefd != -1)
-    {
-	SmcCloseConnection(xsmp.smcconn, 0, NULL);
-	if (xsmp.clientid != NULL)
-	    free(xsmp.clientid);
-	xsmp.clientid = NULL;
-	xsmp_icefd = -1;
-    }
+    if (xsmp_icefd == -1)
+	return;
+
+    SmcCloseConnection(xsmp.smcconn, 0, NULL);
+    if (xsmp.clientid != NULL)
+	free(xsmp.clientid);
+    xsmp.clientid = NULL;
+    xsmp_icefd = -1;
 }
 #endif // USE_XSMP
 
+#if defined(FEAT_RELTIME)
+# if defined(PROF_NSEC)
+/*
+ * Implement timeout with timer_create() and timer_settime().
+ */
+static volatile sig_atomic_t timeout_flag = FALSE;
+static timer_t		     timer_id;
+static int		     timer_created = FALSE;
 
-#ifdef EBCDIC
-// Translate character to its CTRL- value
-char CtrlTable[] =
+/*
+ * Callback for when the timer expires.
+ */
+    static void
+set_flag(union sigval _unused UNUSED)
 {
-/* 00 - 5E */
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-/* ^ */ 0x1E,
-/* - */ 0x1F,
-/* 61 - 6C */
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-/* _ */ 0x1F,
-/* 6E - 80 */
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-/* a */ 0x01,
-/* b */ 0x02,
-/* c */ 0x03,
-/* d */ 0x37,
-/* e */ 0x2D,
-/* f */ 0x2E,
-/* g */ 0x2F,
-/* h */ 0x16,
-/* i */ 0x05,
-/* 8A - 90 */
-	0, 0, 0, 0, 0, 0, 0,
-/* j */ 0x15,
-/* k */ 0x0B,
-/* l */ 0x0C,
-/* m */ 0x0D,
-/* n */ 0x0E,
-/* o */ 0x0F,
-/* p */ 0x10,
-/* q */ 0x11,
-/* r */ 0x12,
-/* 9A - A1 */
-	0, 0, 0, 0, 0, 0, 0, 0,
-/* s */ 0x13,
-/* t */ 0x3C,
-/* u */ 0x3D,
-/* v */ 0x32,
-/* w */ 0x26,
-/* x */ 0x18,
-/* y */ 0x19,
-/* z */ 0x3F,
-/* AA - AC */
-	0, 0, 0,
-/* [ */ 0x27,
-/* AE - BC */
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-/* ] */ 0x1D,
-/* BE - C0 */ 0, 0, 0,
-/* A */ 0x01,
-/* B */ 0x02,
-/* C */ 0x03,
-/* D */ 0x37,
-/* E */ 0x2D,
-/* F */ 0x2E,
-/* G */ 0x2F,
-/* H */ 0x16,
-/* I */ 0x05,
-/* CA - D0 */ 0, 0, 0, 0, 0, 0, 0,
-/* J */ 0x15,
-/* K */ 0x0B,
-/* L */ 0x0C,
-/* M */ 0x0D,
-/* N */ 0x0E,
-/* O */ 0x0F,
-/* P */ 0x10,
-/* Q */ 0x11,
-/* R */ 0x12,
-/* DA - DF */ 0, 0, 0, 0, 0, 0,
-/* \ */ 0x1C,
-/* E1 */ 0,
-/* S */ 0x13,
-/* T */ 0x3C,
-/* U */ 0x3D,
-/* V */ 0x32,
-/* W */ 0x26,
-/* X */ 0x18,
-/* Y */ 0x19,
-/* Z */ 0x3F,
-/* EA - FF*/ 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-};
+    timeout_flag = TRUE;
+}
 
-char MetaCharTable[]=
-{//   0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-      0,  0,  0,  0,'\\', 0,'F',  0,'W','M','N',  0,  0,  0,  0,  0,
-      0,  0,  0,  0,']',  0,  0,'G',  0,  0,'R','O',  0,  0,  0,  0,
-    '@','A','B','C','D','E',  0,  0,'H','I','J','K','L',  0,  0,  0,
-    'P','Q',  0,'S','T','U','V',  0,'X','Y','Z','[',  0,  0,'^',  0
-};
+/*
+ * Stop any active timeout.
+ */
+    void
+stop_timeout(void)
+{
+    static struct itimerspec disarm = {{0, 0}, {0, 0}};
 
+    if (timer_created)
+    {
+	int ret = timer_settime(timer_id, 0, &disarm, NULL);
 
-// TODO: Use characters NOT numbers!!!
-char CtrlCharTable[]=
-{//   0   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
-    124,193,194,195,  0,201,  0,  0,  0,  0,  0,210,211,212,213,214,
-    215,216,217,226,  0,209,200,  0,231,232,  0,  0,224,189, 95,109,
-      0,  0,  0,  0,  0,  0,230,173,  0,  0,  0,  0,  0,197,198,199,
-      0,  0,229,  0,  0,  0,  0,196,  0,  0,  0,  0,227,228,  0,233,
-};
+	if (ret < 0)
+	    semsg(_(e_could_not_clear_timeout_str), strerror(errno));
+    }
 
+    // Clear the current timeout flag; any previous timeout should be
+    // considered _not_ triggered.
+    timeout_flag = FALSE;
+}
 
-#endif
+/*
+ * Start the timeout timer.
+ *
+ * The return value is a pointer to a flag that is initialised to FALSE. If the
+ * timeout expires, the flag is set to TRUE. This will only return pointers to
+ * static memory; i.e. any pointer returned by this function may always be
+ * safely dereferenced.
+ *
+ * This function is not expected to fail, but if it does it will still return a
+ * valid flag pointer; the flag will remain stuck as FALSE .
+ */
+    volatile sig_atomic_t *
+start_timeout(long msec)
+{
+    struct itimerspec interval = {
+	    {0, 0},					// Do not repeat.
+	    {msec / 1000, (msec % 1000) * 1000000}};	// Timeout interval
+    int ret;
+
+    // This is really the caller's responsibility, but let's make sure the
+    // previous timer has been stopped.
+    stop_timeout();
+
+    if (!timer_created)
+    {
+	struct sigevent action = {0};
+
+	action.sigev_notify = SIGEV_THREAD;
+	action.sigev_notify_function = set_flag;
+	ret = timer_create(CLOCK_MONOTONIC, &action, &timer_id);
+	if (ret < 0)
+	{
+	    semsg(_(e_could_not_set_timeout_str), strerror(errno));
+	    return &timeout_flag;
+	}
+	timer_created = TRUE;
+    }
+
+#  ifdef FEAT_EVAL
+    ch_log(NULL, "setting timeout timer to %d sec %ld nsec",
+	       (int)interval.it_value.tv_sec, (long)interval.it_value.tv_nsec);
+#  endif
+    ret = timer_settime(timer_id, 0, &interval, NULL);
+    if (ret < 0)
+	semsg(_(e_could_not_set_timeout_str), strerror(errno));
+
+    return &timeout_flag;
+}
+
+/*
+ * To be used before fork/exec: delete any created timer.
+ */
+    void
+delete_timer(void)
+{
+    if (!timer_created)
+	return;
+
+    timer_delete(timer_id);
+    timer_created = FALSE;
+}
+
+# else // PROF_NSEC
+
+/*
+ * Implement timeout with setitimer()
+ */
+static struct sigaction		prev_sigaction;
+static volatile sig_atomic_t	timeout_flag	     = FALSE;
+static int			timer_active	     = FALSE;
+static int			timer_handler_active = FALSE;
+static volatile sig_atomic_t	alarm_pending	     = FALSE;
+
+/*
+ * Handle SIGALRM for a timeout.
+ */
+    static void
+set_flag SIGDEFARG(sigarg)
+{
+    if (alarm_pending)
+	alarm_pending = FALSE;
+    else
+	timeout_flag = TRUE;
+}
+
+/*
+ * Stop any active timeout.
+ */
+    void
+stop_timeout(void)
+{
+    static struct itimerval disarm = {{0, 0}, {0, 0}};
+    int			    ret;
+
+    if (timer_active)
+    {
+	timer_active = FALSE;
+	ret = setitimer(ITIMER_REAL, &disarm, NULL);
+	if (ret < 0)
+	    // Should only get here as a result of coding errors.
+	    semsg(_(e_could_not_clear_timeout_str), strerror(errno));
+    }
+
+    if (timer_handler_active)
+    {
+	timer_handler_active = FALSE;
+	ret = sigaction(SIGALRM, &prev_sigaction, NULL);
+	if (ret < 0)
+	    // Should only get here as a result of coding errors.
+	    semsg(_(e_could_not_reset_handler_for_timeout_str),
+							      strerror(errno));
+    }
+    timeout_flag = FALSE;
+}
+
+/*
+ * Start the timeout timer.
+ *
+ * The return value is a pointer to a flag that is initialised to FALSE. If the
+ * timeout expires, the flag is set to TRUE. This will only return pointers to
+ * static memory; i.e. any pointer returned by this function may always be
+ * safely dereferenced.
+ *
+ * This function is not expected to fail, but if it does it will still return a
+ * valid flag pointer; the flag will remain stuck as FALSE .
+ */
+    volatile sig_atomic_t *
+start_timeout(long msec)
+{
+    struct itimerval	interval = {
+	    {0, 0},				    // Do not repeat.
+	    {msec / 1000, (msec % 1000) * 1000}};   // Timeout interval
+    struct sigaction	handle_alarm;
+    int			ret;
+    sigset_t		sigs;
+    sigset_t		saved_sigs;
+
+    // This is really the caller's responsibility, but let's make sure the
+    // previous timer has been stopped.
+    stop_timeout();
+
+    // There is a small chance that SIGALRM is pending and so the handler must
+    // ignore it on the first call.
+    alarm_pending = FALSE;
+    ret = sigemptyset(&sigs);
+    ret = ret == 0 ? sigaddset(&sigs, SIGALRM) : ret;
+    ret = ret == 0 ? sigprocmask(SIG_BLOCK, &sigs, &saved_sigs) : ret;
+    timeout_flag = FALSE;
+    ret = ret == 0 ? sigpending(&sigs) : ret;
+    if (ret == 0)
+    {
+	alarm_pending = sigismember(&sigs, SIGALRM);
+	ret = sigprocmask(SIG_SETMASK, &saved_sigs, NULL);
+    }
+    if (unlikely(ret != 0 || alarm_pending < 0))
+    {
+	// Just catching coding errors. Write an error message, but carry on.
+	semsg(_(e_could_not_check_for_pending_sigalrm_str), strerror(errno));
+	alarm_pending = FALSE;
+    }
+
+    // Set up the alarm handler first.
+    ret = sigemptyset(&handle_alarm.sa_mask);
+    handle_alarm.sa_handler = set_flag;
+    handle_alarm.sa_flags = 0;
+    ret = ret == 0 ?  sigaction(SIGALRM, &handle_alarm, &prev_sigaction) : ret;
+    if (ret < 0)
+    {
+	// Should only get here as a result of coding errors.
+	semsg(_(e_could_not_set_handler_for_timeout_str), strerror(errno));
+	return &timeout_flag;
+    }
+    timer_handler_active = TRUE;
+
+    // Set up the interval timer once the alarm handler is in place.
+    ret = setitimer(ITIMER_REAL, &interval, NULL);
+    if (ret < 0)
+    {
+	// Should only get here as a result of coding errors.
+	semsg(_(e_could_not_set_timeout_str), strerror(errno));
+	stop_timeout();
+	return &timeout_flag;
+    }
+
+    timer_active = TRUE;
+    return &timeout_flag;
+}
+# endif // PROF_NSEC
+#endif  // FEAT_RELTIME

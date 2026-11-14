@@ -1,20 +1,21 @@
 " Vim syntax file
 " Language:     SML
 " Filenames:    *.sml *.sig
-" Maintainers:  Markus Mottl            <markus.mottl@gmail.com>
-"               Fabrizio Zeno Cornelli  <zeno@filibusta.crema.unimi.it>
-" Last Change:  2019 Oct 01 - Only spell check strings & comments (Chuan Wei Foo)
+" Maintainer:   Markus Mottl <markus.mottl@gmail.com>
+" Previous Maintainer: Fabrizio Zeno Cornelli <zeno@filibusta.crema.unimi.it> (invalid)
+" Last Change:  2025 Nov 11 - Improve special constant matching (Doug Kearns)
+"               2025 Nov 07 - Update Number Regex
+"               2022 Apr 01
 "               2015 Aug 31 - Fixed opening of modules (Ramana Kumar)
 "               2006 Oct 23 - Fixed character highlighting bug (MM)
 
 " quit when a syntax file was already loaded
 if exists("b:current_syntax")
+  finish
+endif
 
 " Disable spell checking of syntax.
 syn spell notoplevel
-
-  finish
-endif
 
 " SML is case sensitive.
 syn case match
@@ -137,9 +138,25 @@ syn match    smlConstructor  "\u\(\w\|'\)*\>"
 " Module prefix
 syn match    smlModPath      "\u\(\w\|'\)*\."he=e-1
 
-syn match    smlCharacter    +#"\\""\|#"."\|#"\\\d\d\d"+
-syn match    smlCharErr      +#"\\\d\d"\|#"\\\d"+
-syn region   smlString       start=+"+ skip=+\\\\\|\\"+ end=+"+ contains=@Spell
+" Strings and Characters
+syn match    smlEscapeErr    "\\."                 contained
+syn match    smlEscape       "\\[abtnvfr"\\]"      contained
+syn match    smlEscapeErr    "\\^."                contained
+syn match    smlEscape       "\\^[@A-Z[\\\]^_]"    contained
+syn match    smlEscapeErr    "\\\d\{1,2}"          contained
+syn match    smlEscape       "\\\d\{3}"            contained
+syn match    smlEscapeErr    "\\u\x\{0,3}"         contained
+syn match    smlEscape       "\\u\x\{4}"           contained
+syn match    smlEscape       "\\\_[[:space:]]\+\\" contained
+syn cluster  smlEscape       contains=smlEscape,smlEscapeErr
+
+syn region   smlString       start=+"+ end=+"+ contains=@smlEscape,@Spell
+
+syn match    smlCharacter    +#"[^\\"]"+
+syn match    smlCharacter    +#"\\."+       contains=@smlEscape
+syn match    smlCharacter    +#"\\^."+      contains=@smlEscape
+syn match    smlCharacter    +#"\\\d\{3}"+  contains=@smlEscape
+syn match    smlCharacter    +#"\\u\x\{4}"+ contains=@smlEscape
 
 syn match    smlFunDef       "=>"
 syn match    smlRefAssign    ":="
@@ -152,9 +169,12 @@ syn match    smlKeyChar      ";"
 syn match    smlKeyChar      "\*"
 syn match    smlKeyChar      "="
 
-syn match    smlNumber        "\<-\=\d\+\>"
-syn match    smlNumber        "\<-\=0[x|X]\x\+\>"
-syn match    smlReal          "\<-\=\d\+\.\d*\([eE][-+]\=\d\+\)\=[fl]\=\>"
+syn match    smlNumber        "\~\=\<\d\+\>"
+syn match    smlNumber        "\~\=\<0x\x\+\>"
+syn match    smlWord          "\<0w\d\+\>"
+syn match    smlWord          "\<0wx\x\+\>"
+syn match    smlReal          "\~\=\<\d\+\.\d\+\>"
+syn match    smlReal          "\~\=\<\d\+\%(\.\d\+\)\=[eE]\~\=\d\+\>"
 
 " Synchronization
 syn sync minlines=20
@@ -179,7 +199,7 @@ hi def link smlCommentErr   Error
 hi def link smlEndErr       Error
 hi def link smlThenErr      Error
 
-hi def link smlCharErr      Error
+hi def link smlEscapeErr    Error
 
 hi def link smlComment      Comment
 
@@ -208,8 +228,10 @@ hi def link smlOperator     Keyword
 hi def link smlBoolean      Boolean
 hi def link smlCharacter    Character
 hi def link smlNumber       Number
+hi def link smlWord         Number
 hi def link smlReal         Float
 hi def link smlString       String
+hi def link smlEscape       Special
 hi def link smlType         Type
 hi def link smlTodo         Todo
 hi def link smlEncl         Keyword

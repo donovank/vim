@@ -1,11 +1,19 @@
 /*
  * os_vms_conf.h.  Replaces auto/config.h for VMS
+ *
  */
 
+#if defined(__VMS) || defined(__vms)
+# if !defined(VMS)
+#  define VMS
+# endif
+#endif
+
+#include <decc$types.h>             // Required early for large-file support
+
 #define CASE_INSENSITIVE_FILENAME   // Open VMS is case insensitive
-#define SPACE_IN_FILENAME	    // There could be space between user and passwd
 #define FNAME_ILLEGAL "|*#?%"       // Illegal characters in a file name
-#define BINARY_FILE_IO		    // Use binary fileio
+#define BINARY_FILE_IO              // Use binary fileio
 #define USE_GETCWD
 #define USE_SYSTEM
 #define XPMATTRIBUTES_TYPE XpmAttributes
@@ -24,9 +32,6 @@
 
 // Define when __DATE__ " " __TIME__ can be used
 #define HAVE_DATE_TIME
-
-// Defined to the size of an int
-#define VIM_SIZEOF_INT  4
 
 // #undef USEBCOPY
 #define USEMEMMOVE
@@ -53,9 +58,6 @@
 // Define to `int' if <sys/types.h> doesn't define.
 // #undef uid_t
 
-// Define to `unsigned int' or other type that is 32 bit.
-#define UINT32_T unsigned int
-
 // Define to `int' if <sys/types.h> doesn't define.
 // #undef gid_t
 
@@ -65,17 +67,8 @@
 // Define if you have the nanosleep() function.
 // #undef HAVE_NANOSLEEP
 
-// Define if you can safely include both <sys/time.h> and <time.h>.
-#define TIME_WITH_SYS_TIME
-
 // Define if you can safely include both <sys/time.h> and <sys/select.h>.
 // #undef SYS_SELECT_WITH_SYS_TIME
-
-// Define as the return type of signal handlers (int or void).
-#define RETSIGTYPE void
-
-// Define as the command at the end of signal handlers ("" or "return 0;").
-#define SIGRETURN return
 
 // Define if struct sigcontext is present
 #define HAVE_SIGCONTEXT
@@ -100,7 +93,6 @@
 
 #define TGETENT_ZERO_ERR
 #define HAVE_GETCWD
-#define HAVE_STRCSPN
 #define HAVE_STRTOL
 #define HAVE_TGETENT
 #define HAVE_MEMSET
@@ -119,7 +111,6 @@
 #define HAVE_SETENV
 #define HAVE_SETJMP_H
 #define HAVE_MATH_H
-#define HAVE_FLOAT_FUNCS
 #define HAVE_GETTIMEOFDAY
 #define HAVE_PWD_H
 #define HAVE_NETDB_H
@@ -129,7 +120,6 @@
 #undef	HAVE_SYS_DIR_H
 #undef	HAVE_NDIR_H
 #undef	HAVE_SYS_WAIT_H
-#undef	HAVE_UNION_WAIT
 #undef  HAVE_SYS_SELECT_H
 #undef  HAVE_SYS_UTSNAME_H
 #undef  HAVE_SYS_SYSTEMINFO_H
@@ -148,73 +138,103 @@
 #undef  HAVE_LSTAT
 #undef  HAVE_STDINT_H
 
-// Hardware specific
-#ifdef  VAX
-#undef  HAVE_GETTIMEOFDAY
-#undef  HAVE_USLEEP
-#undef  HAVE_STRCASECMP
-#undef  HAVE_STRINGS_H
-#undef  HAVE_SIGSETJMP
-#undef  HAVE_ISNAN
-#undef  HAVE_XOS_R_H
-#define HAVE_NO_LONG_LONG
+// Default features
+#define FEAT_IPV6
+#define FEAT_XTERM_SAVE
+
+#define VIM_SIZEOF_INT  4
 #define VIM_SIZEOF_LONG 4
-#define LONG_LONG_MIN  (-2147483647-1)
-#define LONG_LONG_MAX  (2147483647)
-#define ULONG_LONG_MAX (4294967295U)
-#else // AXP and IA64
-#define HAVE_GETTIMEOFDAY
-#define HAVE_USLEEP
-#define HAVE_STRCASECMP
-#define HAVE_STRINGS_H
-#define HAVE_SIGSETJMP
-#define HAVE_ISNAN
-#define HAVE_XOS_R_H
-#define HAVE_NO_LONG_LONG
-#define VIM_SIZEOF_LONG 8
-#define LONG_LONG_MIN  (-9223372036854775807-1)
-#define LONG_LONG_MAX  (9223372036854775807)
-#define ULONG_LONG_MAX (18446744073709551615U)
+
+#if __USE_OFF64_T
+# define SIZEOF_OFF_T 8
+#else
+# define SIZEOF_OFF_T 4
 #endif
 
+// Hardware specific
+#if defined(__VAX) || defined(VAX)
+# undef  HAVE_GETTIMEOFDAY
+# undef  HAVE_USLEEP
+# undef  HAVE_STRCASECMP
+# undef  HAVE_STRINGS_H
+# undef  HAVE_SIGSETJMP
+# undef  HAVE_ISNAN
+# undef  HAVE_XOS_R_H
+# define HAVE_NO_LONG_LONG
+# define LONG_LONG_MIN  (-2147483647-1)
+# define LONG_LONG_MAX  (2147483647)
+# define ULONG_LONG_MAX (4294967295U)
+
+#else // ALPHA, IA64, X86_64
+# define HAVE_GETTIMEOFDAY
+# define HAVE_USLEEP
+# define HAVE_STRCASECMP
+# define HAVE_STRINGS_H
+# define HAVE_SIGSETJMP
+# undef  HAVE_XOS_R_H
+# undef  HAVE_NO_LONG_LONG
+# define LONG_LONG_MIN  (-9223372036854775807-1)
+# define LONG_LONG_MAX  (9223372036854775807)
+# define ULONG_LONG_MAX (18446744073709551615U)
+
+# if defined(__DECC) && (__CRTL_VER >= 80500000) && (__STDC_VERSION__ >= 199901L) /* C99 */
+#  define HAVE_ISINF
+#  define HAVE_ISNAN
+# endif
+
+# if defined(X86_64)
+#  define HAVE_FSEEKO
+#  define HAVE_STDINT_H
+#  define HAVE_XOS_R_H
+# endif
+
+#endif /* VAX [else] */
+
 // Compiler specific
-#ifdef  VAXC
-#undef  HAVE_SELECT
-#undef  HAVE_FCNTL_H
-#undef  HAVE_UNISTD_H
-#undef  HAVE_SYS_TIME_H
-#undef  HAVE_LOCALE_H
-#define BROKEN_LOCALE
-#undef  DYNAMIC_ICONV
-#undef	HAVE_STRFTIME
+#if defined(VAXC) || defined(__VAXC)
+# undef  HAVE_SELECT
+# undef  HAVE_FCNTL_H
+# undef  HAVE_UNISTD_H
+# undef  HAVE_SYS_TIME_H
+# undef  HAVE_LOCALE_H
+# define BROKEN_LOCALE
+# undef  DYNAMIC_ICONV
+# undef	HAVE_STRFTIME
 #else   // DECC
-#define HAVE_SELECT
-#define HAVE_FCNTL_H
-#define HAVE_UNISTD_H 1
-#define HAVE_SYS_TIME_H
-#define HAVE_LOCALE_H
-#define BROKEN_LOCALE
-#undef  DYNAMIC_ICONV
-#define	HAVE_STRFTIME
+# define HAVE_SELECT
+# define HAVE_FCNTL_H
+# define HAVE_UNISTD_H 1
+# define HAVE_SYS_TIME_H
+# define HAVE_LOCALE_H
+# define BROKEN_LOCALE
+# undef  DYNAMIC_ICONV
+# define HAVE_STRFTIME
 #endif
 
 #if defined(USE_ICONV)
-#define HAVE_ICONV_H
-#define HAVE_ICONV
+# define HAVE_ICONV_H
+# define HAVE_ICONV
 #else
-#undef HAVE_ICONV_H
-#undef HAVE_ICONV
+# undef HAVE_ICONV_H
+# undef HAVE_ICONV
 #endif
 
 // GUI support defines
 #if defined(FEAT_GUI_MOTIF) || defined(FEAT_GUI_GTK)
-#define X_INCLUDE_GRP_H             // To use getgrgid
-#define XUSE_MTSAFE_API
-#define HAVE_X11
-#define WANT_X11
-#ifdef HAVE_XPM
-#define HAVE_X11_XPM_H
+# define X_INCLUDE_GRP_H  // To use getgrgid
+# define XUSE_MTSAFE_API
+# define HAVE_X11
+# define WANT_X11
+# ifdef  HAVE_XPM
+#  define HAVE_X11_XPM_H
+# endif
+# define USE_FONTSET
+# undef  X_LOCALE
 #endif
-#define USE_FONTSET
-#undef  X_LOCALE
+
+// Define needed types from stdint - older VMS do not have stdint.h
+#ifndef HAVE_STDINT_H
+   typedef unsigned char  uint8_t;
+   typedef unsigned short uint16_t;
+   typedef unsigned int   uint32_t;
 #endif

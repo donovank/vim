@@ -1,4 +1,4 @@
-/* ex_eval.c */
+// ex_eval.c
 int aborting(void);
 void update_force_abort(void);
 int should_abort(int retcode);
@@ -11,7 +11,12 @@ char *get_exception_string(void *value, except_type_T type, char_u *cmdname, int
 int throw_exception(void *value, except_type_T type, char_u *cmdname);
 void discard_current_exception(void);
 void catch_exception(except_T *excp);
+void finish_exception(except_T *excp);
+void exception_state_save(exception_state_T *estate);
+void exception_state_restore(exception_state_T *estate);
+void exception_state_clear(void);
 void report_make_pending(int pending, void *value);
+int cmd_is_name_only(char_u *arg);
 void ex_eval(exarg_T *eap);
 void ex_if(exarg_T *eap);
 void ex_endif(exarg_T *eap);
@@ -35,4 +40,4 @@ int cleanup_conditionals(cstack_T *cstack, int searched_cond, int inclusive);
 void rewind_conditionals(cstack_T *cstack, int idx, int cond_type, int *cond_level);
 void ex_endfunction(exarg_T *eap);
 int has_loop_cmd(char_u *p);
-/* vim: set ft=c : */
+// vim: ft=c

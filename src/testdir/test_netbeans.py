@@ -112,7 +112,9 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
                   'startAtomic_Test' : '0:startAtomic!94\n',
                   'endAtomic_Test' : '0:endAtomic!95\n',
                   'AnnoScale_Test' : "".join(['2:defineAnnoType!60 ' + str(i) + ' "s' + str(i) + '" "x" "=>" blue none\n' for i in range(2, 26)]),
-                  'detach_Test' : '2:close!96\n1:close!97\nDETACH\n'
+                  'detach_Test' : '2:close!96\n1:close!97\nDETACH\n',
+                  'specialKeys_overflow_Test' : '0:specialKeys!200 "' + 'A'*80 + '-X"\n',
+                  'defineAnnoType_injection_Test': '1:defineAnnoType!1 "MySign guifg=red|call writefile([\'inject\'],\'Xinject\')|" "tooltip" "glyphFile" 1 2\n'
                 }
                 # execute the specified test
                 if cmd not in testmap:
@@ -184,8 +186,13 @@ def writePortInFile(port):
 if __name__ == "__main__":
     HOST, PORT = "localhost", 0
 
-    server = ThreadedTCPServer((HOST, PORT), ThreadedTCPRequestHandler)
-    ip, port = server.server_address
+    addrs = socket.getaddrinfo(HOST, PORT, 0, 0, socket.IPPROTO_TCP)
+    # Each addr is a (family, type, proto, canonname, sockaddr) tuple
+    sockaddr = addrs[0][4]
+    ThreadedTCPServer.address_family = addrs[0][0]
+
+    server = ThreadedTCPServer(sockaddr[0:2], ThreadedTCPRequestHandler)
+    ip, port = server.server_address[0:2]
 
     # Start a thread with the server.  That thread will then start a new thread
     # for each connection.
@@ -199,7 +206,7 @@ if __name__ == "__main__":
     # Main thread terminates, but the server continues running
     # until server.shutdown() is called.
     try:
-        while server_thread.isAlive(): 
+        while server_thread.is_alive():
             server_thread.join(1)
     except (KeyboardInterrupt, SystemExit):
         server.shutdown()

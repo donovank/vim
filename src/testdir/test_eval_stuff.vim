@@ -1,6 +1,7 @@
 " Tests for various eval things.
 
-source view_util.vim
+source util/shared.vim
+import './util/vim9.vim' as v9
 
 function s:foo() abort
   try
@@ -24,7 +25,7 @@ func Test_nocatch_restore_silent_emsg()
 endfunc
 
 func Test_mkdir_p()
-  call mkdir('Xmkdir/nested', 'p')
+  call mkdir('Xmkdir/nested', 'pR')
   call assert_true(isdirectory('Xmkdir/nested'))
   try
     " Trying to make existing directories doesn't error
@@ -34,13 +35,70 @@ func Test_mkdir_p()
     call assert_report('mkdir(..., "p") failed for an existing directory')
   endtry
   " 'p' doesn't suppress real errors
-  call writefile([], 'Xfile')
-  call assert_fails('call mkdir("Xfile", "p")', 'E739:')
-  call delete('Xfile')
-  call delete('Xmkdir', 'rf')
+  call writefile([], 'Xmkdirfile', 'D')
+  call assert_fails('call mkdir("Xmkdirfile", "p")', 'E739:')
+
   call assert_equal(0, mkdir(test_null_string()))
   call assert_fails('call mkdir([])', 'E730:')
   call assert_fails('call mkdir("abc", [], [])', 'E745:')
+endfunc
+
+func DoMkdirDel(name)
+  call mkdir(a:name, 'pD')
+  call assert_true(isdirectory(a:name))
+endfunc
+
+func DoMkdirDelAddFile(name)
+  call mkdir(a:name, 'pD')
+  call assert_true(isdirectory(a:name))
+  call writefile(['text'], a:name .. '/file')
+endfunc
+
+func DoMkdirDelRec(name)
+  call mkdir(a:name, 'pR')
+  call assert_true(isdirectory(a:name))
+endfunc
+
+func DoMkdirDelRecAddFile(name)
+  call mkdir(a:name, 'pR')
+  call assert_true(isdirectory(a:name))
+  call writefile(['text'], a:name .. '/file')
+endfunc
+
+func Test_mkdir_defer_del()
+  " Xtopdir/tmp is created thus deleted, not Xtopdir itself
+  call mkdir('Xtopdir', 'R')
+  call DoMkdirDel('Xtopdir/tmp')
+  call assert_true(isdirectory('Xtopdir'))
+  call assert_false(isdirectory('Xtopdir/tmp'))
+
+  " Deletion fails because "tmp" contains "sub"
+  call DoMkdirDel('Xtopdir/tmp/sub')
+  call assert_true(isdirectory('Xtopdir'))
+  call assert_true(isdirectory('Xtopdir/tmp'))
+  call delete('Xtopdir/tmp', 'rf')
+
+  " Deletion fails because "tmp" contains "file"
+  call DoMkdirDelAddFile('Xtopdir/tmp')
+  call assert_true(isdirectory('Xtopdir'))
+  call assert_true(isdirectory('Xtopdir/tmp'))
+  call assert_true(filereadable('Xtopdir/tmp/file'))
+  call delete('Xtopdir/tmp', 'rf')
+
+  " Xtopdir/tmp is created thus deleted, not Xtopdir itself
+  call DoMkdirDelRec('Xtopdir/tmp')
+  call assert_true(isdirectory('Xtopdir'))
+  call assert_false(isdirectory('Xtopdir/tmp'))
+
+  " Deletion works even though "tmp" contains "sub"
+  call DoMkdirDelRec('Xtopdir/tmp/sub')
+  call assert_true(isdirectory('Xtopdir'))
+  call assert_false(isdirectory('Xtopdir/tmp'))
+
+  " Deletion works even though "tmp" contains "file"
+  call DoMkdirDelRecAddFile('Xtopdir/tmp')
+  call assert_true(isdirectory('Xtopdir'))
+  call assert_false(isdirectory('Xtopdir/tmp'))
 endfunc
 
 func Test_line_continuation()
@@ -65,14 +123,70 @@ func Test_E963()
 endfunc
 
 func Test_for_invalid()
-  call assert_fails("for x in 99", 'E1098:')
-  call assert_fails("for x in function('winnr')", 'E1098:')
-  call assert_fails("for x in {'a': 9}", 'E1098:')
+  call assert_fails("for x in 99", 'E1523:')
+  call assert_fails("for x in function('winnr')", 'E1523:')
+  call assert_fails("for x in {'a': 9}", 'E1523:')
+
+  let lines =<< trim END
+    for v:maxcol in range(5)
+    endfor
+  END
+
+  let save_v_maxcol = v:maxcol
+  call v9.CheckLegacyAndVim9Failure(lines, 'E46:')
+  call assert_equal(save_v_maxcol, v:maxcol)
+
+  let lines =<< trim END
+    for g:constvar in range(5)
+    endfor
+  END
+
+  const g:constvar = 10
+  call v9.CheckLegacyAndVim9Failure(lines, 'E741:')
+  call assert_equal(10, g:constvar)
+  unlet g:constvar
+
+  let g:constvar = 10
+  lockvar 0 g:constvar
+  call v9.CheckLegacyAndVim9Failure(lines, 'E1122:')
+  call assert_equal(10, g:constvar)
+  unlet g:constvar
 
   if 0
     /1/5/2/s/\n
   endif
   redraw
+endfunc
+
+func Test_for_over_null_string()
+  let save_enc = &enc
+  set enc=iso8859
+  let cnt = 0
+  for c in test_null_string()
+    let cnt += 1
+  endfor
+  call assert_equal(0, cnt)
+
+  let &enc = save_enc
+endfunc
+
+func Test_for_with_modifier()
+  " this checks has_loop_cmd() works with a modifier
+  let result = []
+  vim9cmd for i in range(3)
+    call extend(result, [i])
+  endfor
+  call assert_equal([0, 1, 2], result)
+endfunc
+
+func Test_for_invalid_line_count()
+  let lines =<< trim END
+      111111111111111111111111 for line in ['one']
+      endfor
+  END
+  call writefile(lines, 'XinvalidFor', 'D')
+  " only test that this doesn't crash
+  call RunVim([], [], '-u NONE -e -s -S XinvalidFor -c qa')
 endfunc
 
 func Test_readfile_binary()
@@ -93,6 +207,12 @@ func Test_readfile_binary()
   call delete('XReadfile_bin')
 endfunc
 
+func Test_readfile_binary_empty()
+  call writefile([], 'Xempty-file', 'D')
+  " This used to compare uninitialized memory in Vim <= 8.2.4065
+  call assert_equal([''], readfile('Xempty-file', 'b'))
+endfunc
+
 func Test_readfile_bom()
   call writefile(["\ufeffFOO", "FOO\ufeffBAR"], 'XReadfile_bom')
   call assert_equal(['FOO', 'FOOBAR'], readfile('XReadfile_bom'))
@@ -100,10 +220,9 @@ func Test_readfile_bom()
 endfunc
 
 func Test_readfile_max()
-  call writefile(range(1, 4), 'XReadfile_max')
+  call writefile(range(1, 4), 'XReadfile_max', 'D')
   call assert_equal(['1', '2'], readfile('XReadfile_max', '', 2))
   call assert_equal(['3', '4'], readfile('XReadfile_max', '', -2))
-  call delete('XReadfile_max')
 endfunc
 
 func Test_let_errmsg()
@@ -141,11 +260,9 @@ func Test_string_concatenation()
   let a..=b
   call assert_equal('ab', a)
 
-  if has('float')
-    let a = 'A'
-    let b = 1.234
-    call assert_equal('A1.234', a .. b)
-  endif
+  let a = 'A'
+  let b = 1.234
+  call assert_equal('A1.234', a .. b)
 endfunc
 
 " Test fix for issue #4507
@@ -167,10 +284,8 @@ func Test_string_concat_scriptversion2()
   call assert_fails('let a .= b', 'E985:')
   call assert_fails('let vers = 1.2.3', 'E488:')
 
-  if has('float')
-    let f = .5
-    call assert_equal(0.5, f)
-  endif
+  let f = .5
+  call assert_equal(0.5, f)
 endfunc
 
 scriptversion 1
@@ -184,9 +299,7 @@ func Test_string_concat_scriptversion1()
   let vers = 1.2.3
   call assert_equal('123', vers)
 
-  if has('float')
-    call assert_fails('let f = .5', 'E15:')
-  endif
+  call assert_fails('let f = .5', 'E15:')
 endfunc
 
 scriptversion 3
@@ -243,9 +356,8 @@ func Test_vvar_scriptversion1()
 endfunc
 
 func Test_scriptversion_fail()
-  call writefile(['scriptversion 9'], 'Xversionscript')
+  call writefile(['scriptversion 9'], 'Xversionscript', 'D')
   call assert_fails('source Xversionscript', 'E999:')
-  call delete('Xversionscript')
 endfunc
 
 func Test_execute_cmd_with_null()
@@ -509,8 +621,8 @@ func Test_setreg_basic()
   call Assert_regput('c', ['==', 'abcC4l-0', "\n", "abcC4l-2\n", "\nabcC4l-3", "abcC4l-4\nabcC4l-4-2", '=='])
 
   call setreg('d', ['abcD4b-0', "\n", "abcD4b-2\n", "\nabcD4b-3", "abcD4b-4\nabcD4b-4-2"], 'b')
-  call Assert_reg('d', "19", "abcD4b-0\n\n\nabcD4b-2\n\n\nabcD4b-3\nabcD4b-4\nabcD4b-4-2", "['abcD4b-0', '\n', 'abcD4b-2\n', '\nabcD4b-3', 'abcD4b-4\nabcD4b-4-2']", "abcD4b-0\n\n\nabcD4b-2\n\n\nabcD4b-3\nabcD4b-4\nabcD4b-4-2", "['abcD4b-0', '\n', 'abcD4b-2\n', '\nabcD4b-3', 'abcD4b-4\nabcD4b-4-2']")
-  call Assert_regput('d', ['==', '=abcD4b-0           =', " \n", " abcD4b-2\n", " \nabcD4b-3", " abcD4b-4\nabcD4b-4-2"])
+  call Assert_reg('d', "20", "abcD4b-0\n\n\nabcD4b-2\n\n\nabcD4b-3\nabcD4b-4\nabcD4b-4-2", "['abcD4b-0', '\n', 'abcD4b-2\n', '\nabcD4b-3', 'abcD4b-4\nabcD4b-4-2']", "abcD4b-0\n\n\nabcD4b-2\n\n\nabcD4b-3\nabcD4b-4\nabcD4b-4-2", "['abcD4b-0', '\n', 'abcD4b-2\n', '\nabcD4b-3', 'abcD4b-4\nabcD4b-4-2']")
+  call Assert_regput('d', ['==', '=abcD4b-0            =', " \n", " abcD4b-2\n", " \nabcD4b-3", " abcD4b-4\nabcD4b-4-2"])
 
   call setreg('e', ['abcE4b10-0', "\n", "abcE4b10-2\n", "\nabcE4b10-3", "abcE4b10-4\nabcE4b10-4-2"], 'b10')
   call Assert_reg('e', "10", "abcE4b10-0\n\n\nabcE4b10-2\n\n\nabcE4b10-3\nabcE4b10-4\nabcE4b10-4-2", "['abcE4b10-0', '\n', 'abcE4b10-2\n', '\nabcE4b10-3', 'abcE4b10-4\nabcE4b10-4-2']", "abcE4b10-0\n\n\nabcE4b10-2\n\n\nabcE4b10-3\nabcE4b10-4\nabcE4b10-4-2", "['abcE4b10-0', '\n', 'abcE4b10-2\n', '\nabcE4b10-3', 'abcE4b10-4\nabcE4b10-4-2']")
@@ -581,6 +693,757 @@ func Test_curly_assignment()
   unlet s:svar
   unlet s:gvar
   unlet g:gvar
+endfunc
+
+func Test_deep_recursion()
+  " this was running out of stack
+  call assert_fails("exe 'if ' .. repeat('(', 1002)", 'E1169: Expression too recursive: ((')
+endfunc
+
+" K_SPECIAL in the modified character used be escaped, which causes
+" double-escaping with feedkeys() or as the return value of an <expr> mapping,
+" and doesn't match what getchar() returns,
+func Test_modified_char_no_escape_special()
+  nnoremap <M-…> <Cmd>let g:got_m_ellipsis += 1<CR>
+  call feedkeys("\<M-…>", 't')
+  call assert_equal("\<M-…>", getchar())
+  let g:got_m_ellipsis = 0
+  call feedkeys("\<M-…>", 'xt')
+  call assert_equal(1, g:got_m_ellipsis)
+  func Func()
+    return "\<M-…>"
+  endfunc
+  nmap <expr> <F2> Func()
+  call feedkeys("\<F2>", 'xt')
+  call assert_equal(2, g:got_m_ellipsis)
+  delfunc Func
+  nunmap <F2>
+  unlet g:got_m_ellipsis
+  nunmap <M-…>
+endfunc
+
+func Test_eval_string_in_special_key()
+  " this was using the '{' inside <> as the start of an interpolated string
+  silent! echo 0{1-$"\<S--{>n|nö% 
+endfunc
+
+func s:Available()
+  return get(g:, "vim_cp_available", v:true)
+endfunc
+
+func s:Paste(reg)
+  let l:t = g:vim_paste
+
+  if l:t == "tuple"
+    return ("c", ["a", "tuple", a:reg])
+
+  elseif l:t == "list"
+    return ["c", ["a", "list", a:reg]]
+
+  elseif l:t == "block"
+    return ("b40", ["a", "block"])
+
+  elseif l:t == "empty"
+    return ("c", [])
+
+  elseif l:t == "invalid"
+    return ("INVALID", [])
+
+  elseif l:t == "invalid2"
+    return ("c", ["test", [1, 2]])
+
+  elseif l:t == "count"
+    let g:vim_paste_count[a:reg] += 1
+    let g:vim_test = "hello"
+    return ("c", ["hello"])
+
+  elseif l:t == "store"
+    let l:s = get(g:, "vim_reg_store", [])
+
+    if (len(l:s) > 0)
+      return (l:s[0], l:s[1])
+    else
+      return ("c", [])
+    endif
+  endif
+
+  if exists("g:vim_paste_recursive")
+    call getreg(a:reg)
+  endif
+endfunc
+
+func s:Copy(reg, type, lines)
+  if exists("g:vim_copy_count")
+    let g:vim_copy_count[a:reg] += 1
+  endif
+  if exists("g:vim_copy_recursive")
+    call setreg(a:reg, a:lines)
+  endif
+
+  let g:vim_copy = {
+        \ "reg": a:reg,
+        \ "type": a:type,
+        \ "lines": a:lines
+        \ }
+  let g:vim_reg_store = (a:type, a:lines)
+endfunc
+
+func Test_clipboard_provider_available()
+  CheckFeature clipboard_provider
+
+  let g:vim_cp_available = v:true
+
+  let v:clipproviders["test"] = {
+        \ "available": function("s:Available"),
+        \ }
+  set clipmethod=test
+
+  call assert_equal("test", v:clipmethod)
+
+  let g:vim_cp_available = v:false
+  clipreset
+  call assert_notequal("test", v:clipmethod)
+
+  " Invalid return value
+  let g:vim_cp_available = "invalid"
+  call assert_fails('set clipmethod=test', "E474:")
+  call assert_notequal("test", v:clipmethod)
+
+  let v:clipproviders["test"] = {}
+  clipreset
+  " Should default to TRUE
+  call assert_equal("test", v:clipmethod)
+
+  set clipmethod&
+endfunc
+
+func Test_clipboard_provider_paste()
+  CheckFeature clipboard_provider
+
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   }
+        \ }
+  set clipmethod=test
+
+  let g:vim_paste = "tuple"
+  call assert_equal(["a", "tuple", "+"], getreg("+", 1, 1))
+  call assert_equal(["a", "tuple", "*"], getreg("*", 1, 1))
+
+  let g:vim_paste = "list"
+  call assert_equal(["a", "list", "+"], getreg("+", 1, 1))
+  call assert_equal(["a", "list", "*"], getreg("*", 1, 1))
+
+  let g:vim_paste = "block"
+  call assert_equal("40", getregtype("+"))
+  call assert_equal("40", getregtype("*"))
+
+  let g:vim_paste = "empty"
+  call assert_equal([], getreg("+", 1, 1))
+  call assert_equal([], getreg("*", 1, 1))
+
+  let g:vim_paste = "invalid"
+  call assert_fails('call getreg("+", 1, 1)', "E474:")
+  call assert_fails('call getreg("*", 1, 1)', "E474:")
+
+  let g:vim_paste = "invalid2"
+  call assert_fails('call getreg("+", 1, 1)', "E730:")
+  call assert_fails('call getreg("*", 1, 1)', "E730:")
+
+  " Test put
+  new
+
+  let g:vim_paste = "tuple"
+  put! *
+
+  call assert_equal(["a", "tuple", "*"], getline(1, 3))
+
+  put +
+
+  call assert_equal(["a", "tuple", "+"], getline(4, 6))
+
+  bw!
+
+  set clipmethod&
+endfunc
+
+func Test_clipboard_provider_copy()
+  CheckFeature clipboard_provider
+
+  function s:copy_cb_to_test_partial(_, reg, type, str)
+    call s:Copy(a:reg, a:type, a:str)
+  endfunction
+
+  let v:clipproviders["test"] = {
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:copy_cb_to_test_partial", [""])
+        \   }
+        \ }
+  set clipmethod=test
+
+  " Test charwise
+  call setreg("+", ["hello", "world!"], "c")
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["hello", "world!"], g:vim_copy.lines)
+  call assert_equal("v", g:vim_copy.type)
+
+  call setreg("*", ["hello", "world!"], "c")
+  call assert_equal("*",g:vim_copy.reg)
+  call assert_equal(["hello", "world!"], g:vim_copy.lines)
+  call assert_equal("v", g:vim_copy.type)
+
+  " Test linewise
+  call setreg("+", ["hello", "world!"], "l")
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["hello", "world!"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  call setreg("*", ["hello", "world!"], "l")
+  call assert_equal("*",g:vim_copy.reg)
+  call assert_equal(["hello", "world!"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  " Test blockwise
+  call setreg("+", ["hello", "world!"], "b40")
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["hello", "world!"], g:vim_copy.lines)
+  call assert_equal("40", g:vim_copy.type)
+
+  call setreg("*", ["hello", "world!"], "b40")
+  call assert_equal("*",g:vim_copy.reg)
+  call assert_equal(["hello", "world!"], g:vim_copy.lines)
+  call assert_equal("40", g:vim_copy.type)
+
+  " Test yanking
+  new
+
+  call setline(1, "TESTING")
+  yank *
+
+  call assert_equal("*",g:vim_copy.reg)
+  call assert_equal(["TESTING"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  call setline(1, "TESTING2")
+  yank +
+
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["TESTING2"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  bw!
+
+  set clipmethod&
+endfunc
+
+" Test on platforms where only the * register is available (+ points to *),
+" and that the clipboard provider feature exposes the + register only when
+" clipmethod is set to a provider. If not, then the plus register points to the
+" star register like normal.
+func Test_clipboard_provider_no_unamedplus()
+  CheckFeature clipboard_provider
+  CheckNotFeature unnamedplus
+  CheckFeature clipboard_working
+
+  let g:vim_paste = "store"
+  let v:clipproviders["test"] = {}
+  set clipmethod=test
+
+  call assert_equal(1, has('unnamedplus'))
+
+  call setreg("+", ["plus"], "c")
+  call setreg("*", ["star"], "c")
+  call assert_equal("plus", getreg("+"))
+  call assert_equal("star", getreg("*"))
+
+  set clipmethod=
+  call assert_equal(0, has('unnamedplus'))
+
+  call setreg("+", ["plus2"], "c")
+  call setreg("*", ["star2"], "c")
+  call assert_equal("star2", getreg("+"))
+  call assert_equal("star2", getreg("*"))
+
+  set clipmethod&
+endfunc
+
+" Same as Test_clipboard_provider_registers() but do it when +clipboard isn't
+" enabled.
+func Test_clipboard_provider_no_clipboard()
+  CheckFeature clipboard_provider
+  CheckNotFeature clipboard
+
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   },
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+
+  call assert_fails('call setreg("+", "")', 'E354:')
+  call assert_fails('call setreg("*", "")', 'E354:')
+
+  let g:vim_paste = "tuple"
+  set clipmethod=test
+
+  call assert_equal(["a", "tuple", "+"], getreg("+", 1, 1))
+  call assert_equal(["a", "tuple", "*"], getreg("*", 1, 1))
+
+  set clipmethod&
+endfunc
+
+" Test if clipboard provider feature doesn't break existing clipboard
+" functionality.
+func Test_clipboard_provider_sys_clipboard()
+  CheckFeature clipboard_provider
+  CheckFeature clipboard_working
+
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   },
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+
+  call setreg("*", "hello world from the * register!", "c")
+  call assert_equal("hello world from the * register!", getreg("*"))
+  call setreg("+", "hello world from the + register!", "c")
+  call assert_equal("hello world from the + register!", getreg("+"))
+
+  let g:vim_paste = "tuple"
+  set clipmethod=test
+
+  call assert_equal(1, has('clipboard_working'))
+  call setreg("*", "hello world!", "c")
+  call assert_equal(["a", "tuple", "*"], getreg("*", 1, 1))
+  call assert_equal(["a", "tuple", "+"], getreg("+", 1, 1))
+
+  new
+  call setline(1, "TESTING")
+  yank *
+
+  call assert_equal("*",g:vim_copy.reg)
+  call assert_equal(["TESTING"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  put *
+
+  call assert_equal(["TESTING", "a", "tuple", "*"], getline(1, 4))
+  bw!
+
+  set clipmethod&
+
+  call setreg("*", "testing 1 2 3", "c")
+  call assert_equal("testing 1 2 3", getreg("*"))
+  call setreg("+", "testing 1 2 3 4 5", "c")
+  call assert_equal("testing 1 2 3 4 5", getreg("+"))
+
+  set clipmethod&
+endfunc
+
+" Test if the provider callback are only called once per register on operations
+" that may try calling them multiple times.
+func Test_clipboard_provider_accessed_once()
+  CheckFeature clipboard_provider
+
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   },
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+  set clipmethod=test
+
+  let g:vim_paste = "count"
+  let g:vim_paste_count = {'*': 0, '+': 0}
+  let g:vim_copy_count = {'*': 0, '+': 0}
+
+  " Test if the paste callback is only called once per register when the
+  " :registers/:display cmd is run.
+  for i in range(1, 10)
+    registers
+
+    call assert_equal(i, g:vim_paste_count['*'])
+    call assert_equal(i, g:vim_paste_count['+'])
+  endfor
+
+  let g:vim_paste_count = {'*': 0, '+': 0}
+  let g:vim_copy_count = {'*': 0, '+': 0}
+
+  " Test same for :global
+  new
+
+  call setline(1, "The quick brown fox jumps over the lazy dog")
+  call execute(':global/quick/:put +')
+  call execute(':global/quick/:put *')
+
+  call assert_equal(1, g:vim_paste_count['+'])
+  call assert_equal(1, g:vim_paste_count['*'])
+
+  call assert_equal(0, g:vim_copy_count['+'])
+  call assert_equal(0, g:vim_copy_count['*'])
+
+  let g:vim_paste_count = {'*': 0, '+': 0}
+
+  call execute(':global/quick/:yank +')
+  call execute(':global/quick/:yank *')
+
+  call assert_equal(1, g:vim_copy_count['+'])
+  call assert_equal(1, g:vim_copy_count['*'])
+
+  call assert_equal(0, g:vim_paste_count['+'])
+  call assert_equal(0, g:vim_paste_count['*'])
+
+  bw!
+
+  new
+  " Test same for changing and deleting text when 'clipboard' is
+  " unnamed/unnamedplus.
+  let g:vim_paste_count = {'*': 0, '+': 0}
+  let g:vim_copy_count = {'*': 0, '+': 0}
+
+  set clipboard=unnamed
+  call setline(1, "testing")
+  normal cw
+
+  call assert_equal(0, g:vim_paste_count['*'])
+  call assert_equal(1, g:vim_copy_count['*'])
+
+  set clipboard=unnamedplus
+  call setline(1, "testing")
+  normal dw
+
+  call assert_equal(0, g:vim_paste_count['+'])
+  call assert_equal(1, g:vim_copy_count['+'])
+
+  bw!
+
+  new
+  " Emitting TextPutPre/TextPutPost/TextYankPost may cause a clipboard access
+  "
+  " Note that TextPutPost will always cause a second clipboard access, since a
+  " TextPutPre may have changed the clipboard, meaning another "paste" call is
+  " needed to make sure everything is up to date.
+  augroup TextAutocmd
+    autocmd!
+    autocmd TextPutPost * let g:putpost = 1
+    autocmd TextPutPre * let g:putpre = 1
+    autocmd TextYankPost * let g:yankpost = 1
+  augroup END
+
+  let g:putpost = 0
+  let g:putpre = 0
+  let g:yankpost = 0
+
+  let g:vim_paste_count = {'*': 0, '+': 0}
+  let g:vim_copy_count = {'*': 0, '+': 0}
+
+  call setline(1, "hello world!")
+
+  yank +
+
+  yank *
+
+  put +
+
+  put *
+
+  call assert_equal(2, g:vim_paste_count['+'])
+  call assert_equal(1, g:vim_copy_count['+'])
+
+  call assert_equal(2, g:vim_paste_count['*'])
+  call assert_equal(1, g:vim_copy_count['*'])
+
+  call assert_equal(1, g:putpost)
+  call assert_equal(1, g:putpre)
+  call assert_equal(1, g:yankpost)
+
+  bw!
+  unlet g:putpost
+  unlet g:putpre
+  unlet g:yankpost
+  autocmd! TextAutocmd
+
+  set clipmethod&
+  set clipboard&
+endfunc
+
+" Test if the copying does not call the paste callback, and pasting does not all
+" the copy callback.
+func Test_clipboard_provider_copy_paste_independent()
+  CheckFeature clipboard_provider
+
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   },
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+  set clipmethod=test
+
+  let g:vim_paste = "count"
+  let g:vim_paste_count = {'*': 0, '+': 0}
+  let g:vim_copy_count = {'*': 0, '+': 0}
+
+  new
+
+  put +
+
+  put *
+
+  bw!
+
+  call getreg("+")
+  call getreg("*")
+
+  call assert_equal(0, g:vim_copy_count['*'])
+  call assert_equal(0, g:vim_copy_count['+'])
+
+  let g:vim_paste_count = {'*': 0, '+': 0}
+
+  " Emitting TextYankPost event may cause a clipboard access
+  augroup Test
+    autocmd!
+    autocmd TextYankPost * let g:test = 2
+  augroup END
+
+  new
+  call setline(1, "The quick brown fox jumps over the lazy dog")
+
+  yank +
+
+  yank *
+
+  bw!
+  autocmd! Test
+
+  call setreg("+", "hello")
+  call setreg("*", "hello")
+
+  call assert_equal(0, g:vim_paste_count['*'])
+  call assert_equal(0, g:vim_paste_count['+'])
+
+  set clipmethod&
+endfunc
+
+" Test if clipboard provider feature works under :redir and execute()
+func Test_clipboard_provider_redir_execute()
+  CheckFeature clipboard_provider
+
+  let v:clipproviders["test"] = {
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+  set clipmethod=test
+
+  redir @+
+  echom "testing"
+  redir END
+
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["", "testing"], g:vim_copy.lines)
+  call assert_equal("v", g:vim_copy.type)
+
+  let @+ = execute("echom 'hello world'")
+
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["", "hello world"], g:vim_copy.lines)
+  call assert_equal("v", g:vim_copy.type)
+
+  set clipmethod&
+endfunc
+
+" Test if clipboard provider feature respects the "unnamed" and "unnamedplus"
+" values in the 'clipboard' option, and ignores the "autoselect" value.
+func Test_clipboard_provider_clipboard_option()
+  CheckFeature clipboard_provider
+
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   },
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+  set clipmethod=test
+  let g:vim_paste = "tuple"
+
+  new
+
+  call setline(1, "hello world!")
+
+  set clipboard=unnamed
+
+  yank
+  call assert_equal("*",g:vim_copy.reg)
+  call assert_equal(["hello world!"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  put
+  call assert_equal(["a", "tuple", "*"], getline(2, 4))
+
+  set clipboard=unnamedplus
+
+  call cursor(1, 0)
+  yank
+  call assert_equal("+",g:vim_copy.reg)
+  call assert_equal(["hello world!"], g:vim_copy.lines)
+  call assert_equal("V", g:vim_copy.type)
+
+  put
+  call assert_equal(["a", "tuple", "+"], getline(2, 4))
+
+  set clipboard=unnamed,unnamedplus
+
+  call setline(1, "testing")
+  call cursor(1, 0)
+  yank
+  call assert_equal(["testing"], g:vim_copy.lines)
+  call assert_equal(["testing"], g:vim_copy.lines)
+
+  if has('clipboard')
+    " Test that autoselect option is ignored, this can happen when visual
+    " selection ends and there is TextYankPost autocmd
+    set clipboard=autoselect
+    let g:autoselect_test = 1
+    au TextYankPost * let g:autoselect_test = 0
+
+    call setline(1, "Hello world!")
+    call cursor(1, 0)
+    call feedkeys("vww\<Esc>", "x!")
+    call assert_equal(1, g:autoselect_test)
+  endif
+
+  " Change and delete operations are tested in
+  " Test_clipboard_provider_accessed_once()
+  bw!
+
+  " Check if only "unnamed" and "unnamedplus" values are allowed when no
+  " +clipboard feature (including cmdline expansion).
+  if !has('clipboard')
+    call assert_fails("set clipboard=autoselect", "E474:")
+
+    call assert_equal(["unnamed,unnamedplus", "unnamed", "unnamedplus"],
+          \ getcompletion('set clipboard=', 'cmdline'))
+  endif
+
+  set clipmethod&
+  set clipboard&
+endfunc
+
+" Test that callback aren't called recursively
+func Test_clipboard_provider_recursive()
+  let v:clipproviders["test"] = {
+        \ "paste": {
+        \       '+': function("s:Paste"),
+        \       '*': function("s:Paste")
+        \   },
+        \ "copy": {
+        \       '+': function("s:Copy"),
+        \       '*': function("s:Copy")
+        \   }
+        \ }
+  set clipmethod=test
+
+  let g:vim_paste = "count"
+  let g:vim_paste_count = {'*': 0, '+': 0}
+  let g:vim_copy_count = {'*': 0, '+': 0}
+  let g:vim_paste_recursive = 1
+  let g:vim_copy_recursive = 1
+
+  call getreg('+')
+  call assert_equal(1, g:vim_paste_count['+'])
+  call setreg('+', 'test')
+  call assert_equal(1, g:vim_copy_count['+'])
+
+  set clipmethod&
+  unlet g:vim_paste_recursive
+  unlet g:vim_copy_recursive
+endfunc
+
+" Test that caching the compiled pattern of "=~" and the match functions
+" does not change the semantics.
+func Test_eval_pattern_cache()
+  let save_ic = &ignorecase
+  defer execute('let &ignorecase = ' .. save_ic)
+
+  " "~" in a pattern stands for the previous substitute string, a compiled
+  " program must not be reused across a :substitute
+  new
+  call setline(1, 'one')
+  s/one/AAA/
+  call assert_true('xAAAy' =~ 'x~y')
+  call assert_false('xBBBy' =~ 'x~y')
+  call setline(1, 'AAA')
+  s/AAA/BBB/
+  call assert_true('xBBBy' =~ 'x~y')
+  call assert_false('xAAAy' =~ 'x~y')
+  bwipe!
+
+  " 'ignorecase' is applied at execution time, also with a cached program
+  set noignorecase
+  call assert_false('ABC' =~ 'abc')
+  set ignorecase
+  call assert_true('ABC' =~ 'abc')
+  call assert_true('ABC' =~ 'abc')
+  set noignorecase
+  call assert_false('ABC' =~ 'abc')
+
+  " changing 'regexpengine' compiles the pattern again
+  for re in [0, 1, 2]
+    exe 'set re=' .. re
+    call assert_true('abc123' =~ 'a\+bc\d\+')
+    call assert_false('xyz' =~ 'a\+bc\d\+')
+  endfor
+  set re&
+
+  " \%.l, \%.c and \%.v compile the current cursor position into the
+  " program, such a pattern must not be reused after the cursor moved
+  new
+  call setline(1, 'abcdef')
+  call cursor(1, 4)
+  call assert_true('abcdef' =~# '\%.cd')
+  call cursor(1, 2)
+  call assert_false('abcdef' =~# '\%.cd')
+  call assert_true('abcdef' =~# '\%.cb')
+  bwipe!
+
+  " when the automatic engine replaces the program by falling back to the
+  " backtracking engine, the replaced program is the one that is kept
+  call test_override('nfa_fail', 1)
+  defer test_override('nfa_fail', 0)
+  for i in range(3)
+    call assert_true('fallback' =~ 'fall\%(back\)\?')
+    call assert_false('nomatch' =~ 'fall\%(back\)\?')
+  endfor
+  call test_override('nfa_fail', 0)
+  for i in range(3)
+    call assert_true('fallback' =~ 'fall\%(back\)\?')
+  endfor
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

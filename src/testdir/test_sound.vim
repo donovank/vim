@@ -1,8 +1,5 @@
 " Tests for the sound feature
 
-source check.vim
-source shared.vim
-
 CheckFeature sound
 
 func PlayCallback(id, result)
@@ -15,9 +12,14 @@ func Test_play_event()
   if has('win32')
     throw 'Skipped: Playing event with callback is not supported on Windows'
   endif
+  let g:result = 0
   let g:playcallback_count = 0
   let g:id = 0
-  let id = 'bell'->sound_playevent('PlayCallback')
+  let event_name = 'bell'
+  if has('osx')
+      let event_name = 'Tink'
+  endif
+  let id = event_name->sound_playevent('PlayCallback')
   if id == 0
     throw 'Skipped: bell event not available'
   endif
@@ -31,8 +33,14 @@ func Test_play_event()
 endfunc
 
 func Test_play_silent()
+  if has('win32') && !has('gui_running')
+    throw 'Skipped: Playing file with callback is not supported on Windows, non-GUI'
+  endif
+
   let fname = fnamemodify('silent.wav', '%p')
   let g:playcallback_count = 0
+  let g:result = -1
+  let g:id = 0
 
   " play without callback
   let id1 = sound_playfile(fname)

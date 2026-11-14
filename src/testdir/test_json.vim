@@ -14,23 +14,21 @@ let s:var5 = "\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
 " surrogate pair
 let s:jsonsp1 = '"\ud83c\udf63"'
 let s:varsp1 = "\xf0\x9f\x8d\xa3"
+" high surrogate followed by non-surrogate is invalid (lone surrogate)
 let s:jsonsp2 = '"\ud83c\u00a0"'
-let s:varsp2 = "\ud83c\u00a0"
 
 let s:jsonmb = '"s¢cĴgё"'
 let s:varmb = "s¢cĴgё"
 let s:jsonnr = '1234'
 let s:varnr = 1234
-if has('float')
-  let s:jsonfl = '12.34'
-  let s:varfl = 12.34
-  let s:jsonneginf = '-Infinity'
-  let s:jsonposinf = 'Infinity'
-  let s:varneginf = -1.0 / 0.0
-  let s:varposinf = 1.0 / 0.0
-  let s:jsonnan = 'NaN'
-  let s:varnan = 0.0 / 0.0
-endif
+let s:jsonfl = '12.34'
+let s:varfl = 12.34
+let s:jsonneginf = '-Infinity'
+let s:jsonposinf = 'Infinity'
+let s:varneginf = -1.0 / 0.0
+let s:varposinf = 1.0 / 0.0
+let s:jsonnan = 'NaN'
+let s:varnan = 0.0 / 0.0
 
 let s:jsonl1 = '[1,"a",3]'
 let s:varl1 = [1, "a", 3]
@@ -82,12 +80,10 @@ func Test_json_encode()
   " no test for surrogate pair, json_encode() doesn't create them.
 
   call assert_equal(s:jsonnr, json_encode(s:varnr))
-  if has('float')
-    call assert_equal(s:jsonfl, json_encode(s:varfl))
-    call assert_equal(s:jsonneginf, json_encode(s:varneginf))
-    call assert_equal(s:jsonposinf, json_encode(s:varposinf))
-    call assert_equal(s:jsonnan, json_encode(s:varnan))
-  endif
+  call assert_equal(s:jsonfl, json_encode(s:varfl))
+  call assert_equal(s:jsonneginf, json_encode(s:varneginf))
+  call assert_equal(s:jsonposinf, json_encode(s:varposinf))
+  call assert_equal(s:jsonnan, json_encode(s:varnan))
 
   call assert_equal(s:jsonl1, json_encode(s:varl1))
   call assert_equal(s:jsonl2, json_encode(s:varl2))
@@ -107,6 +103,9 @@ func Test_json_encode()
   call assert_equal('"café"', json_encode("caf\xe9"))
   let &encoding = save_encoding
 
+  " Invalid utf-8 sequences are replaced with U+FFFD (replacement character)
+  call assert_equal('"foo' . "\ufffd" . '"', json_encode("foo\xAB"))
+
   call assert_fails('echo json_encode(function("tr"))', 'E1161: Cannot json encode a func')
   call assert_fails('echo json_encode([function("tr")])', 'E1161: Cannot json encode a func')
 
@@ -118,6 +117,17 @@ func Test_json_encode()
   call assert_equal("", res)
 endfunc
 
+func Test_json_encode_control_text()
+  let text = '日本語' .. s:var2 .. s:var3 .. s:var4 .. s:var5 .. 'text'
+  let escaped = '日本語' .. s:json2[1:-2] .. s:json3[1:-2]
+        \ .. s:json4[1:-2] .. s:json5[1:-2] .. 'text'
+  let text = repeat(text, 200)
+  let expected = '"' .. repeat(escaped, 200) .. '"'
+  call assert_equal(expected, json_encode(text))
+  call assert_equal(expected, js_encode(text))
+  call assert_equal(text, json_decode(expected))
+endfunc
+
 func Test_json_decode()
   call assert_equal(s:var1, json_decode(s:json1))
   call assert_equal(s:var2, json_decode(s:json2))
@@ -127,12 +137,10 @@ func Test_json_decode()
 
   call assert_equal(s:varmb, json_decode(s:jsonmb))
   call assert_equal(s:varsp1, json_decode(s:jsonsp1))
-  call assert_equal(s:varsp2, json_decode(s:jsonsp2))
+  call assert_fails('call json_decode(s:jsonsp2)', 'E491:')
 
   call assert_equal(s:varnr, json_decode(s:jsonnr))
-  if has('float')
-    call assert_equal(s:varfl, json_decode(s:jsonfl))
-  endif
+  call assert_equal(s:varfl, json_decode(s:jsonfl))
 
   call assert_equal(s:varl1, json_decode(s:jsonl1))
   call assert_equal(s:varl2x, json_decode(s:jsonl2))
@@ -154,6 +162,18 @@ func Test_json_decode()
   call assert_equal(type(v:none), type(json_decode('')))
   call assert_equal("", json_decode('""'))
 
+  " json_decode() requires lowercase keywords (RFC 7159)
+  call assert_fails('call json_decode("True")', 'E491:')
+  call assert_fails('call json_decode("FALSE")', 'E491:')
+  call assert_fails('call json_decode("Null")', 'E491:')
+  call assert_fails('call json_decode("NULL")', 'E491:')
+  call assert_fails('call json_decode("nan")', 'E491:')
+  call assert_fails('call json_decode("NAN")', 'E491:')
+  call assert_fails('call json_decode("infinity")', 'E491:')
+  call assert_fails('call json_decode("INFINITY")', 'E491:')
+  call assert_fails('call json_decode("-infinity")', 'E491:')
+  call assert_fails('call json_decode("-INFINITY")', 'E491:')
+
   " Character in string after \ is ignored if not special.
   call assert_equal("x", json_decode('"\x"'))
 
@@ -167,6 +187,12 @@ func Test_json_decode()
   call assert_equal({'': 'ok'}, json_decode('{"": "ok"}'))
   " but not twice
   call assert_fails("call json_decode('{\"\": \"ok\", \"\": \"bad\"}')", 'E938:')
+
+  " lone surrogate is invalid
+  call assert_fails('call json_decode("\"\\uD800\"")', 'E491:')
+  call assert_fails('call json_decode("\"\\uDC00\"")', 'E491:')
+  call assert_fails('call json_decode("\"\\uD800\\uD800\"")', 'E491:')
+  call assert_fails('call json_decode("\"\\uDC00\\uDC00\"")', 'E491:')
 
   call assert_equal({'n': 1}, json_decode('{"n":1,}'))
   call assert_fails("call json_decode(\"{'n':'1',}\")", 'E491:')
@@ -186,9 +212,7 @@ func Test_json_decode()
   call assert_fails('call json_decode("{\"n\":1,")', "E491:")
   call assert_fails('call json_decode("{\"n\",1}")', "E491:")
   call assert_fails('call json_decode("{-}")', "E491:")
-  if has('float')
-    call assert_fails('call json_decode("{3.14:1}")', "E806:")
-  endif
+  call assert_fails('call json_decode("{3.14:1}")', "E806:")
 
   call assert_fails('call json_decode("[foobar]")', "E491:")
   call assert_fails('call json_decode("[")', "E491:")
@@ -227,12 +251,10 @@ func Test_js_encode()
   " no test for surrogate pair, js_encode() doesn't create them.
 
   call assert_equal(s:jsonnr, js_encode(s:varnr))
-  if has('float')
-    call assert_equal(s:jsonfl, js_encode(s:varfl))
-    call assert_equal(s:jsonneginf, js_encode(s:varneginf))
-    call assert_equal(s:jsonposinf, js_encode(s:varposinf))
-    call assert_equal(s:jsonnan, js_encode(s:varnan))
-  endif
+  call assert_equal(s:jsonfl, js_encode(s:varfl))
+  call assert_equal(s:jsonneginf, js_encode(s:varneginf))
+  call assert_equal(s:jsonposinf, js_encode(s:varposinf))
+  call assert_equal(s:jsonnan, js_encode(s:varnan))
 
   call assert_equal(s:jsonl1, js_encode(s:varl1))
   call assert_equal(s:jsonl2, js_encode(s:varl2))
@@ -264,15 +286,13 @@ func Test_js_decode()
 
   call assert_equal(s:varmb, js_decode(s:jsonmb))
   call assert_equal(s:varsp1, js_decode(s:jsonsp1))
-  call assert_equal(s:varsp2, js_decode(s:jsonsp2))
+  call assert_fails('call js_decode(s:jsonsp2)', 'E491:')
 
   call assert_equal(s:varnr, js_decode(s:jsonnr))
-  if has('float')
-    call assert_equal(s:varfl, js_decode(s:jsonfl))
-    call assert_equal(s:varneginf, js_decode(s:jsonneginf))
-    call assert_equal(s:varposinf, js_decode(s:jsonposinf))
-    call assert_true(isnan(js_decode(s:jsonnan)))
-  endif
+  call assert_equal(s:varfl, js_decode(s:jsonfl))
+  call assert_equal(s:varneginf, js_decode(s:jsonneginf))
+  call assert_equal(s:varposinf, js_decode(s:jsonposinf))
+  call assert_true(isnan(js_decode(s:jsonnan)))
 
   call assert_equal(s:varl1, js_decode(s:jsonl1))
   call assert_equal(s:varl2x, js_decode(s:jsonl2))
@@ -302,6 +322,20 @@ func Test_js_decode()
   call assert_equal("", js_decode("''"))
 
   call assert_equal('n', js_decode("'n'"))
+
+  " js_decode() accepts keywords case-insensitively
+  call assert_equal(v:true, js_decode('True'))
+  call assert_equal(v:true, js_decode('TRUE'))
+  call assert_equal(v:false, js_decode('False'))
+  call assert_equal(v:false, js_decode('FALSE'))
+  call assert_equal(v:null, js_decode('Null'))
+  call assert_equal(v:null, js_decode('NULL'))
+  call assert_true(isnan(js_decode('nan')))
+  call assert_equal(s:varposinf, js_decode('infinity'))
+  call assert_equal(s:varneginf, js_decode('-infinity'))
+  call assert_equal(s:varposinf, js_decode('INFINITY'))
+  call assert_equal(s:varneginf, js_decode('-INFINITY'))
+
   call assert_equal({'n': 1}, js_decode('{"n":1,}'))
   call assert_equal({'n': '1'}, js_decode("{'n':'1',}"))
 
@@ -333,6 +367,36 @@ func Test_json_encode_long()
   " 4000 bytes long is not missing the final NUL.
   let json = json_encode([repeat('a', 3996)])
   call assert_equal(4000, len(json))
+endfunc
+
+func Test_json_encode_depth()
+  let save_mfd = &maxfuncdepth
+  set maxfuncdepth=10
+
+  " Create a deeply nested list that exceeds maxfuncdepth.
+  let l = []
+  let d = {}
+  for i in range(20)
+    let l = [l]
+    let d = {1: d}
+  endfor
+  call assert_fails('call json_encode(l)', 'E132:')
+  call assert_fails('call json_encode(d)', 'E132:')
+
+  let &maxfuncdepth = save_mfd
+endfunc
+
+func Test_json_decode_depth()
+  let save_mfd = &maxfuncdepth
+  set maxfuncdepth=10
+
+  let deep_json = repeat('[', 20) .. '1' .. repeat(']', 20)
+  call assert_fails('call json_decode(deep_json)', 'E132:')
+
+  let deep_json = repeat('{"a":', 20) .. '1' .. repeat('}', 20)
+  call assert_fails('call json_decode(deep_json)', 'E132:')
+
+  let &maxfuncdepth = save_mfd
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

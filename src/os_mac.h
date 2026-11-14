@@ -6,8 +6,11 @@
  * Do ":help credits" in Vim to see a list of people who contributed.
  */
 
+#ifndef OS_MAC__H
+#define OS_MAC__H
+
 // Before Including the MacOS specific files,
-// lets set the OPAQUE_TOOLBOX_STRUCTS to 0 so we
+// let's set the OPAQUE_TOOLBOX_STRUCTS to 0 so we
 // can access the internal structures.
 // (Until fully Carbon compliant)
 // TODO: Can we remove this? (Dany)
@@ -25,7 +28,7 @@
  */
 #if defined(__APPLE_CC__) // for Project Builder and ...
 # include <unistd.h>
-// Get stat.h or something similar. Comment: How come some OS get in in vim.h
+// Get stat.h or something similar. Comment: How come some OS get in vim.h
 # include <sys/stat.h>
 // && defined(HAVE_CURSE)
 // The curses.h from MacOS X provides by default some BACKWARD compatibility
@@ -42,6 +45,11 @@
 #include <stdlib.h>
 #include <time.h>
 #include <dirent.h>
+
+/*
+ * Mach interface
+ */
+#include <mach/task.h>
 
 /*
  * MacOS specific #define
@@ -66,7 +74,6 @@
 
 #define USE_EXE_NAME		    // to find  $VIM
 #define CASE_INSENSITIVE_FILENAME   // ignore case when comparing file names
-#define SPACE_IN_FILENAME
 
 #define USE_FNAME_CASE		// make ":e os_Mac.c" open the file in its
 				// original case, as "os_mac.c"
@@ -76,7 +83,6 @@
 
 #ifndef HAVE_CONFIG_H
 # define HAVE_STRING_H
-# define HAVE_STRCSPN
 # define HAVE_MEMSET
 # define USE_TMPNAM		// use tmpnam() instead of mktemp()
 # define HAVE_FCNTL_H
@@ -140,25 +146,6 @@
 
 #ifndef DFLT_HELPFILE
 # define DFLT_HELPFILE	"$VIMRUNTIME/doc/help.txt"
-#endif
-
-#ifndef FILETYPE_FILE
-# define FILETYPE_FILE	"filetype.vim"
-#endif
-#ifndef FTPLUGIN_FILE
-# define FTPLUGIN_FILE	"ftplugin.vim"
-#endif
-#ifndef INDENT_FILE
-# define INDENT_FILE	"indent.vim"
-#endif
-#ifndef FTOFF_FILE
-# define FTOFF_FILE	"ftoff.vim"
-#endif
-#ifndef FTPLUGOF_FILE
-# define FTPLUGOF_FILE	"ftplugof.vim"
-#endif
-#ifndef INDOFF_FILE
-# define INDOFF_FILE	"indoff.vim"
 #endif
 
 #ifndef SYNTAX_FNAME
@@ -247,8 +234,6 @@
 #endif
 #undef  HAVE_AVAIL_MEM
 #ifndef HAVE_CONFIG_H
-# define RETSIGTYPE void
-# define SIGRETURN  return
 //# define USE_SYSTEM  // Output ship do debugger :(, but not compile
 # define HAVE_SYS_WAIT_H 1 // Attempt
 # define HAVE_TERMIOS_H 1
@@ -266,3 +251,52 @@
 
 // A Mac constant causing big problem to syntax highlighting
 #define UNKNOWN_CREATOR '\?\?\?\?'
+
+#ifdef FEAT_RELTIME
+
+# include <dispatch/dispatch.h>
+
+# if !defined(MAC_OS_X_VERSION_10_12) \
+	|| (MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_12)
+typedef int clockid_t;
+# endif
+# ifndef CLOCK_REALTIME
+#  define CLOCK_REALTIME 0
+# endif
+# ifndef CLOCK_MONOTONIC
+#  define CLOCK_MONOTONIC 1
+# endif
+
+struct itimerspec
+{
+    struct timespec it_interval;  // timer period
+    struct timespec it_value;	  // initial expiration
+};
+
+struct sigevent;
+
+struct macos_timer
+{
+    dispatch_queue_t tim_queue;
+    dispatch_source_t tim_timer;
+    void (*tim_func)(union sigval);
+    void *tim_arg;
+};
+
+typedef struct macos_timer *timer_t;
+
+extern int timer_create(
+    clockid_t clockid,
+    struct sigevent *sevp,
+    timer_t *timerid);
+
+extern int timer_delete(timer_t timerid);
+
+extern int timer_settime(
+    timer_t timerid, int flags,
+    const struct itimerspec *new_value,
+    struct itimerspec *unused);
+
+#endif // FEAT_RELTIME
+
+#endif // OS_MAC__H

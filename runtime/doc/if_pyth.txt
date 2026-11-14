@@ -1,7 +1,7 @@
-*if_pyth.txt*   For Vim version 8.2.  Last change: 2019 Dec 07
+*if_pyth.txt*	For Vim version 9.2.  Last change: 2026 Mar 18
 
 
-		  VIM REFERENCE MANUAL    by Paul Moore
+		  VIM REFERENCE MANUAL	  by Paul Moore
 
 
 The Python Interface to Vim				*python* *Python*
@@ -24,6 +24,10 @@ The Python 2.x interface is available only when Vim was compiled with the
 The Python 3 interface is available only when Vim was compiled with the
 |+python3| feature.
 Both can be available at the same time, but read |python-2-and-3|.
+
+NOTE: Python 2 is old and no longer being developed.  Using Python 3 is highly
+recommended.  Python 2 support will be dropped when it does not work properly
+anymore.
 
 ==============================================================================
 1. Commands						*python-commands*
@@ -63,6 +67,11 @@ To see what version of Python you have: >
 
 There is no need to import sys, it's done by default.
 
+							*python-environment*
+Environment variables set in Vim are not always available in Python.  This
+depends on how Vim and Python were built.  Also see
+https://docs.python.org/3/library/os.html#os.environ
+
 Note: Python is very sensitive to the indenting.  Make sure the "class" line
 and "EOF" do not have any indent.
 
@@ -71,9 +80,9 @@ and "EOF" do not have any indent.
 			{body}" for each line in the [range], with the
 			function arguments being set to the text of each line
 			in turn, without a trailing <EOL>, and the current
-			line number. The function should return a string or
-			None. If a string is returned, it becomes the text of
-			the line in the current turn. The default for [range]
+			line number.  The function should return a string or
+			None.  If a string is returned, it becomes the text of
+			the line in the current turn.  The default for [range]
 			is the whole file: "1,$".
 
 Examples:
@@ -82,7 +91,7 @@ Examples:
 	:pydo if line: return "%4d: %s" % (linenr, line)
 <
 One can use `:pydo` in possible conjunction with `:py` to filter a range using
-python. For example: >
+python.  For example: >
 
 	:py3 << EOF
 	needle = vim.eval('@a')
@@ -174,9 +183,12 @@ vim.eval(str)						*python-eval*
 	Evaluates the expression str using the vim internal expression
 	evaluator (see |expression|).  Returns the expression result as:
 	- a string if the Vim expression evaluates to a string or number
-	- a list if the Vim expression evaluates to a Vim list
-	- a dictionary if the Vim expression evaluates to a Vim dictionary
-	Dictionaries and lists are recursively expanded.
+	- a list if the Vim expression evaluates to a Vim |list|
+	- a tuple if the Vim expression evaluates to a Vim |tuple|
+	- a dictionary if the Vim expression evaluates to a Vim |dict|
+	- a boolean if Vim expression evaluates to |v:true| or |v:false|
+	- `None` if Vim expression evaluates to |v:null| or |v:none|
+	Dictionaries, lists and tuples are recursively expanded.
 	Examples: >
 	    :" value of the 'textwidth' option
 	    :py text_width = vim.eval("&tw")
@@ -187,15 +199,21 @@ vim.eval(str)						*python-eval*
 	    :" Result is a string! Use string.atoi() to convert to a number.
 	    :py str = vim.eval("12+12")
 	    :
+	    :py tuple = vim.eval('(1, 2, 3)')
+	    :
 	    :py tagList = vim.eval('taglist("eval_expr")')
 <	The latter will return a python list of python dicts, for instance:
 	[{'cmd': '/^eval_expr(arg, nextcmd)$/', 'static': 0, 'name': ~
 	'eval_expr', 'kind': 'f', 'filename': './src/eval.c'}] ~
 
+	NOTE: In Vim9 script, local variables in def functions are not visible
+	to python evaluations.  To pass local variables to python evaluations,
+	use the {locals} dict when calling |py3eval()| and friends.
+
 vim.bindeval(str)					*python-bindeval*
 	Like |python-eval|, but returns special objects described in
-	|python-bindeval-objects|. These python objects let you modify (|List|
-	or |Dictionary|) or call (|Funcref|) vim objects.
+	|python-bindeval-objects|.  These python objects let you modify
+	(|List|, |Tuple| or |Dictionary|) or call (|Funcref|) vim objects.
 
 vim.strwidth(str)					*python-strwidth*
 	Like |strwidth()|: returns number of display cells str occupies, tab
@@ -204,14 +222,14 @@ vim.strwidth(str)					*python-strwidth*
 vim.foreach_rtp(callable)				*python-foreach_rtp*
 	Call the given callable for each path in 'runtimepath' until either
 	callable returns something but None, the exception is raised or there
-	are no longer paths. If stopped in case callable returned non-None,
+	are no longer paths.  If stopped in case callable returned non-None,
 	vim.foreach_rtp function returns the value returned by callable.
 
 vim.chdir(*args, **kwargs)				*python-chdir*
 vim.fchdir(*args, **kwargs)				*python-fchdir*
 	Run os.chdir or os.fchdir, then all appropriate vim stuff.
 	Note: you should not use these functions directly, use os.chdir and
-	      os.fchdir instead. Behavior of vim.fchdir is undefined in case
+	      os.fchdir instead.  Behavior of vim.fchdir is undefined in case
 	      os.fchdir does not exist.
 
 Error object of the "vim" module
@@ -249,12 +267,12 @@ vim.windows						*python-windows*
 <	Note: vim.windows object always accesses current tab page.
 	|python-tabpage|.windows objects are bound to parent |python-tabpage|
 	object and always use windows from that tab page (or throw vim.error
-	in case tab page was deleted). You can keep a reference to both
+	in case tab page was deleted).  You can keep a reference to both
 	without keeping a reference to vim module object or |python-tabpage|,
 	they will not lose their properties in this case.
 
 vim.tabpages						*python-tabpages*
-	A sequence object providing access to the list of vim tab pages. The
+	A sequence object providing access to the list of vim tab pages.  The
 	object supports the following operations: >
 	    :py t = vim.tabpages[i]	# Indexing (read-only)
 	    :py t in vim.tabpages	# Membership test
@@ -277,10 +295,10 @@ vim.current						*python-current*
 
 	Note: When assigning to vim.current.{buffer,window,tabpage} it expects
 	valid |python-buffer|, |python-window| or |python-tabpage| objects
-	respectively. Assigning triggers normal (with |autocommand|s)
-	switching to given buffer, window or tab page. It is the only way to
+	respectively.  Assigning triggers normal (with |autocommand|s)
+	switching to given buffer, window or tab page.  It is the only way to
 	switch UI objects in python: you can't assign to
-	|python-tabpage|.window attribute. To switch without triggering
+	|python-tabpage|.window attribute.  To switch without triggering
 	autocommands use >
 	    py << EOF
 	    saved_eventignore = vim.options['eventignore']
@@ -294,16 +312,16 @@ vim.current						*python-current*
 vim.vars						*python-vars*
 vim.vvars						*python-vvars*
 	Dictionary-like objects holding dictionaries with global (|g:|) and
-	vim (|v:|) variables respectively. Identical to `vim.bindeval("g:")`,
+	vim (|v:|) variables respectively.  Identical to `vim.bindeval("g:")`,
 	but faster.
 
 vim.options						*python-options*
 	Object partly supporting mapping protocol (supports setting and
 	getting items) providing a read-write access to global options.
-	Note: unlike |:set| this provides access only to global options. You
+	Note: unlike |:set| this provides access only to global options.  You
 	cannot use this object to obtain or set local options' values or
-	access local-only options in any fashion. Raises KeyError if no global
-	option with such name exists (i.e. does not raise KeyError for
+	access local-only options in any fashion.  Raises KeyError if no
+	global option with such name exists (i.e. does not raise KeyError for
 	|global-local| options and global only options, but does for window-
 	and buffer-local ones).  Use |python-buffer| objects to access to
 	buffer-local options and |python-window| objects to access to
@@ -324,8 +342,8 @@ Output from Python					*python-output*
 
 							*python-input*
 	Input (via sys.stdin, including input() and raw_input()) is not
-	supported, and may cause the program to crash.  This should probably be
-	fixed.
+	supported, and may cause the program to crash.  This should probably
+	be fixed.
 
 		    *python2-directory* *python3-directory* *pythonx-directory*
 Python 'runtimepath' handling				*python-special-path*
@@ -334,7 +352,8 @@ In python vim.VIM_SPECIAL_PATH special directory is used as a replacement for
 the list of paths found in 'runtimepath': with this directory in sys.path and
 vim.path_hooks in sys.path_hooks python will try to load module from
 {rtp}/python2 (or python3) and {rtp}/pythonx (for both python versions) for
-each {rtp} found in 'runtimepath'.
+each {rtp} found in 'runtimepath' (Note: find_module() has been removed from
+imp module around Python 3.12.0a7).
 
 Implementation is similar to the following, but written in C: >
 
@@ -384,26 +403,28 @@ Implementation is similar to the following, but written in C: >
 
     sys.path_hooks.append(hook)
 
-vim.VIM_SPECIAL_PATH					*python-VIM_SPECIAL_PATH*
-	String constant used in conjunction with vim path hook. If path hook
+vim.VIM_SPECIAL_PATH				*python-VIM_SPECIAL_PATH*
+	String constant used in conjunction with vim path hook.  If path hook
 	installed by vim is requested to handle anything but path equal to
-	vim.VIM_SPECIAL_PATH constant it raises ImportError. In the only other
-	case it uses special loader.
+	vim.VIM_SPECIAL_PATH constant it raises ImportError.  In the only
+	other case it uses special loader.
 
 	Note: you must not use value of this constant directly, always use
 	      vim.VIM_SPECIAL_PATH object.
 
 vim.find_module(...)					*python-find_module*
 vim.path_hook(path)					*python-path_hook*
+vim.find_spec(...)					*python-find_spec*
 	Methods or objects used to implement path loading as described above.
 	You should not be using any of these directly except for vim.path_hook
-	in case you need to do something with sys.meta_path. It is not
-	guaranteed that any of the objects will exist in the future vim
+	in case you need to do something with sys.meta_path, vim.find_spec()
+	is available starting with Python 3.7.
+	It is not guaranteed that any of the objects will exist in future vim
 	versions.
 
 vim._get_paths						*python-_get_paths*
 	Methods returning a list of paths which will be searched for by path
-	hook. You should not rely on this method being present in future
+	hook.  You should not rely on this method being present in future
 	versions, but can use it for debugging.
 
 	It returns a list of {rtp}/python2 (or {rtp}/python3) and
@@ -412,7 +433,8 @@ vim._get_paths						*python-_get_paths*
 ==============================================================================
 3. Buffer objects					*python-buffer*
 
-Buffer objects represent vim buffers.  You can obtain them in a number of ways:
+Buffer objects represent vim buffers.  You can obtain them in a number of
+ways:
 	- via vim.current.buffer (|python-current|)
 	- from indexing vim.buffers (|python-buffers|)
 	- from the "buffer" attribute of a window (|python-window|)
@@ -426,9 +448,10 @@ act as if they were lists (yes, they are mutable) of strings, with each
 element being a line of the buffer.  All of the usual sequence operations,
 including indexing, index assignment, slicing and slice assignment, work as
 you would expect.  Note that the result of indexing (slicing) a buffer is a
-string (list of strings).  This has one unusual consequence - b[:] is different
-from b.  In particular, "b[:] = None" deletes the whole of the buffer, whereas
-"b = None" merely updates the variable b, with no effect on the buffer.
+string (list of strings).  This has one unusual consequence - b[:] is
+different from b.  In particular, "b[:] = None" deletes the whole of the
+buffer, whereas "b = None" merely updates the variable b, with no effect on
+the buffer.
 
 Buffer indexes start at zero, as is normal in Python.  This differs from vim
 line numbers, which start from 1.  This is particularly relevant when dealing
@@ -439,17 +462,17 @@ The buffer object attributes are:
 			|buffer-variable|s.
 	b.options	Mapping object (supports item getting, setting and
 			deleting) that provides access to buffer-local options
-			and buffer-local values of |global-local| options. Use
+			and buffer-local values of |global-local| options.  Use
 			|python-window|.options if option is window-local,
-			this object will raise KeyError. If option is
+			this object will raise KeyError.  If option is
 			|global-local| and local value is missing getting it
 			will return None.
-	b.name		String, RW. Contains buffer name (full path).
+	b.name		String, RW.  Contains buffer name (full path).
 			Note: when assigning to b.name |BufFilePre| and
 			|BufFilePost| autocommands are launched.
-	b.number	Buffer number. Can be used as |python-buffers| key.
+	b.number	Buffer number.  Can be used as |python-buffers| key.
 			Read-only.
-	b.valid		True or False. Buffer object becomes invalid when
+	b.valid		True or False.  Buffer object becomes invalid when
 			corresponding buffer is wiped out.
 
 The buffer object methods are:
@@ -515,14 +538,15 @@ The range object methods are:
 
 Range object type is available using "Range" attribute of vim module.
 
-Example (assume r is the current range):
+Example (assume r is the current range): >
 	# Send all lines in a range to the default printer
 	vim.command("%d,%dhardcopy!" % (r.start+1,r.end+1))
 
 ==============================================================================
 5. Window objects					*python-window*
 
-Window objects represent vim windows.  You can obtain them in a number of ways:
+Window objects represent vim windows.  You can obtain them in a number of
+ways:
 	- via vim.current.window (|python-current|)
 	- from indexing vim.windows (|python-windows|)
 	- from indexing "windows" attribute of a tab page (|python-tabpage|)
@@ -672,6 +696,22 @@ vim.List object					*python-List*
         print isinstance(l, vim.List)	# True
         class List(vim.List):		# Subclassing
 
+vim.Tuple object				*python-Tuple*
+    Sequence-like object providing access to vim |Tuple| type.
+    Supports `.locked` attribute, see |python-.locked|. Also supports the
+    following methods:
+        Method          Description ~
+        __new__(), __new__(iterable)
+                        You can use `vim.Tuple()` to create new vim tuples.
+                        Without arguments constructs empty list.
+    Examples: >
+        t = vim.Tuple("abc")		# Constructor, result: ('a', 'b', 'c')
+        print t[1:]			# slicing
+        print t[0]			# getting item
+        for i in t:			# iteration
+        print isinstance(t, vim.Tuple)	# True
+        class Tuple(vim.Tuple):		# Subclassing
+
 vim.Function object				*python-Function*
     Function-like object, acting like vim |Funcref| object. Accepts special
     keyword argument `self`, see |Dictionary-function|. You can also use
@@ -729,6 +769,10 @@ To facilitate bi-directional interface, you can use |pyeval()| and |py3eval()|
 functions to evaluate Python expressions and pass their values to Vim script.
 |pyxeval()| is also available.
 
+You can inject local variables into the evaluation using the optional {locals}
+dict. This can be particularly useful in vim9script where vim.eval
+|python-eval| will not find locals in a def func.
+
 The Python value "None" is converted to v:none.
 
 ==============================================================================
@@ -745,8 +789,10 @@ you can use Vim without this file.
 MS-Windows ~
 
 To use the Python interface the Python DLL must be in your search path.  In a
-console window type "path" to see what directories are used.  The 'pythondll'
-or 'pythonthreedll' option can be also used to specify the Python DLL.
+console window type "path" to see what directories are used.  If the DLL is
+not found in your search path, Vim will check the registry to find the path
+where Python is installed.  The 'pythondll' or 'pythonthreedll' option can be
+also used to specify the Python DLL.
 
 The name of the DLL should match the Python version Vim was compiled with.
 Currently the name for Python 2 is "python27.dll", that is for Python 2.7.
@@ -760,7 +806,21 @@ Unix ~
 The 'pythondll' or 'pythonthreedll' option can be used to specify the Python
 shared library file instead of DYNAMIC_PYTHON_DLL or DYNAMIC_PYTHON3_DLL file
 what were specified at compile time.  The version of the shared library must
-match the Python 2.x or Python 3 version Vim was compiled with.
+match the Python 2.x or Python 3 version (|v:python3_version|) Vim was
+compiled with unless using |python3-stable-abi|.
+
+
+Stable ABI and mixing Python versions ~
+			*python-stable* *python-stable-abi* *python3-stable-abi*
+If Vim was not compiled with Stable ABI (only available for Python 3), the
+version of the Python shared library must match the version that Vim was
+compiled with.  Otherwise, mixing versions could result in unexpected crashes
+and failures.  With Stable ABI, this restriction is relaxed, and any Python 3
+library with version of at least |v:python3_version| will work.  See
+|has-python| for how to check if Stable ABI is supported, or see if version
+output includes |+python3/dyn-stable|.
+On MS-Windows, 'pythonthreedll' will be set to "python3.dll".  When searching
+the DLL from the registry, Vim will search the latest version of Python.
 
 ==============================================================================
 10. Python 3						*python3*
@@ -829,13 +889,26 @@ To work around such problems there are these options:
 Raising SystemExit exception in python isn't endorsed way to quit vim, use: >
 	:py vim.command("qall!")
 <
+							*E1266*
+This error can occur when Python 3 cannot load the required modules.  This
+means that your Python 3 is not correctly installed or there are some mistakes
+in your settings.  Please check the following items:
+1. Make sure that Python 3 is correctly installed.  Also check the version of
+   python.
+2. Check the 'pythonthreedll' option.
+3. Check the 'pythonthreehome' option.
+4. Check the PATH environment variable if you don't set 'pythonthreedll'.
+   On MS-Windows, you can use where.exe to check which dll will be loaded.
+   E.g. >
+	where.exe python310.dll
+5. Check the PYTHONPATH and PYTHONHOME environment variables.
 
 							*has-python*
 You can test what Python version is available with: >
 	if has('python')
 	  echo 'there is Python 2.x'
 	endif
-  	if has('python3')
+	if has('python3')
 	  echo 'there is Python 3.x'
 	endif
 
@@ -852,10 +925,22 @@ python support: >
 	    echo 'Python 2.x dynamically loaded'
 	  endif
 	endif
-  	if has('python3_compiled')
+	if has('python3_compiled')
 	  echo 'compiled with Python 3.x support'
 	  if has('python3_dynamic')
 	    echo 'Python 3.x dynamically loaded'
+	  endif
+	endif
+
+When loading the library dynamically, Vim can be compiled to support Python 3
+Stable ABI (|python3-stable-abi|) which allows you to load a different version
+of Python 3 library than the one Vim was compiled with.  To check it: >
+	if has('python3_dynamic')
+	  if has('python3_stable')
+	    echo 'support Python 3 Stable ABI.'
+	  else
+	    echo 'does not support Python 3 Stable ABI.'
+	    echo 'only use Python 3 version ' .. v:python3_version
 	  endif
 	endif
 
@@ -865,8 +950,8 @@ the runtime library cannot be found.
 ==============================================================================
 11. Python X						*python_x* *pythonx*
 
-Because most python code can be written so that it works with python 2.6+ and
-python 3 the pyx* functions and commands have been written.  They work exactly
+Because most python code can be written so that it works with Python 2.6+ and
+Python 3 the pyx* functions and commands have been written.  They work exactly
 the same as the Python 2 and 3 variants, but select the Python version using
 the 'pyxversion' setting.
 
@@ -905,7 +990,7 @@ The `:pyxdo` command works similar to `:pydo`.
 							*has-pythonx*
 You can test if pyx* commands are available with: >
 	if has('pythonx')
-	  echo 'pyx* commands are available. (Python ' . &pyx . ')'
+	  echo 'pyx* commands are available. (Python ' .. &pyx .. ')'
 	endif
 
 When compiled with only one of |+python| or |+python3|, the has() returns 1.

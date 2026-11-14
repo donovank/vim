@@ -14,7 +14,7 @@
 #include "vim.h"
 #include "version.h"
 
-#if defined(FEAT_CLIENTSERVER) || defined(PROTO)
+#if (defined(FEAT_CLIENTSERVER) && defined(FEAT_X11))
 
 # ifdef FEAT_X11
 #  include <X11/Intrinsic.h>
@@ -157,7 +157,7 @@ static PendingCommand *pendingCommands = NULL;
  * this module:
  */
 
-#define MAX_PROP_WORDS 100000
+# define MAX_PROP_WORDS 100000
 
 struct ServerReply
 {
@@ -221,31 +221,32 @@ serverRegisterName(
     char_u	*p = NULL;
 
     res = DoRegisterName(dpy, name);
-    if (res < 0)
+    if (res >= 0)
+	return OK;
+
+    i = 1;
+    do
     {
-	i = 1;
-	do
+	if (res < -1 || i >= 1000)
 	{
-	    if (res < -1 || i >= 1000)
-	    {
-		msg_attr(_("Unable to register a command server name"),
-							      HL_ATTR(HLF_W));
-		return FAIL;
-	    }
-	    if (p == NULL)
-		p = alloc(STRLEN(name) + 10);
-	    if (p == NULL)
-	    {
-		res = -10;
-		continue;
-	    }
-	    sprintf((char *)p, "%s%d", name, i++);
-	    res = DoRegisterName(dpy, p);
+	    msg_attr(_("Unable to register a command server name"),
+		    HL_ATTR(HLF_W));
+	    return FAIL;
 	}
-	while (res < 0)
-	    ;
-	vim_free(p);
+	if (p == NULL)
+	    p = alloc(STRLEN(name) + 10);
+	if (p == NULL)
+	{
+	    res = -10;
+	    continue;
+	}
+	sprintf((char *)p, "%s%d", name, i++);
+	res = DoRegisterName(dpy, p);
     }
+    while (res < 0)
+	;
+    vim_free(p);
+
     return OK;
 }
 
@@ -254,7 +255,7 @@ DoRegisterName(Display *dpy, char_u *name)
 {
     Window	w;
     XErrorHandler old_handler;
-#define MAX_NAME_LENGTH 100
+# define MAX_NAME_LENGTH 100
     char_u	propInfo[MAX_NAME_LENGTH + 20];
 
     if (commProperty == None)
@@ -310,19 +311,20 @@ DoRegisterName(Display *dpy, char_u *name)
 
     if (!got_x_error)
     {
-#ifdef FEAT_EVAL
-	set_vim_var_string(VV_SEND_SERVER, name, -1);
-#endif
-	serverName = vim_strsave(name);
-#ifdef FEAT_TITLE
+	size_t	namelen;
+
+	namelen = STRLEN(name);
+# ifdef FEAT_EVAL
+	set_vim_var_string(VV_SEND_SERVER, name, (int)namelen);
+# endif
+	serverName = vim_strnsave(name, namelen);
 	need_maketitle = TRUE;
-#endif
 	return 0;
     }
     return -2;
 }
 
-#if defined(FEAT_GUI) || defined(PROTO)
+# if defined(FEAT_GUI)
 /*
  * Clean out new ID from registry and set it as comm win.
  * Change any registered window ID.
@@ -347,7 +349,7 @@ serverChangeRegisteredWindow(
     DeleteAnyLingerer(dpy, newwin);
     if (serverName != NULL)
     {
-	// Reinsert name if we was already registered
+	// Reinsert name if it was already registered
 	(void)LookupName(dpy, serverName, /*delete=*/TRUE, NULL);
 	sprintf((char *)propInfo, "%x %.*s",
 		(int_u)newwin, MAX_NAME_LENGTH, serverName);
@@ -357,7 +359,7 @@ serverChangeRegisteredWindow(
     }
     XUngrabServer(dpy);
 }
-#endif
+# endif
 
 /*
  * Send to an instance of Vim via the X display.
@@ -390,11 +392,12 @@ serverSendToVim(
     if (name == NULL || *name == NUL)
 	name = (char_u *)"GVIM";    // use a default name
 
-    if (commProperty == None && dpy != NULL)
-    {
-	if (SendInit(dpy) < 0)
-	    return -1;
-    }
+    if (commProperty == None && dpy != NULL && SendInit(dpy) < 0)
+	return -1;
+
+# if defined(FEAT_EVAL)
+    ch_log(NULL, "serverSendToVim(%s, %s)", name, cmd);
+# endif
 
     // Execute locally if no display or target is ourselves
     if (dpy == NULL || (serverName != NULL && STRICMP(name, serverName) == 0))
@@ -418,7 +421,7 @@ serverSendToVim(
 	    {
 		LookupName(dpy, loosename ? loosename : name,
 			   /*DELETE=*/TRUE, NULL);
-		vim_free(loosename);
+		VIM_CLEAR(loosename);
 		continue;
 	    }
 	}
@@ -427,7 +430,7 @@ serverSendToVim(
     if (w == None)
     {
 	if (!silent)
-	    semsg(_(e_noserver), name);
+	    semsg(_(e_no_registered_server_named_str), name);
 	return -1;
     }
     else if (loosename != NULL)
@@ -458,7 +461,7 @@ serverSendToVim(
     vim_free(property);
     if (res < 0)
     {
-	emsg(_("E248: Failed to send command to the destination program"));
+	emsg(_(e_failed_to_send_command_to_destination_program));
 	return -1;
     }
 
@@ -496,6 +499,11 @@ serverSendToVim(
 		break;
 	    }
     }
+
+# if defined(FEAT_EVAL)
+    ch_log(NULL, "serverSendToVim() result: %s",
+	    pending.result == NULL ? "NULL" : (char *)pending.result);
+# endif
     if (result != NULL)
 	*result = pending.result;
     else
@@ -556,22 +564,19 @@ ServerWait(
     time_t	    now;
     XEvent	    event;
 
-#define UI_MSEC_DELAY 53
-#define SEND_MSEC_POLL 500
-#ifndef HAVE_SELECT
+# define UI_MSEC_DELAY 53
+# define SEND_MSEC_POLL 500
+# ifdef HAVE_SELECT
+    fd_set	    fds;
+
+    FD_ZERO(&fds);
+    FD_SET(ConnectionNumber(dpy), &fds);
+# else
     struct pollfd   fds;
 
     fds.fd = ConnectionNumber(dpy);
     fds.events = POLLIN;
-#else
-    fd_set	    fds;
-    struct timeval  tv;
-
-    tv.tv_sec = 0;
-    tv.tv_usec =  SEND_MSEC_POLL * 1000;
-    FD_ZERO(&fds);
-    FD_SET(ConnectionNumber(dpy), &fds);
-#endif
+# endif
 
     time(&start);
     while (TRUE)
@@ -588,20 +593,26 @@ ServerWait(
 	if (seconds >= 0 && (now - start) >= seconds)
 	    break;
 
-#ifdef FEAT_TIMERS
+# ifdef FEAT_TIMERS
 	check_due_timer();
-#endif
+# endif
 
 	// Just look out for the answer without calling back into Vim
 	if (localLoop)
 	{
-#ifndef HAVE_SELECT
-	    if (poll(&fds, 1, SEND_MSEC_POLL) < 0)
-		break;
-#else
+# ifdef HAVE_SELECT
+	    struct timeval  tv;
+
+	    // Set the time every call, select() may change it to the remaining
+	    // time.
+	    tv.tv_sec = 0;
+	    tv.tv_usec =  SEND_MSEC_POLL * 1000;
 	    if (select(FD_SETSIZE, &fds, NULL, NULL, &tv) < 0)
 		break;
-#endif
+# else
+	    if (poll(&fds, 1, SEND_MSEC_POLL) < 0)
+		break;
+# endif
 	}
 	else
 	{
@@ -618,9 +629,9 @@ ServerWait(
  * Fetch a list of all the Vim instance names currently registered for the
  * display.
  *
- * Returns a newline separated list in allocated memory or NULL.
+ * Returns a list of strings or NULL on failure.
  */
-    char_u *
+    list_T *
 serverGetVimNames(Display *dpy)
 {
     char_u	*regProp;
@@ -628,13 +639,17 @@ serverGetVimNames(Display *dpy)
     char_u	*p;
     long_u	numItems;
     int_u	w;
-    garray_T	ga;
+    list_T	*list;
 
     if (registryProperty == None)
     {
 	if (SendInit(dpy) < 0)
 	    return NULL;
     }
+
+    list = list_alloc();
+    if (list == NULL)
+	return NULL;
 
     /*
      * Read the registry property.
@@ -645,29 +660,24 @@ serverGetVimNames(Display *dpy)
     /*
      * Scan all of the names out of the property.
      */
-    ga_init2(&ga, 1, 100);
     for (p = regProp; (long_u)(p - regProp) < numItems; p++)
     {
 	entry = p;
-	while (*p != 0 && !isspace(*p))
+	while (*p != 0 && !SAFE_isspace(*p))
 	    p++;
 	if (*p != 0)
 	{
 	    w = None;
 	    sscanf((char *)entry, "%x", &w);
 	    if (WindowValid(dpy, (Window)w))
-	    {
-		ga_concat(&ga, p + 1);
-		ga_concat(&ga, (char_u *)"\n");
-	    }
+		list_append_string(list, p + 1, -1);
 	    while (*p != 0)
 		p++;
 	}
     }
     if (regProp != empty_prop)
 	XFree(regProp);
-    ga_append(&ga, NUL);
-    return ga.ga_data;
+    return list;
 }
 
 /////////////////////////////////////////////////////////////
@@ -722,7 +732,7 @@ serverStrToWin(char_u *str)
 
     sscanf((char *)str, "0x%x", &id);
     if (id == None)
-	semsg(_("E573: Invalid server id used: %s"), str);
+	semsg(_(e_invalid_server_id_used_str), str);
 
     return (Window)id;
 }
@@ -749,17 +759,17 @@ serverSendReply(char_u *name, char_u *str)
 	return -1;
 
     length = STRLEN(p_enc) + STRLEN(str) + 14;
-    if ((property = alloc(length + 30)) != NULL)
-    {
-	sprintf((char *)property, "%cn%c-E %s%c-n %s%c-w %x",
-			    0, 0, p_enc, 0, str, 0, (unsigned int)commWindow);
-	// Add length of what "%x" resulted in.
-	length += STRLEN(property + length);
-	res = AppendPropCarefully(dpy, win, commProperty, property, length + 1);
-	vim_free(property);
-	return res;
-    }
-    return -1;
+    if ((property = alloc(length + 30)) == NULL)
+	return -1;
+
+    sprintf((char *)property, "%cn%c-E %s%c-n %s%c-w %x",
+	    0, 0, p_enc, 0, str, 0, (unsigned int)commWindow);
+    // Add length of what "%x" resulted in.
+    length += STRLEN(property + length);
+    res = AppendPropCarefully(dpy, win, commProperty, property, length + 1);
+    vim_free(property);
+
+    return res;
 }
 
     static int
@@ -773,7 +783,7 @@ WaitForReply(void *p)
 /*
  * Wait for replies from id (win)
  * When "timeout" is non-zero wait up to this many seconds.
- * Return 0 and the malloc'ed string when a reply is available.
+ * Return 0 and the allocated string in "*str" when a reply is available.
  * Return -1 if the window becomes invalid while waiting.
  */
     int
@@ -873,7 +883,7 @@ SendInit(Display *dpy)
     // Make window recognizable as a vim window
     XChangeProperty(dpy, commWindow, vimProperty, XA_STRING,
 		    8, PropModeReplace, (char_u *)VIM_VERSION_SHORT,
-			(int)STRLEN(VIM_VERSION_SHORT) + 1);
+			(int)STRLEN_LITERAL(VIM_VERSION_SHORT) + 1);
 
     XSync(dpy, False);
     (void)XSetErrorHandler(old_handler);
@@ -920,7 +930,7 @@ LookupName(
     for (p = regProp; (long_u)(p - regProp) < numItems; )
     {
 	entry = p;
-	while (*p != 0 && !isspace(*p))
+	while (*p != 0 && !SAFE_isspace(*p))
 	    p++;
 	if (*p != 0 && STRICMP(name, p + 1) == 0)
 	{
@@ -937,13 +947,14 @@ LookupName(
 	for (p = regProp; (long_u)(p - regProp) < numItems; )
 	{
 	    entry = p;
-	    while (*p != 0 && !isspace(*p))
+	    while (*p != 0 && !SAFE_isspace(*p))
 		p++;
 	    if (*p != 0 && IsSerialName(p + 1)
 		    && STRNICMP(name, p + 1, STRLEN(name)) == 0)
 	    {
-		sscanf((char *)entry, "%x", &returnValue);
-		*loose = vim_strsave(p + 1);
+		if (sscanf((char *)entry, "%x", &returnValue) == 1
+			&& returnValue != (int_u)None)
+		    *loose = vim_strsave(p + 1);
 		break;
 	    }
 	    while (*p != 0)
@@ -1091,7 +1102,7 @@ GetRegProp(
 	    XFree(*regPropp);
 	XDeleteProperty(dpy, RootWindow(dpy, 0), registryProperty);
 	if (domsg)
-	    emsg(_("E251: VIM instance registry property is badly formed.  Deleted!"));
+	    emsg(_(e_vim_instance_registry_property_is_badly_formed_deleted));
 	return FAIL;
     }
     return OK;
@@ -1220,6 +1231,10 @@ server_parse_message(
     int		code;
     char_u	*tofree;
 
+# if defined(FEAT_EVAL)
+    ch_log(NULL, "server_parse_message() numItems: %ld", numItems);
+# endif
+
     /*
      * Several commands and results could arrive in the property at
      * one time;  each iteration through the outer loop handles a
@@ -1239,7 +1254,7 @@ server_parse_message(
 	    continue;
 	}
 
-	if ((*p == 'c' || *p == 'k') && (p[1] == 0))
+	if ((*p == 'c' || *p == 'k') && p[1] == 0)
 	{
 	    Window	resWindow;
 	    char_u	*name, *script, *serial, *end;
@@ -1260,6 +1275,9 @@ server_parse_message(
 	    enc = NULL;
 	    while ((long_u)(p - propInfo) < numItems && *p == '-')
 	    {
+# if defined(FEAT_EVAL)
+		ch_log(NULL, "server_parse_message() item: %c, %s", p[-2], p);
+# endif
 		switch (p[1])
 		{
 		    case 'r':
@@ -1315,7 +1333,7 @@ server_parse_message(
 
 			// Initialize the result property.
 			ga_init2(&reply, 1, 100);
-			(void)ga_grow(&reply, 50 + STRLEN(p_enc));
+			(void)ga_grow(&reply, 50 + STRLEN(p_enc) + STRLEN(serial));
 			sprintf(reply.ga_data, "%cr%c-E %s%c-s %s%c-r ",
 						   0, 0, p_enc, 0, serial, 0);
 			reply.ga_len = 14 + STRLEN(p_enc) + STRLEN(serial);
@@ -1325,9 +1343,10 @@ server_parse_message(
 			    ga_concat(&reply, res);
 			else
 			{
-			    ga_concat(&reply, (char_u *)_(e_invexprmsg));
+			    ga_concat(&reply,
+				   (char_u *)_(e_invalid_expression_received));
 			    ga_append(&reply, 0);
-			    ga_concat(&reply, (char_u *)"-c 1");
+			    GA_CONCAT_LITERAL(&reply, "-c 1");
 			}
 			ga_append(&reply, NUL);
 			(void)AppendPropCarefully(dpy, resWindow, commProperty,

@@ -46,10 +46,6 @@
 
 #include <signal.h>
 
-#ifdef __CYGWIN32__
-# include <sys/termios.h>
-#endif
-
 #ifdef HAVE_SYS_IOCTL_H
 # include <sys/ioctl.h>
 #endif
@@ -186,13 +182,13 @@ setup_slavepty(int fd)
 }
 
 #if defined(HAVE_POSIX_OPENPT) && !defined(PTY_DONE)
-#define PTY_DONE
+# define PTY_DONE
     int
 mch_openpty(char **ttyn)
 {
-    int		f;
-    char	*m;
-    RETSIGTYPE (*sigcld) SIGPROTOARG;
+    int			f;
+    char		*m;
+    sighandler_T	sigcld;
     static char TtyName[32];  // used for opening a new pty-pair
 
     if ((f = posix_openpt(O_RDWR | O_NOCTTY | O_EXTRA)) == -1)
@@ -200,14 +196,14 @@ mch_openpty(char **ttyn)
 
     // SIGCHLD set to SIG_DFL for grantpt() because it fork()s and
     // exec()s pt_chmod
-    sigcld = signal(SIGCHLD, SIG_DFL);
+    sigcld = mch_signal(SIGCHLD, SIG_DFL);
     if ((m = ptsname(f)) == NULL || grantpt(f) || unlockpt(f))
     {
-	signal(SIGCHLD, sigcld);
+	mch_signal(SIGCHLD, sigcld);
 	close(f);
 	return -1;
     }
-    signal(SIGCHLD, sigcld);
+    mch_signal(SIGCHLD, sigcld);
     vim_strncpy((char_u *)TtyName, (char_u *)m, sizeof(TtyName) - 1);
     initmaster(f);
     *ttyn = TtyName;
@@ -216,7 +212,7 @@ mch_openpty(char **ttyn)
 #endif
 
 #if defined(OSX) && !defined(PTY_DONE)
-#define PTY_DONE
+# define PTY_DONE
     int
 mch_openpty(char **ttyn)
 {
@@ -233,7 +229,7 @@ mch_openpty(char **ttyn)
 
 #if (defined(sequent) || defined(_SEQUENT_)) && defined(HAVE_GETPSEUDOTTY) \
 	&& !defined(PTY_DONE)
-#define PTY_DONE
+# define PTY_DONE
     int
 mch_openpty(char **ttyn)
 {
@@ -245,9 +241,9 @@ mch_openpty(char **ttyn)
 
     if ((f = getpseudotty(&s, &m)) < 0)
 	return -1;
-#ifdef _SEQUENT_
+# ifdef _SEQUENT_
     fvhangup(s);
-#endif
+# endif
     vim_strncpy((char_u *)PtyName, (char_u *)m, sizeof(PtyName) - 1);
     vim_strncpy((char_u *)TtyName, (char_u *)s, sizeof(TtyName) - 1);
     initmaster(f);
@@ -256,33 +252,8 @@ mch_openpty(char **ttyn)
 }
 #endif
 
-#if defined(__sgi) && !defined(PTY_DONE)
-#define PTY_DONE
-    int
-mch_openpty(char **ttyn)
-{
-    int f;
-    char *name;
-    RETSIGTYPE (*sigcld) SIGPROTOARG;
-
-    /*
-     * SIGCHLD set to SIG_DFL for _getpty() because it may fork() and
-     * exec() /usr/adm/mkpts
-     */
-    sigcld = signal(SIGCHLD, SIG_DFL);
-    name = _getpty(&f, O_RDWR | O_NONBLOCK | O_EXTRA, 0600, 0);
-    signal(SIGCHLD, sigcld);
-
-    if (name == 0)
-	return -1;
-    initmaster(f);
-    *ttyn = name;
-    return f;
-}
-#endif
-
 #if defined(MIPS) && defined(HAVE_DEV_PTC) && !defined(PTY_DONE)
-#define PTY_DONE
+# define PTY_DONE
     int
 mch_openpty(char **ttyn)
 {
@@ -310,13 +281,13 @@ mch_openpty(char **ttyn)
 
 // NOTE: Even though HPUX can have /dev/ptmx, the code below doesn't work!
 // Same for Mac OS X Leopard (10.5).
-#define PTY_DONE
+# define PTY_DONE
     int
 mch_openpty(char **ttyn)
 {
-    int		f;
-    char	*m;
-    RETSIGTYPE (*sigcld) SIGPROTOARG;
+    int			f;
+    char		*m;
+    sighandler_T	sigcld;
     // used for opening a new pty-pair:
     static char TtyName[32];
 
@@ -327,14 +298,14 @@ mch_openpty(char **ttyn)
      * SIGCHLD set to SIG_DFL for grantpt() because it fork()s and
      * exec()s pt_chmod
      */
-    sigcld = signal(SIGCHLD, SIG_DFL);
+    sigcld = mch_signal(SIGCHLD, SIG_DFL);
     if ((m = ptsname(f)) == NULL || grantpt(f) || unlockpt(f))
     {
-	signal(SIGCHLD, sigcld);
+	mch_signal(SIGCHLD, sigcld);
 	close(f);
 	return -1;
     }
-    signal(SIGCHLD, sigcld);
+    mch_signal(SIGCHLD, sigcld);
     vim_strncpy((char_u *)TtyName, (char_u *)m, sizeof(TtyName) - 1);
     initmaster(f);
     *ttyn = TtyName;
@@ -343,11 +314,11 @@ mch_openpty(char **ttyn)
 #endif
 
 #if defined(_AIX) && defined(HAVE_DEV_PTC) && !defined(PTY_DONE)
-#define PTY_DONE
+# define PTY_DONE
 
-#ifdef _IBMR2
+# ifdef _IBMR2
 static int aixhack = -1;
-#endif
+# endif
 
     int
 mch_openpty(char **ttyn)
@@ -383,15 +354,15 @@ mch_openpty(char **ttyn)
 #ifndef PTY_DONE
 
 # ifdef hpux
-static char PtyProto[] = "/dev/ptym/ptyXY";
-static char TtyProto[] = "/dev/pty/ttyXY";
+static const char PtyProto[] = "/dev/ptym/ptyXY";
+static const char TtyProto[] = "/dev/pty/ttyXY";
 # else
-#  ifdef(__HAIKU__)
-static char PtyProto[] = "/dev/pt/XY";
-static char TtyProto[] = "/dev/tt/XY";
+#  ifdef __HAIKU__
+static const char PtyProto[] = "/dev/pt/XY";
+static const char TtyProto[] = "/dev/tt/XY";
 #  else
-static char PtyProto[] = "/dev/ptyXY";
-static char TtyProto[] = "/dev/ttyXY";
+static const char PtyProto[] = "/dev/ptyXY";
+static const char TtyProto[] = "/dev/ttyXY";
 #  endif
 # endif
 
@@ -404,8 +375,8 @@ mch_openpty(char **ttyn)
     static char PtyName[32];
     static char TtyName[32];
 
-    strcpy(PtyName, PtyProto);
-    strcpy(TtyName, TtyProto);
+    vim_strncpy((char_u *)PtyName, (char_u *)PtyProto, sizeof(PtyName) - 1);
+    vim_strncpy((char_u *)TtyName, (char_u *)TtyProto, sizeof(TtyName) - 1);
     for (p = PtyName; *p != 'X'; p++)
 	;
     for (q = TtyName; *q != 'X'; q++)
@@ -423,7 +394,7 @@ mch_openpty(char **ttyn)
 		close(f);
 		continue;
 	    }
-#if defined(SUN_SYSTEM) && defined(TIOCGPGRP) && !defined(SUNOS3)
+# if defined(SUN_SYSTEM) && defined(TIOCGPGRP) && !defined(SUNOS3)
 	    // Hack to ensure that the slave side of the pty is
 	    // unused. May not work in anything other than SunOS4.1
 	    {
@@ -436,7 +407,7 @@ mch_openpty(char **ttyn)
 		    continue;
 		}
 	    }
-#endif
+# endif
 	    initmaster(f);
 	    *ttyn = TtyName;
 	    return f;
@@ -452,7 +423,7 @@ mch_openpty(char **ttyn)
     int
 mch_isatty(int fd)
 {
-# if defined(I_STR) && defined(HAVE_SYS_PTMS_H) && defined(HAVE_SVR4_PTYS) \
+#if defined(I_STR) && defined(HAVE_SYS_PTMS_H) && defined(HAVE_SVR4_PTYS) \
 	&& defined(SUN_SYSTEM)
     // On SunOS, isatty() for /dev/ptmx returns false or sometimes can hang up
     // in the inner ioctl(), and therefore first determine whether "fd" is a
@@ -468,7 +439,7 @@ mch_isatty(int fd)
 	// Trick: return 2 in order to advice the caller that "fd" is a master
 	// device. cf. src/os_unix.c:get_tty_fd()
 	return 2;
-# endif
+#endif
     return isatty(fd);
 }
 

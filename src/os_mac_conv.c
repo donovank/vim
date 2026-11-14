@@ -17,19 +17,10 @@
 
 #include "vim.h"
 
-#if !defined(PROTO)
-# include <CoreServices/CoreServices.h>
-#endif
+#include <CoreServices/CoreServices.h>
 
 
-#if defined(MACOS_CONVERT) || defined(PROTO)
-
-# ifdef PROTO
-// A few dummy types to be able to generate function prototypes.
-typedef int UniChar;
-typedef int *TECObjectRef;
-typedef int CFStringRef;
-# endif
+#if defined(MACOS_CONVERT)
 
 static char_u	    *mac_utf16_to_utf8(UniChar *from, size_t fromLen, size_t *actualLen);
 static UniChar	    *mac_utf8_to_utf16(char_u *from, size_t fromLen, size_t *actualLen);
@@ -107,7 +98,8 @@ mac_string_convert(
     //  Determine output buffer size
     CFStringGetBytes(cfstr, convertRange, to, NULL, FALSE, NULL, 0, (CFIndex *)&buflen);
     retval = (buflen > 0) ? alloc(buflen) : NULL;
-    if (retval == NULL) {
+    if (retval == NULL)
+    {
 	CFRelease(cfstr);
 	return NULL;
     }
@@ -258,7 +250,7 @@ enc2macroman(
 		kCFStringEncodingMacRoman,
 		0, // no lossy conversion
 		0, // not external representation (since vim
-		   // handles this internally
+		   // handles this internally)
 		to, maxtolen, &l))
     {
 	CFRelease(cfstr);
@@ -362,7 +354,9 @@ mac_utf16_to_enc(
 	}
 	else
 	{
-	    result = string_convert(&conv, utf8_str, (int *)&utf8_len);
+	    int len = utf8_len;
+	    result = string_convert(&conv, utf8_str, &len);
+	    utf8_len = len;
 	    vim_free(utf8_str);
 	}
 
@@ -543,7 +537,8 @@ mac_utf8_to_utf16(
     utf8_str = CFStringCreateWithBytes(NULL, from, fromLen,
 	    kCFStringEncodingUTF8, FALSE);
 
-    if (utf8_str == NULL) {
+    if (utf8_str == NULL)
+    {
 	if (actualLen)
 	    *actualLen = 0;
 	return NULL;
@@ -568,28 +563,28 @@ mac_utf8_to_utf16(
     void
 mac_lang_init(void)
 {
-    if (mch_getenv((char_u *)"LANG") == NULL)
-    {
-	char	buf[50];
+    if (mch_getenv((char_u *)"LANG") != NULL)
+	return;
 
-	// $LANG is not set, either because it was unset or Vim was started
-	// from the Dock.  Query the system locale.
-	if (LocaleRefGetPartString(NULL,
-		    kLocaleLanguageMask | kLocaleLanguageVariantMask |
-		    kLocaleRegionMask | kLocaleRegionVariantMask,
-		    sizeof(buf) - 10, buf) == noErr && *buf)
-	{
-	    if (strcasestr(buf, "utf-8") == NULL)
-		strcat(buf, ".UTF-8");
-	    vim_setenv((char_u *)"LANG", (char_u *)buf);
-#   ifdef HAVE_LOCALE_H
-	    setlocale(LC_ALL, "");
-#   endif
-#   if defined(FEAT_FLOAT) && defined(LC_NUMERIC)
-	    // Make sure strtod() uses a decimal point, not a comma.
-	    setlocale(LC_NUMERIC, "C");
-#   endif
-	}
+    char	buf[50];
+
+    // $LANG is not set, either because it was unset or Vim was started
+    // from the Dock.  Query the system locale.
+    if (LocaleRefGetPartString(NULL,
+		kLocaleLanguageMask | kLocaleLanguageVariantMask |
+		kLocaleRegionMask | kLocaleRegionVariantMask,
+		sizeof(buf) - 10, buf) == noErr && *buf)
+    {
+	if (strcasestr(buf, "utf-8") == NULL)
+	    strcat(buf, ".UTF-8");
+	vim_setenv((char_u *)"LANG", (char_u *)buf);
+#ifdef HAVE_LOCALE_H
+	setlocale(LC_ALL, "");
+#endif
+#if defined(LC_NUMERIC)
+	// Make sure strtod() uses a decimal point, not a comma.
+	setlocale(LC_NUMERIC, "C");
+#endif
     }
 }
 #endif // MACOS_CONVERT

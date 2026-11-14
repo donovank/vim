@@ -1,10 +1,9 @@
 " Test spell checking
 " Note: this file uses latin1 encoding, but is used with utf-8 encoding.
 
-source check.vim
 CheckFeature spell
 
-source screendump.vim
+source util/screendump.vim
 
 func TearDown()
   set nospell
@@ -14,6 +13,8 @@ func TearDown()
   call delete('Xtest.latin1.add.spl')
   call delete('Xtest.latin1.spl')
   call delete('Xtest.latin1.sug')
+  " set 'encoding' to clear the word list
+  set encoding=utf-8
 endfunc
 
 func Test_wrap_search()
@@ -70,6 +71,16 @@ func Test_z_equal_on_invalid_utf8_word()
   bwipe!
 endfunc
 
+func Test_z_equal_on_single_character()
+  " this was decrementing the index below zero
+  new
+  norm a0\Ê
+  norm zW
+  norm z=
+
+  bwipe!
+endfunc
+
 " Test spellbadword() with argument
 func Test_spellbadword()
   set spell
@@ -120,6 +131,26 @@ foobar/?
   set spell&
 endfunc
 
+func Test_spell_camelcase()
+  set spell spelloptions=camel
+  let words = [
+      \ 'UPPER',
+      \ 'lower',
+      \ 'mixedCase',
+      \ 'HTML',
+      \ 'XMLHttpRequest',
+      \ 'foo123bar',
+      \ '12345678',
+      \ 'HELLO123world',
+      \]
+
+  for word in words
+    call assert_equal(['', ''],  spellbadword(word))
+  endfor
+
+  set spell& spelloptions&
+endfunc
+
 func Test_spell_file_missing()
   let s:spell_file_missing = 0
   augroup TestSpellFileMissing
@@ -135,28 +166,60 @@ func Test_spell_file_missing()
   augroup TestSpellFileMissing
     autocmd! SpellFileMissing * bwipe
   augroup END
-  call assert_fails('set spell spelllang=ab_cd', 'E797:')
+  call assert_fails('set spell spelllang=ab_cd', 'E937:')
 
+  " clean up
+  augroup TestSpellFileMissing
+    autocmd! SpellFileMissing
+  augroup END
   augroup! TestSpellFileMissing
   unlet s:spell_file_missing
   set spell& spelllang&
   %bwipe!
 endfunc
 
+func Test_spell_file_missing_bwipe()
+  " this was using a window that was wiped out in a SpellFileMissing autocmd
+  set spelllang=xy
+  au SpellFileMissing * n0
+  set spell
+  au SpellFileMissing * bw
+  snext somefile
+
+  au! SpellFileMissing
+  bwipe!
+  set nospell spelllang=en
+endfunc
+
 func Test_spelldump()
+  " In case the spell file is not found avoid getting the download dialog, we
+  " would get stuck at the prompt.
+  let g:en_not_found = 0
+  augroup TestSpellFileMissing
+    au! SpellFileMissing * let g:en_not_found = 1
+  augroup END
   set spell spelllang=en
   spellrare! emacs
+  if g:en_not_found
+    call assert_report("Could not find English spell file")
+  else
+    spelldump
 
-  spelldump
+    " Check assumption about region: 1: us, 2: au, 3: ca, 4: gb, 5: nz.
+    call assert_equal('/regions=usaucagbnz', getline(1))
+    call assert_notequal(0, search('^theater/1$'))    " US English only.
+    call assert_notequal(0, search('^theatre/2345$')) " AU, CA, GB or NZ English.
 
-  " Check assumption about region: 1: us, 2: au, 3: ca, 4: gb, 5: nz.
-  call assert_equal('/regions=usaucagbnz', getline(1))
-  call assert_notequal(0, search('^theater/1$'))    " US English only.
-  call assert_notequal(0, search('^theatre/2345$')) " AU, CA, GB or NZ English.
+    call assert_notequal(0, search('^emacs/?$'))      " ? for a rare word.
+    call assert_notequal(0, search('^the the/!$'))    " ! for a wrong word.
+  endif
 
-  call assert_notequal(0, search('^emacs/?$'))      " ? for a rare word.
-  call assert_notequal(0, search('^the the/!$'))    " ! for a wrong word.
-
+  " clean up
+  unlet g:en_not_found
+  augroup TestSpellFileMissing
+    autocmd! SpellFileMissing
+  augroup END
+  augroup! TestSpellFileMissing
   bwipe
   set spell&
 endfunc
@@ -165,18 +228,37 @@ func Test_spelldump_bang()
   new
   call setline(1, 'This is a sample sentence.')
   redraw
+
+  " In case the spell file is not found avoid getting the download dialog, we
+  " would get stuck at the prompt.
+  let g:en_not_found = 0
+  augroup TestSpellFileMissing
+    au! SpellFileMissing * let g:en_not_found = 1
+  augroup END
+
   set spell
-  redraw
-  spelldump!
 
-  " :spelldump! includes the number of times a word was found while updating
-  " the screen.
-  " Common word count starts at 10, regular word count starts at 0.
-  call assert_notequal(0, search("^is\t11$"))    " common word found once.
-  call assert_notequal(0, search("^the\t10$"))   " common word never found.
-  call assert_notequal(0, search("^sample\t1$")) " regular word found once.
-  call assert_equal(0, search("^screen\t"))      " regular word never found.
+  if g:en_not_found
+    call assert_report("Could not find English spell file")
+  else
+    redraw
+    spelldump!
 
+    " :spelldump! includes the number of times a word was found while updating
+    " the screen.
+    " Common word count starts at 10, regular word count starts at 0.
+    call assert_notequal(0, search("^is\t11$"))    " common word found once.
+    call assert_notequal(0, search("^the\t10$"))   " common word never found.
+    call assert_notequal(0, search("^sample\t1$")) " regular word found once.
+    call assert_equal(0, search("^screen\t"))      " regular word never found.
+  endif
+
+  " clean up
+  unlet g:en_not_found
+  augroup TestSpellFileMissing
+    autocmd! SpellFileMissing
+  augroup END
+  augroup! TestSpellFileMissing
   %bwipe!
   set spell&
 endfunc
@@ -211,14 +293,27 @@ func Test_compl_with_CTRL_X_CTRL_K_using_spell()
   call assert_equal(['theater'], getline(1, '$'))
   set spelllang=en_gb
   call feedkeys("Stheat\<c-x>\<c-k>\<esc>", 'tnx')
-  " FIXME: commented out, expected theatre bug got theater. See issue #7025.
-  " call assert_equal(['theatre'], getline(1, '$'))
+  call assert_equal(['theatre'], getline(1, '$'))
 
   bwipe!
   set spell& spelllang& dictionary& ignorecase&
 endfunc
 
-func Test_spellreall()
+func Test_compl_with_CTRL_X_s()
+  new
+  set spell spelllang=en_us showmode
+  inoremap <buffer><F2> <Cmd>let g:msg = Screenline(&lines)<CR>
+
+  call feedkeys("STheatre\<C-X>s\<F2>\<C-Y>\<Esc>", 'tx')
+  call assert_equal(['Theater'], getline(1, '$'))
+  call assert_match('(^S^N^P)', g:msg)
+
+  bwipe!
+  set spell& spelllang& showmode&
+  unlet g:msg
+endfunc
+
+func Test_spellrepall()
   new
   set spell
   call assert_fails('spellrepall', 'E752:')
@@ -233,6 +328,18 @@ func Test_spellreall()
   call assert_fails('spellrepall', 'E753:')
   set spell&
   bwipe!
+endfunc
+
+func Test_spell_dump_word_length()
+  " this was running over MAXWLEN
+  new
+  noremap 0 0a0zW0000000
+  sil! norm 0z=0
+  sil norm 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  sil! norm 0z=0
+
+  bwipe!
+  nunmap 0
 endfunc
 
 " Test spellsuggest({word} [, {max} [, {capital}]])
@@ -266,6 +373,11 @@ func Test_spellsuggest()
   call assert_equal(['third', 'THIRD'], spellsuggest('tHIrd', 2))
   call assert_equal(['Third'], spellsuggest('THird', 1))
   call assert_equal(['All'],      spellsuggest('ALl', 1))
+
+  " Special suggestion for repeated 'the the'.
+  call assert_inrange(0, 2, index(spellsuggest('the the',   3), 'the'))
+  call assert_inrange(0, 2, index(spellsuggest('the   the', 3), 'the'))
+  call assert_inrange(0, 2, index(spellsuggest('The the',   3), 'The'))
 
   call assert_fails("call spellsuggest('maxch', [])", 'E745:')
   call assert_fails("call spellsuggest('maxch', 2, [])", 'E745:')
@@ -412,7 +524,7 @@ func Test_spellsuggest_option_expr()
   bwipe!
 endfunc
 
-" Test for 'spellsuggest' expr errrors
+" Test for 'spellsuggest' expr errors
 func Test_spellsuggest_expr_errors()
   " 'spellsuggest'
   func MySuggest()
@@ -439,6 +551,31 @@ func Test_spellsuggest_expr_errors()
   delfunc MySuggest
   delfunc MySuggest2
   delfunc MySuggest3
+endfunc
+
+func Test_spellsuggest_timeout()
+  set spellsuggest=timeout:30
+  set spellsuggest=timeout:-123
+  set spellsuggest=timeout:999999
+  call assert_fails('set spellsuggest=timeout', 'E474:')
+  call assert_fails('set spellsuggest=timeout:x', 'E474:')
+  call assert_fails('set spellsuggest=timeout:-x', 'E474:')
+  call assert_fails('set spellsuggest=timeout:--9', 'E474:')
+endfunc
+
+func Test_spellsuggest_visual_end_of_line()
+  let enc_save = &encoding
+  set encoding=iso8859
+
+  " This was reading beyond the end of the line.
+  norm R00000000000
+  sil norm 0
+  sil! norm i00000)
+  sil! norm i00000)
+  call feedkeys("\<CR>")
+  norm z=
+
+  let &encoding = enc_save
 endfunc
 
 func Test_spellinfo()
@@ -670,8 +807,8 @@ endfunc
 func Test_zz_sal_and_addition()
   set enc=latin1
   set spellfile=
-  call writefile(g:test_data_dic1, "Xtest.dic")
-  call writefile(g:test_data_aff_sal, "Xtest.aff")
+  call writefile(g:test_data_dic1, "Xtest.dic", 'D')
+  call writefile(g:test_data_aff_sal, "Xtest.aff", 'D')
   mkspell! Xtest Xtest
   set spl=Xtest.latin1.spl spell
   call assert_equal('kbltykk', soundfold('goobledygoook'))
@@ -679,7 +816,7 @@ func Test_zz_sal_and_addition()
   call assert_equal('*fls kswts tl', soundfold('oeverloos gezwets edale'))
 
   "also use an addition file
-  call writefile(["/regions=usgbnz", "elequint/2", "elekwint/3"], "Xtest.latin1.add")
+  call writefile(["/regions=usgbnz", "elequint/2", "elekwint/3"], "Xtest.latin1.add", 'D')
   mkspell! Xtest.latin1.add.spl Xtest.latin1.add
 
   bwipe!
@@ -703,6 +840,10 @@ func Test_zz_sal_and_addition()
   set spl=Xtest_ca.latin1.spl
   call assert_equal("elequint", FirstSpellWord())
   call assert_equal("elekwint", SecondSpellWord())
+
+  bwipe!
+  set spellfile=
+  set spl&
 endfunc
 
 func Test_spellfile_value()
@@ -712,10 +853,9 @@ endfunc
 
 func Test_region_error()
   messages clear
-  call writefile(["/regions=usgbnz", "elequint/0"], "Xtest.latin1.add")
+  call writefile(["/regions=usgbnz", "elequint/0"], "Xtest.latin1.add", 'D')
   mkspell! Xtest.latin1.add.spl Xtest.latin1.add
   call assert_match('Invalid region nr in Xtest.latin1.add line 2: 0', execute('messages'))
-  call delete('Xtest.latin1.add')
   call delete('Xtest.latin1.add.spl')
 endfunc
 
@@ -766,6 +906,39 @@ func Test_spell_long_word()
   redraw!
   bwipe!
   set nospell
+endfunc
+
+func Test_spellsuggest_too_deep()
+  " This was incrementing "depth" over MAXWLEN.
+  new
+  norm s000G00ý000000000000
+  try
+    sil norm ..vzG................vvzG0     v z=
+  catch /E759:/
+  endtry
+  bwipe!
+endfunc
+
+func Test_spell_good_word_invalid()
+  " This was adding a word with a 0x02 byte, which causes havoc.
+  enew
+  norm o0
+  sil! norm rzzWs00/
+  2
+  sil! norm VzGprzzW
+  sil! norm z=
+
+  bwipe!
+endfunc
+
+func Test_spell_good_word_slash()
+  " This caused E1280.
+  new
+  norm afoo /
+  1
+  norm zG
+
+  bwipe!
 endfunc
 
 func LoadAffAndDic(aff_contents, dic_contents)
@@ -820,6 +993,7 @@ func Test_spell_screendump()
   CheckScreendump
 
   let lines =<< trim END
+       call test_override('alloc_lines', 1)
        call setline(1, [
              \ "This is some text without any spell errors.  Everything",
              \ "should just be black, nothing wrong here.",
@@ -830,13 +1004,102 @@ func Test_spell_screendump()
              \ ])
        set spell spelllang=en_nz
   END
-  call writefile(lines, 'XtestSpell')
+  call writefile(lines, 'XtestSpell', 'D')
   let buf = RunVimInTerminal('-S XtestSpell', {'rows': 8})
   call VerifyScreenDump(buf, 'Test_spell_1', {})
 
   " clean up
   call StopVimInTerminal(buf)
-  call delete('XtestSpell')
+endfunc
+
+func Test_spell_screendump_spellcap()
+  CheckScreendump
+
+  let lines =<< trim END
+       call test_override('alloc_lines', 1)
+       call setline(1, [
+             \ "   This line has a sepll error. and missing caps and trailing spaces.   ",
+             \ "another missing cap here.",
+             \ "",
+             \ "and here.",
+             \ "    ",
+             \ "and here."
+             \ ])
+       set spell spelllang=en
+  END
+  call writefile(lines, 'XtestSpellCap', 'D')
+  let buf = RunVimInTerminal('-S XtestSpellCap', {'rows': 8})
+  call VerifyScreenDump(buf, 'Test_spell_2', {})
+
+  " After adding word missing Cap in next line is updated
+  call term_sendkeys(buf, "3GANot\<Esc>")
+  call VerifyScreenDump(buf, 'Test_spell_3', {})
+
+  " Deleting a full stop removes missing Cap in next line
+  call term_sendkeys(buf, "5Gdd\<C-L>k$x")
+  call VerifyScreenDump(buf, 'Test_spell_4', {})
+
+  " Undo also updates the next line (go to command line to remove message)
+  call term_sendkeys(buf, "u:\<Esc>")
+  call VerifyScreenDump(buf, 'Test_spell_5', {})
+
+  " Folding an empty line does not remove Cap in next line
+  call term_sendkeys(buf, "uzfk:\<Esc>")
+  call VerifyScreenDump(buf, 'Test_spell_6', {})
+
+  " Folding the end of a sentence does not remove Cap in next line
+  " and editing a line does not remove Cap in current line
+  call term_sendkeys(buf, "Jzfkk$x")
+  call VerifyScreenDump(buf, 'Test_spell_7', {})
+
+  " Cap is correctly applied in the first row of a window
+  call term_sendkeys(buf, "\<C-E>\<C-L>")
+  call VerifyScreenDump(buf, 'Test_spell_8', {})
+
+  " Adding an empty line does not remove Cap in "mod_bot" area
+  call term_sendkeys(buf, "zbO\<Esc>")
+  call VerifyScreenDump(buf, 'Test_spell_9', {})
+
+  " Multiple empty lines does not remove Cap in the line after
+  call term_sendkeys(buf, "O\<Esc>\<C-L>")
+  call VerifyScreenDump(buf, 'Test_spell_10', {})
+
+  " clean up
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_spell_compatible()
+  CheckScreendump
+
+  let lines =<< trim END
+       call test_override('alloc_lines', 1)
+       call setline(1, [
+             \ "test "->repeat(20),
+             \ "",
+             \ "end",
+             \ ])
+       set spell cpo+=$
+  END
+  call writefile(lines, 'XtestSpellComp', 'D')
+  let buf = RunVimInTerminal('-S XtestSpellComp', {'rows': 8})
+
+  call term_sendkeys(buf, "51|C")
+  call VerifyScreenDump(buf, 'Test_spell_compatible_1', {})
+
+  call term_sendkeys(buf, "x")
+  call VerifyScreenDump(buf, 'Test_spell_compatible_2', {})
+
+  " clean up
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_z_equal_with_large_count()
+  split
+  set spell
+  call setline(1, "ff")
+  norm 0z=337203685477580
+  set nospell
+  bwipe!
 endfunc
 
 let g:test_data_aff1 = [
@@ -1306,5 +1569,67 @@ let g:test_data_aff_sal = [
       \"SAL ZZ-                  _",
       \"SAL Z                    S",
       \ ]
+
+func Test_suggest_spell_restore()
+  norm! z=
+  call assert_equal(0, &spell)
+  set spelllang=
+  sil! norm! z=
+  call assert_equal(0, &spell)
+  set spelllang=en
+  call setline(1, ['1','2'])
+  norm! vjz=
+  call assert_equal(0, &spell)
+  set spelllang&
+  bwipe!
+endfunc
+
+" A crafted .spl with a self-referential BY_INDEX node in the PREFIXTREE drove
+" dump_prefixes() past its MAXWLEN-sized depth arrays (stack out-of-bounds
+" write).  The tree parses cleanly (shared refs aren't recursed); the walk
+" happens on :spelldump.  Reaching the assert means no OOB.  Same class as the
+" tree_count_words() fix (9.2.0653).
+func Test_spelldump_prefixtree_overflow()
+  CheckUnix
+  let save_rtp = &runtimepath
+  call mkdir('Xrtp/spell', 'pR')
+  " VIMspell + v50, SN_PREFCOND(prefixcnt=1), SN_END,
+  " LWORDTREE word "a" with affixID=1 (so dump_prefixes runs),
+  " empty KWORDTREE, PREFIXTREE child BY_INDEX -> nodeidx 0 (self-cycle), 'A'
+  let spl = eval('0z56494D7370656C6C32030000000003000100FF00000004'
+        \ .. '0161010220010000000000000002010100000041')
+  call writefile(spl, 'Xrtp/spell/xx.utf-8.spl', 'b')
+
+  new
+  set runtimepath+=./Xrtp
+  set spelllang=xx
+  set spell
+  spelldump
+  call assert_true(line('$') > 1)
+
+  set spell& spelllang&
+  let &runtimepath = save_rtp
+  bwipe!
+  bwipe!
+endfunc
+
+" This was using the cursor position from before a SpellFileMissing
+" autocommand made the line shorter.
+func Test_spell_file_missing_z_equal()
+  new
+  call setline(1, repeat('a', 40))
+  call cursor(1, 30)
+  set spelllang=xy
+  au SpellFileMissing * call setline(1, 'ab')
+
+  " The language cannot be loaded, so z= reports E756; the invalid cursor
+  " position was used before that error reached the script level.
+  silent! norm! z=
+  call assert_equal('ab', getline(1))
+
+  au! SpellFileMissing
+  set nospell spelllang=en
+  bwipe!
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

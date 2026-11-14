@@ -1,6 +1,12 @@
 " Test :hardcopy
 
-source check.vim
+func s:HasPostscript()
+  if has('postscript') || has('pango')
+    return
+  endif
+  throw 'Skipped: hardcopy backend does not use postscript'
+endfunc
+command -nargs=0 HasPostscript call s:HasPostscript()
 
 func Test_printoptions()
   edit test_hardcopy.vim
@@ -99,7 +105,7 @@ func Test_printmbcharset()
 endfunc
 
 func Test_printexpr()
-  CheckFeature postscript
+  HasPostscript
 
   " Not a very useful printexpr value, but enough to test
   " hardcopy with 'printexpr'.
@@ -112,7 +118,7 @@ func Test_printexpr()
   set printexpr=PrintFile(v:fname_in)
 
   help help
-  hardcopy dummy args
+  hardcopy! dummy args
   call assert_equal(['Test printexpr: dummy args'],
   \                 readfile('Xhardcopy_printexpr'))
   call delete('Xhardcopy_printexpr')
@@ -123,14 +129,22 @@ func Test_printexpr()
     return 1
   endfunc
   set printexpr=PrintFails(v:fname_in)
-  call assert_fails('hardcopy', 'E365:')
+  call assert_fails('hardcopy!', 'E365:')
+
+  " Using a script-local function
+  func s:NewPrintExpr()
+  endfunc
+  set printexpr=s:NewPrintExpr()
+  call assert_equal(expand('<SID>') .. 'NewPrintExpr()', &printexpr)
+  set printexpr=<SID>NewPrintExpr()
+  call assert_equal(expand('<SID>') .. 'NewPrintExpr()', &printexpr)
 
   set printexpr&
   bwipe
 endfunc
 
 func Test_errors()
-  CheckFeature postscript
+  HasPostscript
 
   edit test_hardcopy.vim
   call assert_fails('hardcopy >', 'E324:')
@@ -144,7 +158,7 @@ func Test_dark_background()
   for bg in ['dark', 'light']
     exe 'set background=' .. bg
 
-    if has('postscript')
+    if has('postscript') || has('pango')
       hardcopy > Xhardcopy_dark_background
       let lines = readfile('Xhardcopy_dark_background')
       call assert_true(len(lines) > 20)
@@ -158,10 +172,10 @@ func Test_dark_background()
 endfun
 
 func Test_empty_buffer()
-  CheckFeature postscript
+  HasPostscript
 
   new
-  call assert_equal("\nNo text to be printed", execute('hardcopy'))
+  call assert_equal("\nNo text to be printed", execute('hardcopy!'))
   bwipe
 endfunc
 
@@ -176,7 +190,7 @@ func Test_printheader_parsing()
 endfunc
 
 func Test_fname_with_spaces()
-  CheckFeature postscript
+  HasPostscript
 
   split t\ e\ s\ t.txt
   call setline(1, ['just', 'some', 'text'])
@@ -199,6 +213,40 @@ func Test_illegal_byte()
 
   bwipe!
   call delete('Xpstest')
+endfunc
+
+func Test_printoptions_portrait()
+  HasPostscript
+  edit test_hardcopy.vim
+  syn on
+
+  set printoptions=portrait:y
+  1,50hardcopy > Xhardcopy_printoptions_portrait
+  let lines = readfile('Xhardcopy_printoptions_portrait')
+
+  call assert_true(match(lines, 'Orientation: Portrait') != -1)
+  if has('postscript')
+    call assert_true(match(lines, 'BoundingBox: 59 49 564 800') != -1)
+  endif
+  call assert_true(match(lines, 'DocumentMedia: A4') != -1)
+  call assert_true(match(lines, 'PageMedia: A4') != -1)
+  call delete('Xhardcopy_printoptions_portrait')
+
+  set printoptions=portrait:n
+  1,50hardcopy > Xhardcopy_printoptions_portrait
+  let lines = readfile('Xhardcopy_printoptions_portrait')
+  call delete('Xhardcopy_printoptions_portrait')
+
+  call assert_true(match(lines, 'Orientation: Landscape') != -1)
+  if has('postscript')
+    call assert_true(match(lines, 'BoundingBox: 59 42 590 756') != -1)
+  endif
+  call assert_true(match(lines, 'DocumentMedia: A4') != -1)
+  call assert_true(match(lines, 'PageMedia: A4') != -1)
+  call delete('Xhardcopy_printoptions_portrait')
+
+  set printoptions&
+  bwipe
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

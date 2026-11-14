@@ -1,11 +1,6 @@
 " Test signal handling.
 
-source check.vim
-source term_util.vim
-
 CheckUnix
-
-source shared.vim
 
 " Check whether a signal is available on this system.
 func HasSignal(signal)
@@ -49,6 +44,44 @@ func Test_signal_WINCH()
   endif
 endfunc
 
+" Test that the terminal being resized while Vim is starting up does not leave
+" the scroll region at the old size, which caused lines below the old size not
+" to be drawn.
+func Test_signal_WINCH_during_startup()
+  CheckRunVimInTerminal
+  if !HasSignal('WINCH')
+    throw 'Skipped: WINCH signal not supported'
+  endif
+
+  " The --cmd argument is executed after Vim got the terminal size.  Signal
+  " when that happened and wait until the terminal was resized, so that this
+  " happens before Vim sets the scroll region.
+  let lines =<< trim END
+    call writefile([], 'XwinchStarted')
+    while !filereadable('XwinchResized')
+      sleep 10m
+    endwhile
+  END
+  call writefile(lines, 'XsetupWinch', 'D')
+  call writefile(range(1, 30), 'XwinchStartup', 'D')
+  defer delete('XwinchStarted')
+  defer delete('XwinchResized')
+
+  let cmd = '--cmd "source XsetupWinch" XwinchStartup'
+  let buf = RunVimInTerminal(cmd, {'rows': 6, 'wait_for_ruler': 0})
+  call WaitForAssert({-> assert_true(filereadable('XwinchStarted'))})
+  " This resizes the pty right away, Vim gets SIGWINCH before continuing.
+  call term_setsize(buf, 15, 75)
+  call writefile([], 'XwinchResized')
+
+  call WaitForAssert({-> assert_equal('14', term_getline(buf, 14))})
+  for lnum in range(1, 14)
+    call assert_equal(string(lnum), term_getline(buf, lnum))
+  endfor
+
+  call StopVimInTerminal(buf)
+endfunc
+
 " Test signal PWR, which should update the swap file.
 func Test_signal_PWR()
   if !HasSignal('PWR')
@@ -85,24 +118,70 @@ func Test_signal_INT()
     throw 'Skipped: INT signal not supported'
   endif
 
-  " Skip the test when running with valgrind as signal INT is not received
-  " somehow by Vim when running with valgrind.
-  let cmd = GetVimCommand()
-  if cmd =~ 'valgrind'
-    throw 'Skipped: cannot test signal INT with valgrind'
-  endif
-
   let buf = RunVimInTerminal('', {'rows': 6})
   let pid_vim = term_getjob(buf)->job_info().process
 
   " Check that an endless loop in Vim is interrupted by signal INT.
+  call term_sendkeys(buf, ":call setline(1, 'running')\n")
   call term_sendkeys(buf, ":while 1 | endwhile\n")
   call WaitForAssert({-> assert_equal(':while 1 | endwhile', term_getline(buf, 6))})
   exe 'silent !kill -s INT ' .. pid_vim
-  call term_sendkeys(buf, ":call setline(1, 'INTERUPTED')\n")
-  call WaitForAssert({-> assert_equal('INTERUPTED', term_getline(buf, 1))})
+  sleep 50m
+  call term_sendkeys(buf, ":call setline(1, 'INTERRUPTED')\n")
+  call WaitForAssert({-> assert_equal('INTERRUPTED', term_getline(buf, 1))})
 
   call StopVimInTerminal(buf)
+endfunc
+
+" Test signal TSTP. Handler sets got_tstp.
+func Test_signal_TSTP()
+  CheckRunVimInTerminal
+  if !HasSignal('TSTP')
+    throw 'Skipped: TSTP signal not supported'
+  endif
+
+  " If test fails once, it can leave temporary files and trying to rerun
+  " the test would then fail again if they are not deleted first.
+  call delete('.Xsig_TERM.swp')
+  call delete('XsetupAucmd')
+  call delete('XautoOut1')
+  call delete('XautoOut2')
+  let lines =<< trim END
+    au VimSuspend * call writefile(["VimSuspend triggered"], "XautoOut1", "as")
+    au VimResume * call writefile(["VimResume triggered"], "XautoOut2", "as")
+  END
+  call writefile(lines, 'XsetupAucmd', 'D')
+
+  let buf = RunVimInTerminal('-S XsetupAucmd Xsig_TERM', {'rows': 6})
+  let pid_vim = term_getjob(buf)->job_info().process
+
+  call term_sendkeys(buf, ":call setline(1, 'foo')\n")
+  call WaitForAssert({-> assert_equal('foo', term_getline(buf, 1))})
+
+  call assert_false(filereadable('Xsig_TERM'))
+
+  " After TSTP the file is not saved (same function as ^Z)
+  exe 'silent !kill -s TSTP ' .. pid_vim
+  call WaitForAssert({-> assert_true(filereadable('.Xsig_TERM.swp'))})
+  sleep 100m
+
+  " We resume after the suspend.  Sleep a bit for the signal to take effect,
+  " also when running under valgrind.
+  exe 'silent !kill -s CONT ' .. pid_vim
+  call WaitForAssert({-> assert_true(filereadable('XautoOut2'))})
+  sleep 10m
+
+  call StopVimInTerminal(buf)
+
+  let result = readfile('XautoOut1')
+  call assert_equal(["VimSuspend triggered"], result)
+  let result = readfile('XautoOut2')
+  call assert_equal(["VimResume triggered"], result)
+
+  %bwipe!
+  call delete('.Xsig_TERM.swp')
+  call delete('XautoOut1')
+  call delete('XautoOut2')
 endfunc
 
 " Test a deadly signal.
@@ -129,7 +208,7 @@ func Test_deadly_signal_TERM()
     au VimLeave * call writefile(["VimLeave triggered"], "XautoOut", "as")
     au VimLeavePre * call writefile(["VimLeavePre triggered"], "XautoOut", "as")
   END
-  call writefile(lines, 'XsetupAucmd')
+  call writefile(lines, 'XsetupAucmd', 'D')
 
   let buf = RunVimInTerminal('-S XsetupAucmd Xsig_TERM', {'rows': 6})
   let pid_vim = term_getjob(buf)->job_info().process
@@ -153,7 +232,6 @@ func Test_deadly_signal_TERM()
 
   %bwipe!
   call delete('.Xsig_TERM.swp')
-  call delete('XsetupAucmd')
   call delete('XautoOut')
 endfunc
 

@@ -1,4 +1,4 @@
-/* change.c */
+// change.c
 void change_warning(int col);
 void changed(void);
 void changed_internal(void);
@@ -23,11 +23,11 @@ void ins_bytes(char_u *p);
 void ins_bytes_len(char_u *p, int len);
 void ins_char(int c);
 void ins_char_bytes(char_u *buf, int charlen);
-void ins_str(char_u *s);
+void ins_str(char_u *s, size_t slen);
 int del_char(int fixpos);
 int del_chars(long count, int fixpos);
 int del_bytes(long count, int fixpos_arg, int use_delcombine);
-int open_line(int dir, int flags, int second_line_indent);
+int open_line(int dir, int flags, int second_line_indent, int *did_do_comment);
 int truncate_line(int fixpos);
 void del_lines(long nlines, int undo);
-/* vim: set ft=c : */
+// vim: ft=c

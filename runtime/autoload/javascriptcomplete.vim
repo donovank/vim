@@ -1,9 +1,10 @@
 " Vim completion script
 " Language:	Java Script
 " Maintainer:	Jay Sitter (jay@jaysitter.com)
-" URL: https://github.com/jsit/javascriptcomplete.vim/
+" URL: https://github.com/vim-language-dept/javascript-complete.vim/
 " Previous Maintainer:	Mikolaj Machowski ( mikmach AT wp DOT pl )
 " Last Change:	2020 Jul 30
+" 2026 Sep 28 by Vim project: fix syntax error #21388
 
 function! javascriptcomplete#CompleteJS(findstart, base)
   if a:findstart
@@ -156,8 +157,8 @@ function! javascriptcomplete#CompleteJS(findstart, base)
 					\ 'text', 'vLink']
 		let bodys = bodyprop
 		" Document - document.
-		let docuprop = ['anchors', 'body', 'characterSet', 'doctype',
-					\ 'documentElement', 'documentURI', 'embeds', 'fonts', 'forms',
+		let docuprop = ['anchors', 'applets', 'body', 'characterSet', 'childNodes',
+					\ 'doctype', 'documentElement', 'documentURI', 'embeds', 'fonts', 'forms',
 					\ 'head', 'hidden', 'images', 'implementation', 'lastStyleSheetSet',
 					\ 'links', 'plugins', 'preferredStyleSheetSet', 'scripts',
 					\ 'scrollingElement', 'selectedStyleSheetSet', 'styleSheetSets',
@@ -171,7 +172,7 @@ function! javascriptcomplete#CompleteJS(findstart, base)
 					\ 'createEvent', 'createExpression', 'createNSResolver',
 					\ 'createNodeIterator', 'createProcessingInstruction', 'createRange',
 					\ 'createTextNode', 'createTouchList', 'createTreeWalker',
-					\ 'enableStyleSheetsForSet', 'evaluate', 'focus', 'getElementById',
+					\ 'enableStyleSheetsForSet', 'evaluate', 'focus', 
 					\ 'getElementById', 'getElementsByClassName', 'getElementsByName',
 					\ 'getElementsByTagName', 'getElementsByTagNameNS',
 					\ 'hasStorageAccess', 'importNode', 'onClick', 'onDblClick',
@@ -641,6 +642,7 @@ function! javascriptcomplete#CompleteJS(findstart, base)
 	endfor
 	let g:fm = final_menu
 	return final_menu
+  endif
 
 endfunction
 

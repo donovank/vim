@@ -1,11 +1,10 @@
 " Test for modeless selection
 
 " This only works for Unix in a terminal
-source check.vim
 CheckNotGui
 CheckUnix
 
-source mouse.vim
+source util/mouse.vim
 
 " Test for modeless characterwise selection (single click)
 func Test_modeless_characterwise_selection()
@@ -15,9 +14,14 @@ func Test_modeless_characterwise_selection()
   let save_ttymouse = &ttymouse
   call test_override('no_query_mouse', 1)
   set mouse=a term=xterm mousetime=200
+  call WaitForResponses()
+
   new
   call setline(1, ['one two three', 'foo bar baz'])
   redraw!
+
+  " Wait a bit for any terminal responses to get processed.
+  sleep 50m
 
   for ttymouse_val in g:Ttymouse_values + g:Ttymouse_dec
     let msg = 'ttymouse=' .. ttymouse_val
@@ -215,6 +219,19 @@ func Test_modeless_characterwise_selection()
     call assert_equal("bar", @*)
     set clipboard&
 
+    " Test for 'clipboard' set to 'autoselectplus' to automatically copy the
+    " modeless selection to the '+' clipboard.
+    set clipboard=autoselectplus
+    let @* = 'clean'
+    let keys = ":"
+    let keys ..= MouseLeftClickCode(2, 5)
+    let keys ..= MouseLeftDragCode(2, 7)
+    let keys ..= MouseLeftReleaseCode(2, 7)
+    let keys ..= "\<CR>"
+    call feedkeys(keys, "x")
+    call assert_equal("bar", @+)
+    set clipboard&
+
     " quadruple click should start characterwise selectmode
     let @* = 'clean'
     call MouseRightClick(1, 1)
@@ -239,7 +256,7 @@ func Test_modeless_characterwise_selection()
   let &ttymouse = save_ttymouse
   set mousetime&
   call test_override('no_query_mouse', 0)
-  close!
+  bw!
 endfunc
 
 " Test for modeless word selection (double click)
@@ -250,6 +267,8 @@ func Test_modeless_word_selection()
   let save_ttymouse = &ttymouse
   call test_override('no_query_mouse', 1)
   set mouse=a term=xterm mousetime=200
+  call WaitForResponses()
+
   new
   call setline(1, ['one two three', 'foo bar baz'])
   redraw!
@@ -319,7 +338,7 @@ func Test_modeless_word_selection()
   let &ttymouse = save_ttymouse
   set mousetime&
   call test_override('no_query_mouse', 0)
-  close!
+  bw!
 endfunc
 
 " Test for modeless line selection (triple click)
@@ -330,6 +349,8 @@ func Test_modeless_line_selection()
   let save_ttymouse = &ttymouse
   call test_override('no_query_mouse', 1)
   set mouse=a term=xterm mousetime=200
+  call WaitForResponses()
+
   new
   call setline(1, ['one two three', 'foo bar baz'])
   redraw!
@@ -391,7 +412,55 @@ func Test_modeless_line_selection()
   let &ttymouse = save_ttymouse
   set mousetime&
   call test_override('no_query_mouse', 0)
-  close!
+  bw!
+endfunc
+
+" Test that there is room for the newlines written between the rows.
+func Test_modeless_selection_full_width_rows()
+  CheckFeature clipboard_working
+  let save_enc = &encoding
+  let save_mouse = &mouse
+  let save_term = &term
+  let save_ttymouse = &ttymouse
+  " With a single byte encoding a screen cell takes exactly one byte, there is
+  " then no room to spare for the newline in front of every row.
+  set encoding=latin1
+  call test_override('no_query_mouse', 1)
+  set mouse=a term=xterm mousetime=200
+  exe 'set ttymouse=' .. g:Ttymouse_values[0]
+  call WaitForResponses()
+
+  new
+  " Lines exactly as wide as the screen fill one row each and do not wrap.
+  call setline(1, map(range(5), 'repeat(nr2char(97 + v:val), &columns)'))
+  redraw!
+  sleep 50m
+
+  let @* = 'clean'
+  call MouseRightClick(1, 1)
+  call MouseRightRelease(1, 1)
+  let keys = ":"
+  let keys ..= MouseLeftClickCode(1, 1)
+  let keys ..= MouseLeftReleaseCode(1, 1)
+  let keys ..= MouseLeftClickCode(1, 1)
+  let keys ..= MouseLeftReleaseCode(1, 1)
+  let keys ..= MouseLeftClickCode(1, 1)
+  let keys ..= MouseLeftDragCode(5, 2)
+  let keys ..= MouseLeftReleaseCode(5, 2)
+  let keys ..= "\<C-Y>\<CR>"
+  call feedkeys(keys, "x")
+
+  " Five rows of &columns bytes with a newline in between.
+  call assert_equal(5 * &columns + 4, strlen(@*),
+	\ 'got: ' .. strtrans(strpart(@*, 0, 20)))
+
+  let &ttymouse = save_ttymouse
+  let &term = save_term
+  let &mouse = save_mouse
+  let &encoding = save_enc
+  set mousetime&
+  call test_override('no_query_mouse', 0)
+  bw!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

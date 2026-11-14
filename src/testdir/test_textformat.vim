@@ -1,7 +1,5 @@
 " Tests for the various 'formatoptions' settings
 
-source check.vim
-
 func Test_text_format()
   enew!
 
@@ -194,6 +192,184 @@ func Test_text_format()
 
   setl ai& tw& fo& si& comments&
   enew!
+endfunc
+
+func Test_format_c_comment()
+  new
+  setl ai cindent tw=40 et fo=croql
+  let text =<< trim END
+      var = 2345;  // asdf asdf asdf asdf asdf asdf asdf asdf asdf asdf
+  END
+  call setline(1, text)
+  normal gql
+  let expected =<< trim END
+      var = 2345;  // asdf asdf asdf asdf asdf
+                   // asdf asdf asdf asdf asdf
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  %del
+  let text =<< trim END
+      var = 2345;  // asdf asdf asdf asdf asdf asdf asdf asdf asdf asdf asdf asdf
+  END
+  call setline(1, text)
+  normal gql
+  let expected =<< trim END
+      var = 2345;  // asdf asdf asdf asdf asdf
+                   // asdf asdf asdf asdf asdf
+                   // asdf asdf
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  %del
+  let text =<< trim END
+      #if 0           // This is another long end of
+                      // line comment that
+                      // wraps.
+  END
+  call setline(1, text)
+  normal gq2j
+  let expected =<< trim END
+      #if 0           // This is another long
+                      // end of line comment
+                      // that wraps.
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  " Using either "o" or "O" repeats a line comment occupying a whole line.
+  %del
+  let text =<< trim END
+      nop;
+      // This is a comment
+      val = val;
+  END
+  call setline(1, text)
+  normal 2Go
+  let expected =<< trim END
+      nop;
+      // This is a comment
+      //
+      val = val;
+  END
+  call assert_equal(expected, getline(1, '$'))
+  normal 2GO
+  let expected =<< trim END
+      nop;
+      //
+      // This is a comment
+      //
+      val = val;
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  " Using "o" repeats a line comment after a statement, "O" does not.
+  %del
+  let text =<< trim END
+      nop;
+      val = val;      // This is a comment
+  END
+  call setline(1, text)
+  normal 2Go
+  let expected =<< trim END
+      nop;
+      val = val;      // This is a comment
+                      //
+  END
+  call assert_equal(expected, getline(1, '$'))
+  3delete
+
+  " No comment repeated with a slash in 'formatoptions'
+  set fo+=/
+  normal 2Gox
+  let expected =<< trim END
+      nop;
+      val = val;      // This is a comment
+      x
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  " Comment is formatted when it wraps
+  normal 2GA with some more text added
+  let expected =<< trim END
+      nop;
+      val = val;      // This is a comment
+                      // with some more text
+                      // added
+      x
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  set fo-=/
+
+  " using 'indentexpr' instead of 'cindent' does not repeat a comment
+  setl nocindent indentexpr=2
+  %del
+  let text =<< trim END
+      nop;
+      val = val;      // This is a comment
+  END
+  call setline(1, text)
+  normal 2Gox
+  let expected =<< trim END
+      nop;
+      val = val;      // This is a comment
+        x
+  END
+  call assert_equal(expected, getline(1, '$'))
+  setl cindent indentexpr=
+  3delete
+
+  normal 2GO
+  let expected =<< trim END
+      nop;
+
+      val = val;      // This is a comment
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  " Using "o" does not repeat a comment in a string
+  %del
+  let text =<< trim END
+      nop;
+      val = " // This is not a comment";
+  END
+  call setline(1, text)
+  normal 2Gox
+  let expected =<< trim END
+      nop;
+      val = " // This is not a comment";
+      x
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  " Using CTRL-U after "o" fixes the indent
+  %del
+  let text =<< trim END
+      {
+         val = val;      // This is a comment
+  END
+  call setline(1, text)
+  exe "normal! 2Go\<C-U>x\<Esc>"
+  let expected =<< trim END
+      {
+         val = val;      // This is a comment
+         x
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  " typing comment text auto-wraps
+  %del
+  call setline(1, text)
+  exe "normal! 2GA blah more text blah.\<Esc>"
+  let expected =<< trim END
+      {
+         val = val;      // This is a comment
+                         // blah more text
+                         // blah.
+  END
+  call assert_equal(expected, getline(1, '$'))
+
+  bwipe!
 endfunc
 
 " Tests for :right, :center and :left on text with embedded TAB.
@@ -445,7 +621,7 @@ func Test_format_align()
     right
     setlocal norightleft
     call assert_equal("Vim", getline(1))
-    close!
+    bw!
   endif
 
   set tw&
@@ -855,7 +1031,7 @@ func Test_mps_latin1()
   normal %
   call assert_equal(4, col('.'))
   let &encoding = save_enc
-  close!
+  bw!
 endfunc
 
 func Test_empty_matchpairs()
@@ -967,9 +1143,42 @@ func Test_fo_a_w()
   exe "normal f4xx"
   call assert_equal(['1 2 5 6 7 ', '8 9'], getline(1, 2))
 
+  " using "cw" leaves cursor in right spot
+  call setline(1, ['Now we g whether that nation, or',
+      \ 'any nation so conceived and,'])
+  set fo=tcqa tw=35
+  exe "normal 2G0cwx\<Esc>"
+  call assert_equal(['Now we g whether that nation, or x', 'nation so conceived and,'], getline(1, 2))
+
   set tw=0
   set fo&
   %bw!
+endfunc
+
+" Test that auto-format ('a' flag) preserves spaces typed in the middle of a line
+func Test_fo_a_midline_space()
+  new
+  let lines = [
+    \ 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa it but',
+    \ 'Lorem Ipsum is simply dummy text of the printing and typesetting dasddd',
+    \ 'industry.',
+    \ ]
+  call setline(1, lines)
+  set fo=ta tw=70
+
+  " Prevent INPUT_BUFLEN batching so auto_format runs between keystrokes
+  autocmd InsertCharPre * " nothing
+
+  " Position at 't' of 'it' (col 68) and type space then Z
+  call cursor(1, 68)
+  call feedkeys("a Z\<Esc>", 'xt')
+
+  " The space between 'it' and 'Z' must be preserved
+  call assert_match('it Z', getline(1))
+
+  autocmd! InsertCharPre
+  set fo& tw&
+  bw!
 endfunc
 
 " Test for formatting lines using gq in visual mode
@@ -987,7 +1196,7 @@ func Test_visual_gq_format()
   redraw!
   normal gq
   setl textwidth&
-  close!
+  bw!
 endfunc
 
 " Test for 'n' flag in 'formatoptions' to format numbered lists
@@ -1000,7 +1209,7 @@ func Test_fo_n()
   normal gggqG
   call assert_equal(['  1) one two', '     three', '     four', '  2) two'],
         \ getline(1, '$'))
-  close!
+  bw!
 endfunc
 
 " Test for 'formatlistpat' option
@@ -1014,7 +1223,7 @@ func Test_formatlistpat()
   normal gggqG
   call assert_equal(['  - one', '    two', '    three', '  - two'],
         \ getline(1, '$'))
-  close!
+  bw!
 endfunc
 
 " Test for the 'b' and 'v' flags in 'formatoptions'
@@ -1047,7 +1256,7 @@ func Test_fo_b()
   call feedkeys('Amore five', 'xt')
   call assert_equal(['one two three fourmore', 'five'], getline(1, '$'))
 
-  close!
+  bw!
 endfunc
 
 " Test for the '1' flag in 'formatoptions'. Don't wrap text after a one letter
@@ -1067,7 +1276,7 @@ func Test_fo_1()
   call feedkeys('A a bird', 'xt')
   call assert_equal(['one two three four', 'a bird'], getline(1, '$'))
 
-  close!
+  bw!
 endfunc
 
 " Test for 'l' flag in 'formatoptions'. When starting insert mode, if a line
@@ -1087,7 +1296,7 @@ func Test_fo_l()
   call feedkeys('A six', 'xt')
   call assert_equal(['one two three four five six'], getline(1, '$'))
 
-  close!
+  bw!
 endfunc
 
 " Test for the '2' flag in 'formatoptions'
@@ -1103,7 +1312,52 @@ func Test_fo_2()
   call assert_equal(["\tfirst line of a",
         \ "paragraph.  second line of the",
         \ "same paragraph.  third line."], getline(1, '$'))
-  close!
+  bw!
+endfunc
+
+" This was leaving the cursor after the end of a line.  Complicated way to
+" have the problem show up with valgrind.
+func Test_correct_cursor_position()
+  set encoding=iso8859
+  new
+  norm a0000
+  sil! norm gggg0i0gw0gg
+
+  bwipe!
+  set encoding=utf8
+endfunc
+
+" This was crashing Vim
+func Test_textwidth_overflow()
+  new
+  setl tw=999999999
+  normal 10ig
+  call feedkeys('a ab cd ef', 'xt')
+  bw!
+endfunc
+
+func Test_breakindent_reformat()
+  " Make sure textformatting uses the full width
+  " of the textwidth and does not consider the indent
+  " from breakindent into account when calculating the
+  " line length. Should break at tw 78 and not at 70
+  CheckOption breakindent
+  new
+  80vnew
+  39vnew
+  setl ai breakindent tw=78
+  let lorem = [
+  \  '	Lorem ipsum dolor sit amet, consectetur adipiscing elit. Etiam luctus',
+  \  '	lectus sodales, dictum augue vel, molestie augue. Duis sit amet',
+  \  '	rhoncus justo. Nullam posuere risus semper magna commodo scelerisque.',
+  \  '	Duis et venenatis sem. In rhoncus augue sed tempor mattis. Mauris id',
+  \  '	aliquet odio.']
+  call setline(1, lorem)
+  norm! gqap
+  call assert_equal(lorem, getline(1, '$'))
+  bw!
+  bw!
+  bw!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

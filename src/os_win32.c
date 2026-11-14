@@ -12,7 +12,7 @@
  * Used for both the console version and the Win32 GUI.  A lot of code is for
  * the console version only, so there is a lot of "#ifndef FEAT_GUI_MSWIN".
  *
- * Win32 (Windows NT and Windows 95) system-dependent routines.
+ * Win32 system-dependent routines.
  * Portions lifted from the Win32 SDK samples, the MSDOS-dependent code,
  * NetHack 3.1.3, GNU Emacs 19.30, and Vile 5.5.
  *
@@ -30,57 +30,16 @@
 #include <signal.h>
 #include <limits.h>
 
-// cproto fails on missing include files
-#ifndef PROTO
-# include <process.h>
-# include <winternl.h>
-#endif
+#include <process.h>
+#include <winternl.h>
+#include <direct.h>
 
-#undef chdir
-#ifdef __GNUC__
-# ifndef __MINGW32__
-#  include <dirent.h>
-# endif
-#else
-# include <direct.h>
-#endif
-
-#ifndef PROTO
-# if defined(FEAT_TITLE) && !defined(FEAT_GUI_MSWIN)
-#  include <shellapi.h>
-# endif
+#if !defined(FEAT_GUI_MSWIN)
+# include <shellapi.h>
 #endif
 
 #ifdef FEAT_JOB_CHANNEL
 # include <tlhelp32.h>
-#endif
-
-#ifdef __MINGW32__
-# ifndef FROM_LEFT_1ST_BUTTON_PRESSED
-#  define FROM_LEFT_1ST_BUTTON_PRESSED    0x0001
-# endif
-# ifndef RIGHTMOST_BUTTON_PRESSED
-#  define RIGHTMOST_BUTTON_PRESSED	  0x0002
-# endif
-# ifndef FROM_LEFT_2ND_BUTTON_PRESSED
-#  define FROM_LEFT_2ND_BUTTON_PRESSED    0x0004
-# endif
-# ifndef FROM_LEFT_3RD_BUTTON_PRESSED
-#  define FROM_LEFT_3RD_BUTTON_PRESSED    0x0008
-# endif
-# ifndef FROM_LEFT_4TH_BUTTON_PRESSED
-#  define FROM_LEFT_4TH_BUTTON_PRESSED    0x0010
-# endif
-
-/*
- * EventFlags
- */
-# ifndef MOUSE_MOVED
-#  define MOUSE_MOVED   0x0001
-# endif
-# ifndef DOUBLE_CLICK
-#  define DOUBLE_CLICK  0x0002
-# endif
 #endif
 
 // Record all output and all keyboard & mouse input
@@ -90,63 +49,6 @@
 FILE* fdDump = NULL;
 #endif
 
-/*
- * When generating prototypes for Win32 on Unix, these lines make the syntax
- * errors disappear.  They do not need to be correct.
- */
-#ifdef PROTO
-# define WINAPI
-typedef char * LPCSTR;
-typedef char * LPWSTR;
-typedef int ACCESS_MASK;
-typedef int BOOL;
-typedef int COLORREF;
-typedef int CONSOLE_CURSOR_INFO;
-typedef int COORD;
-typedef int DWORD;
-typedef int HANDLE;
-typedef int LPHANDLE;
-typedef int HDC;
-typedef int HFONT;
-typedef int HICON;
-typedef int HINSTANCE;
-typedef int HWND;
-typedef int INPUT_RECORD;
-typedef int INT;
-typedef int KEY_EVENT_RECORD;
-typedef int LOGFONT;
-typedef int LPBOOL;
-typedef int LPCTSTR;
-typedef int LPDWORD;
-typedef int LPSTR;
-typedef int LPTSTR;
-typedef int LPVOID;
-typedef int MOUSE_EVENT_RECORD;
-typedef int PACL;
-typedef int PDWORD;
-typedef int PHANDLE;
-typedef int PRINTDLG;
-typedef int PSECURITY_DESCRIPTOR;
-typedef int PSID;
-typedef int SECURITY_INFORMATION;
-typedef int SHORT;
-typedef int SMALL_RECT;
-typedef int TEXTMETRIC;
-typedef int TOKEN_INFORMATION_CLASS;
-typedef int TRUSTEE;
-typedef int WORD;
-typedef int WCHAR;
-typedef void VOID;
-typedef int BY_HANDLE_FILE_INFORMATION;
-typedef int SE_OBJECT_TYPE;
-typedef int PSNSECINFO;
-typedef int PSNSECINFOW;
-typedef int STARTUPINFO;
-typedef int PROCESS_INFORMATION;
-typedef int LPSECURITY_ATTRIBUTES;
-# define __stdcall // empty
-#endif
-
 #if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
 // Win32 Console handles for input and output
 static HANDLE g_hConIn  = INVALID_HANDLE_VALUE;
@@ -154,7 +56,10 @@ static HANDLE g_hConOut = INVALID_HANDLE_VALUE;
 
 // Win32 Screen buffer,coordinate,console I/O information
 static SMALL_RECT g_srScrollRegion;
-static COORD	  g_coord;  // 0-based, but external coords are 1-based
+// This is explicitly initialised to work around a LTCG issue on Windows ARM64
+// (at least of 19.39.33321).  This pushes this into the `.data` rather than
+// `.bss` which corrects code generation in `write_chars` (#13453).
+static COORD	  g_coord = {0, 0};  // 0-based, but external coords are 1-based
 
 // The attribute of the screen when the editor was started
 static WORD  g_attrDefault = 7;  // lightgray text on black background
@@ -175,11 +80,30 @@ static void gotoxy(unsigned x, unsigned y);
 static void standout(void);
 static int s_cursor_visible = TRUE;
 static int did_create_conin = FALSE;
+// The 'input_record_buffer' is an internal dynamic fifo queue of MS-Windows
+// console INPUT_RECORD events that are normally read from the console input
+// buffer.  This provides an injection point for testing the low-level handling
+// of INPUT_RECORDs.
+typedef struct input_record_buffer_node_S
+{
+    INPUT_RECORD ir;
+    struct input_record_buffer_node_S *next;
+} input_record_buffer_node_T;
+typedef struct input_record_buffer_S
+{
+    input_record_buffer_node_T *head;
+    input_record_buffer_node_T *tail;
+    int length;
+} input_record_buffer_T;
+static input_record_buffer_T input_record_buffer;
+static int read_input_record_buffer(INPUT_RECORD* irEvents, int nMaxLength);
+static int write_input_record_buffer(INPUT_RECORD* irEvents, int nLength);
 #endif
 #ifdef FEAT_GUI_MSWIN
 static int s_dont_use_vimrun = TRUE;
 static int need_vimrun_warning = FALSE;
-static char *vimrun_path = "vimrun ";
+static string_T vimrun_path = {(char_u *)"vimrun ", 7};
+static int vimrun_path_allocated = FALSE;
 #endif
 
 static int win32_getattrs(char_u *name);
@@ -190,33 +114,30 @@ static int conpty_working = 0;
 static int conpty_type = 0;
 static int conpty_stable = 0;
 static int conpty_fix_type = 0;
-static void vtp_flag_init();
+static void vtp_flag_init(void);
 
 #if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
 static int vtp_working = 0;
-static void vtp_init();
-static void vtp_exit();
+static void vtp_init(void);
+static void vtp_exit(void);
 static void vtp_sgr_bulk(int arg);
 static void vtp_sgr_bulks(int argc, int *argv);
 
 static int wt_working = 0;
-static void wt_init();
-
-static guicolor_T save_console_bg_rgb;
-static guicolor_T save_console_fg_rgb;
-static guicolor_T store_console_bg_rgb;
-static guicolor_T store_console_fg_rgb;
+static void wt_init(void);
 
 static int g_color_index_bg = 0;
 static int g_color_index_fg = 7;
 
 # ifdef FEAT_TERMGUICOLORS
+static guicolor_T save_console_bg_rgb;
+static guicolor_T save_console_fg_rgb;
+static guicolor_T store_console_bg_rgb;
+static guicolor_T store_console_fg_rgb;
 static int default_console_color_bg = 0x000000; // black
 static int default_console_color_fg = 0xc0c0c0; // white
-# endif
-
-# ifdef FEAT_TERMGUICOLORS
-#  define USE_VTP		(vtp_working && is_term_win32() && (p_tgc || (!p_tgc && t_colors >= 256)))
+#  define USE_VTP		(vtp_working && is_term_win32() \
+						 && (p_tgc || t_colors >= 256))
 #  define USE_WT		(wt_working)
 # else
 #  define USE_VTP		0
@@ -226,7 +147,7 @@ static int default_console_color_fg = 0xc0c0c0; // white
 static void set_console_color_rgb(void);
 static void reset_console_color_rgb(void);
 static void restore_console_color_rgb(void);
-#endif
+#endif  // !FEAT_GUI_MSWIN || VIMDLL
 
 // This flag is newly created from Windows 10
 #ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
@@ -237,64 +158,13 @@ static void restore_console_color_rgb(void);
 static int suppress_winsize = 1;	// don't fiddle with console
 #endif
 
-static char_u *exe_path = NULL;
-
-static BOOL win8_or_later = FALSE;
-
-# if defined(__GNUC__) && !defined(__MINGW32__)  && !defined(__CYGWIN__)
-#  define UChar UnicodeChar
-# else
-#  define UChar uChar.UnicodeChar
-# endif
+static WCHAR *exe_pathw = NULL;
 
 #if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
-// Dynamic loading for portability
-typedef struct _DYN_CONSOLE_SCREEN_BUFFER_INFOEX
-{
-    ULONG cbSize;
-    COORD dwSize;
-    COORD dwCursorPosition;
-    WORD wAttributes;
-    SMALL_RECT srWindow;
-    COORD dwMaximumWindowSize;
-    WORD wPopupAttributes;
-    BOOL bFullscreenSupported;
-    COLORREF ColorTable[16];
-} DYN_CONSOLE_SCREEN_BUFFER_INFOEX, *PDYN_CONSOLE_SCREEN_BUFFER_INFOEX;
-typedef BOOL (WINAPI *PfnGetConsoleScreenBufferInfoEx)(HANDLE, PDYN_CONSOLE_SCREEN_BUFFER_INFOEX);
-static PfnGetConsoleScreenBufferInfoEx pGetConsoleScreenBufferInfoEx;
-typedef BOOL (WINAPI *PfnSetConsoleScreenBufferInfoEx)(HANDLE, PDYN_CONSOLE_SCREEN_BUFFER_INFOEX);
-static PfnSetConsoleScreenBufferInfoEx pSetConsoleScreenBufferInfoEx;
-static BOOL has_csbiex = FALSE;
+static BOOL use_alternate_screen_buffer = FALSE;
 #endif
 
-/*
- * Get version number including build number
- */
-typedef BOOL (WINAPI *PfnRtlGetVersion)(LPOSVERSIONINFOW);
-#define MAKE_VER(major, minor, build) \
-    (((major) << 24) | ((minor) << 16) | (build))
-
-    static DWORD
-get_build_number(void)
-{
-    OSVERSIONINFOW	osver = {sizeof(OSVERSIONINFOW)};
-    HMODULE		hNtdll;
-    PfnRtlGetVersion	pRtlGetVersion;
-    DWORD		ver = MAKE_VER(0, 0, 0);
-
-    hNtdll = GetModuleHandle("ntdll.dll");
-    if (hNtdll != NULL)
-    {
-	pRtlGetVersion =
-	    (PfnRtlGetVersion)GetProcAddress(hNtdll, "RtlGetVersion");
-	pRtlGetVersion(&osver);
-	ver = MAKE_VER(min(osver.dwMajorVersion, 255),
-		       min(osver.dwMinorVersion, 255),
-		       min(osver.dwBuildNumber, 32767));
-    }
-    return ver;
-}
+extern DWORD win_version; // this is in os_mswin.c
 
 #if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
     static BOOL
@@ -306,7 +176,7 @@ is_ambiwidth_event(
 		&& ir->Event.KeyEvent.wRepeatCount == 1
 		&& ir->Event.KeyEvent.wVirtualKeyCode == 0x12
 		&& ir->Event.KeyEvent.wVirtualScanCode == 0x38
-		&& ir->Event.KeyEvent.UChar == 0
+		&& ir->Event.KeyEvent.uChar.UnicodeChar == 0
 		&& ir->Event.KeyEvent.dwControlKeyState == 2;
 }
 
@@ -317,7 +187,8 @@ make_ambiwidth_event(
 {
     down->Event.KeyEvent.wVirtualKeyCode = 0;
     down->Event.KeyEvent.wVirtualScanCode = 0;
-    down->Event.KeyEvent.UChar = up->Event.KeyEvent.UChar;
+    down->Event.KeyEvent.uChar.UnicodeChar
+				    = up->Event.KeyEvent.uChar.UnicodeChar;
     down->Event.KeyEvent.dwControlKeyState = 0;
 }
 
@@ -329,7 +200,7 @@ make_ambiwidth_event(
 read_console_input(
     HANDLE	    hInput,
     INPUT_RECORD    *lpBuffer,
-    DWORD	    nLength,
+    int		    nLength,
     LPDWORD	    lpEvents)
 {
     enum
@@ -345,10 +216,17 @@ read_console_input(
     int i;
     static INPUT_RECORD s_irPseudo;
 
+    if (s_dwMax == 0 && input_record_buffer.length > 0)
+    {
+	dwEvents = read_input_record_buffer(s_irCache, IRSIZE);
+	s_dwIndex = 0;
+	s_dwMax = dwEvents;
+    }
+
     if (nLength == -2)
 	return (s_dwMax > 0) ? TRUE : FALSE;
 
-    if (!win8_or_later)
+    if (win_version < MAKE_VER(6, 2, 0)) // Before Windows 8
     {
 	if (nLength == -1)
 	    return PeekConsoleInputW(hInput, lpBuffer, 1, lpEvents);
@@ -357,7 +235,7 @@ read_console_input(
 
     if (s_dwMax == 0)
     {
-	if (!USE_WT && nLength == -1)
+	if (!vtp_working && nLength == -1)
 	    return PeekConsoleInputW(hInput, lpBuffer, 1, lpEvents);
 	GetNumberOfConsoleInputEvents(hInput, &dwEvents);
 	if (dwEvents == 0 && nLength == -1)
@@ -457,49 +335,98 @@ wait_for_single_object(
     return WaitForSingleObject(hHandle, dwMilliseconds);
 }
 # endif
-#endif
+#endif   // !FEAT_GUI_MSWIN || VIMDLL
 
-    static void
-get_exe_name(void)
+    void
+mch_get_exe_name(void)
 {
-    // Maximum length of $PATH is more than MAXPATHL.  8191 is often mentioned
-    // as the maximum length that works (plus a NUL byte).
-#define MAX_ENV_PATH_LEN 8192
-    char	temp[MAX_ENV_PATH_LEN];
-    char_u	*p;
+    int		updated = FALSE;
+    static int	enc_prev = -1;
+    WCHAR	*path;
+    size_t	pathlen;
 
-    if (exe_name == NULL)
+    if (exe_name == NULL || exe_pathw == NULL || enc_prev != enc_codepage)
     {
+	WCHAR	buf[MAX_PATH];
+	WCHAR	*p;
+
 	// store the name of the executable, may be used for $VIM
-	GetModuleFileName(NULL, temp, MAX_ENV_PATH_LEN - 1);
-	if (*temp != NUL)
-	    exe_name = FullName_save((char_u *)temp, FALSE);
-    }
-
-    if (exe_path == NULL && exe_name != NULL)
-    {
-	exe_path = vim_strnsave(exe_name, gettail_sep(exe_name) - exe_name);
-	if (exe_path != NULL)
+	p = buf + GetModuleFileNameW(NULL, buf, MAX_PATH);
+	if (p > buf)
 	{
-	    // Append our starting directory to $PATH, so that when doing
-	    // "!xxd" it's found in our starting directory.  Needed because
-	    // SearchPath() also looks there.
-	    p = mch_getenv("PATH");
-	    if (p == NULL
-		       || STRLEN(p) + STRLEN(exe_path) + 2 < MAX_ENV_PATH_LEN)
+	    if (enc_codepage == -1)
+		enc_codepage = GetACP();
+	    vim_free(exe_name);
+	    exe_name = utf16_to_enc(buf, NULL);
+	    enc_prev = enc_codepage;
+
+	    // truncate the buffer at the last path separator
+	    // to isolate the path.
+	    do
 	    {
-		if (p == NULL || *p == NUL)
-		    temp[0] = NUL;
-		else
+		--p;
+		if (*p == L'\\')
 		{
-		    STRCPY(temp, p);
-		    STRCAT(temp, ";");
+		    *p = L'\0';
+		    break;
 		}
-		STRCAT(temp, exe_path);
-		vim_setenv((char_u *)"PATH", (char_u *)temp);
-	    }
+	    } while (p > buf);
+
+	    vim_free(exe_pathw);
+	    exe_pathw = _wcsdup(buf);
+	    updated = TRUE;
 	}
     }
+
+    if (exe_pathw == NULL || !updated)
+	return;
+
+    // Append our starting directory to $PATH, so that when doing
+    // "!xxd" it's found in our starting directory.  Needed because
+    // SearchPath() also looks there.
+    path = _wgetenv(L"PATH");
+    pathlen = (path == NULL) ? 0 : wcslen(path);
+
+    // Maximum length of $PATH is more than MAXPATHL. 8191 is often mentioned
+    // as the maximum length that works. Add an extra 7 characters (5 for
+    // "PATH=", 1 for a potential ";" and 1 for the NUL byte).
+#define EXTRA_LEN 7
+#define MAX_ENV_STRING_LEN 8191
+
+    if (pathlen + wcslen(exe_pathw) < MAX_ENV_STRING_LEN)
+    {
+	WCHAR   temp[MAX_ENV_STRING_LEN + EXTRA_LEN] = L"PATH=";
+	size_t  templen = 5;
+
+	if (pathlen == 0)
+	    wcscpy(temp + templen, exe_pathw);
+	else
+	{
+	    wcscpy(temp + templen, path);
+
+	    // Check if exe_path is already included in $PATH.
+	    if (wcsstr(temp, exe_pathw) == NULL)
+	    {
+		templen += pathlen;
+
+		// Append ';' if $PATH doesn't end with it.
+		if (temp[templen - 1] != L';')
+		{
+		    wcscpy(temp + templen, L";");
+		    ++templen;
+		}
+
+		wcscpy(temp + templen, exe_pathw);
+	    }
+	}
+
+	_wputenv(temp);
+#ifdef libintl_wputenv
+	libintl_wputenv(temp);
+#endif
+    }
+#undef EXTRA_LEN
+#undef MAX_ENV_PATH_LEN
 }
 
 /*
@@ -525,37 +452,38 @@ unescape_shellxquote(char_u *p, char_u *escaped)
  * Load library "name".
  */
     HINSTANCE
-vimLoadLib(char *name)
+vimLoadLib(const char *name)
 {
     HINSTANCE	dll = NULL;
 
     // No need to load any library when registering OLE.
     if (found_register_arg)
-	return dll;
+	return NULL;
 
     // NOTE: Do not use mch_dirname() and mch_chdir() here, they may call
     // vimLoadLib() recursively, which causes a stack overflow.
-    if (exe_path == NULL)
-	get_exe_name();
-    if (exe_path != NULL)
+    if (exe_pathw == NULL)
     {
-	WCHAR old_dirw[MAXPATHL];
-
-	if (GetCurrentDirectoryW(MAXPATHL, old_dirw) != 0)
-	{
-	    // Change directory to where the executable is, both to make
-	    // sure we find a .dll there and to avoid looking for a .dll
-	    // in the current directory.
-	    SetCurrentDirectory((LPCSTR)exe_path);
-	    dll = LoadLibrary(name);
-	    SetCurrentDirectoryW(old_dirw);
-	    return dll;
-	}
+	mch_get_exe_name();
+	if (exe_pathw == NULL)
+	    return NULL;
     }
+
+    WCHAR old_dirw[MAXPATHL];
+
+    if (GetCurrentDirectoryW(MAXPATHL, old_dirw) == 0)
+	return NULL;
+
+    // Change directory to where the executable is, both to make
+    // sure we find a .dll there and to avoid looking for a .dll
+    // in the current directory.
+    SetCurrentDirectoryW(exe_pathw);
+    dll = LoadLibrary(name);
+    SetCurrentDirectoryW(old_dirw);
     return dll;
 }
 
-#if defined(VIMDLL) || defined(PROTO)
+#if defined(VIMDLL)
 /*
  * Check if the current executable file is for the GUI subsystem.
  */
@@ -577,14 +505,18 @@ mch_is_gui_executable(void)
 }
 #endif
 
-#if defined(DYNAMIC_ICONV) || defined(DYNAMIC_GETTEXT) || defined(PROTO)
+#if defined(DYNAMIC_ICONV) || defined(DYNAMIC_GETTEXT) \
+    || defined(FEAT_PYTHON3)
 /*
  * Get related information about 'funcname' which is imported by 'hInst'.
  * If 'info' is 0, return the function address.
  * If 'info' is 1, return the module name which the function is imported from.
+ * If 'info' is 2, hook the function with 'ptr', and return the original
+ * function address.
  */
     static void *
-get_imported_func_info(HINSTANCE hInst, const char *funcname, int info)
+get_imported_func_info(HINSTANCE hInst, const char *funcname, int info,
+	const void *ptr)
 {
     PBYTE			pImage = (PBYTE)hInst;
     PIMAGE_DOS_HEADER		pDOS = (PIMAGE_DOS_HEADER)hInst;
@@ -593,15 +525,20 @@ get_imported_func_info(HINSTANCE hInst, const char *funcname, int info)
     PIMAGE_THUNK_DATA		pIAT;	    // Import Address Table
     PIMAGE_THUNK_DATA		pINT;	    // Import Name Table
     PIMAGE_IMPORT_BY_NAME	pImpName;
+    DWORD			ImpVA;
 
     if (pDOS->e_magic != IMAGE_DOS_SIGNATURE)
 	return NULL;
     pPE = (PIMAGE_NT_HEADERS)(pImage + pDOS->e_lfanew);
     if (pPE->Signature != IMAGE_NT_SIGNATURE)
 	return NULL;
-    pImpDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pImage
-	    + pPE->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
-							    .VirtualAddress);
+
+    ImpVA = pPE->OptionalHeader
+		.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (ImpVA == 0)
+	return NULL;	// No Import Table
+    pImpDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pImage + ImpVA);
+
     for (; pImpDesc->FirstThunk; ++pImpDesc)
     {
 	if (!pImpDesc->OriginalFirstThunk)
@@ -616,12 +553,23 @@ get_imported_func_info(HINSTANCE hInst, const char *funcname, int info)
 					+ (UINT_PTR)(pINT->u1.AddressOfData));
 	    if (strcmp((char *)pImpName->Name, funcname) == 0)
 	    {
+		void *original;
+		DWORD old, new = PAGE_READWRITE;
+
 		switch (info)
 		{
 		    case 0:
 			return (void *)pIAT->u1.Function;
 		    case 1:
 			return (void *)(pImage + pImpDesc->Name);
+		    case 2:
+			original = (void *)pIAT->u1.Function;
+			VirtualProtect(&pIAT->u1.Function, sizeof(void *),
+				new, &old);
+			pIAT->u1.Function = (UINT_PTR)ptr;
+			VirtualProtect(&pIAT->u1.Function, sizeof(void *),
+				old, &new);
+			return original;
 		    default:
 			return NULL;
 		}
@@ -639,7 +587,7 @@ find_imported_module_by_funcname(HINSTANCE hInst, const char *funcname)
 {
     char    *modulename;
 
-    modulename = (char *)get_imported_func_info(hInst, funcname, 1);
+    modulename = (char *)get_imported_func_info(hInst, funcname, 1, NULL);
     if (modulename != NULL)
 	return GetModuleHandleA(modulename);
     return NULL;
@@ -651,11 +599,80 @@ find_imported_module_by_funcname(HINSTANCE hInst, const char *funcname)
     void *
 get_dll_import_func(HINSTANCE hInst, const char *funcname)
 {
-    return get_imported_func_info(hInst, funcname, 0);
+    return get_imported_func_info(hInst, funcname, 0, NULL);
+}
+
+/*
+ * Hook the function named 'funcname' which is imported by 'hInst' DLL,
+ * and return the original function address.
+ */
+    void *
+hook_dll_import_func(HINSTANCE hInst, const char *funcname, const void *hook)
+{
+    return get_imported_func_info(hInst, funcname, 2, hook);
 }
 #endif
 
-#if defined(DYNAMIC_GETTEXT) || defined(PROTO)
+#if defined(FEAT_PYTHON3)
+/*
+ * Check if the specified DLL is a function forwarder.
+ * If yes, return the instance of the forwarded DLL.
+ * If no, return the specified DLL.
+ * If error, return NULL.
+ * This assumes that the DLL forwards all the function to a single DLL.
+ */
+    HINSTANCE
+get_forwarded_dll(HINSTANCE hInst)
+{
+    PBYTE			pImage = (PBYTE)hInst;
+    PIMAGE_DOS_HEADER		pDOS = (PIMAGE_DOS_HEADER)hInst;
+    PIMAGE_NT_HEADERS		pPE;
+    PIMAGE_EXPORT_DIRECTORY	pExpDir;
+    DWORD			ExpVA;
+    DWORD			ExpSize;
+    LPDWORD			pFunctionTable;
+
+    if (pDOS->e_magic != IMAGE_DOS_SIGNATURE)
+	return NULL;
+    pPE = (PIMAGE_NT_HEADERS)(pImage + pDOS->e_lfanew);
+    if (pPE->Signature != IMAGE_NT_SIGNATURE)
+	return NULL;
+
+    ExpVA = pPE->OptionalHeader
+		.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    ExpSize = pPE->OptionalHeader
+		.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+    if (ExpVA == 0)
+	return hInst;	// No Export Directory
+    pExpDir = (PIMAGE_EXPORT_DIRECTORY)(pImage + ExpVA);
+    pFunctionTable = (LPDWORD)(pImage + pExpDir->AddressOfFunctions);
+
+    if (pExpDir->NumberOfNames == 0)
+	return hInst;	// No export names.
+
+    // Check only the first entry.
+    if ((pFunctionTable[0] < ExpVA) || (pFunctionTable[0] >= ExpVA + ExpSize))
+	// The first entry is not a function forwarder.
+	return hInst;
+
+    // The first entry is a function forwarder.
+    // The name is represented as "DllName.FunctionName".
+    const char *name = (const char *)(pImage + pFunctionTable[0]);
+    const char *p = strchr(name, '.');
+    if (p == NULL)
+	return hInst;
+
+    // Extract DllName.
+    char buf[MAX_PATH];
+    if (p - name + 1 > sizeof(buf))
+	return NULL;
+    strncpy(buf, name, p - name);
+    buf[p - name] = NUL;
+    return GetModuleHandleA(buf);
+}
+#endif
+
+#if defined(DYNAMIC_GETTEXT)
 # ifndef GETTEXT_DLL
 #  define GETTEXT_DLL "libintl.dll"
 #  define GETTEXT_DLL_ALT1 "libintl-8.dll"
@@ -679,6 +696,7 @@ char *(*dyn_libintl_bindtextdomain)(const char *, const char *)
 char *(*dyn_libintl_bind_textdomain_codeset)(const char *, const char *)
 				       = null_libintl_bind_textdomain_codeset;
 int (*dyn_libintl_wputenv)(const wchar_t *) = null_libintl_wputenv;
+int *dyn_libintl_nl_msg_cat_cntr = NULL;
 
     int
 dyn_libintl_init(void)
@@ -716,7 +734,7 @@ dyn_libintl_init(void)
 	if (p_verbose > 0)
 	{
 	    verbose_enter();
-	    semsg(_(e_loadlib), GETTEXT_DLL, GetWin32Error());
+	    semsg(_(e_could_not_load_library_str_str), GETTEXT_DLL, GetWin32Error());
 	    verbose_leave();
 	}
 	return 0;
@@ -724,14 +742,14 @@ dyn_libintl_init(void)
     for (i = 0; libintl_entry[i].name != NULL
 					 && libintl_entry[i].ptr != NULL; ++i)
     {
-	if ((*libintl_entry[i].ptr = (FARPROC)GetProcAddress(hLibintlDLL,
+	if ((*libintl_entry[i].ptr = GetProcAddress(hLibintlDLL,
 					      libintl_entry[i].name)) == NULL)
 	{
 	    dyn_libintl_end();
 	    if (p_verbose > 0)
 	    {
 		verbose_enter();
-		semsg(_(e_loadfunc), libintl_entry[i].name);
+		semsg(_(e_could_not_load_library_function_str), libintl_entry[i].name);
 		verbose_leave();
 	    }
 	    return 0;
@@ -739,8 +757,8 @@ dyn_libintl_init(void)
     }
 
     // The bind_textdomain_codeset() function is optional.
-    dyn_libintl_bind_textdomain_codeset = (void *)GetProcAddress(hLibintlDLL,
-						   "bind_textdomain_codeset");
+    dyn_libintl_bind_textdomain_codeset = (char *(*)(const char *, const char *))
+			GetProcAddress(hLibintlDLL, "bind_textdomain_codeset");
     if (dyn_libintl_bind_textdomain_codeset == NULL)
 	dyn_libintl_bind_textdomain_codeset =
 					 null_libintl_bind_textdomain_codeset;
@@ -748,9 +766,15 @@ dyn_libintl_init(void)
     // _wputenv() function for the libintl.dll is optional.
     hmsvcrt = find_imported_module_by_funcname(hLibintlDLL, "getenv");
     if (hmsvcrt != NULL)
-	dyn_libintl_wputenv = (void *)GetProcAddress(hmsvcrt, "_wputenv");
+	dyn_libintl_wputenv = (int (*)(const wchar_t *))
+					GetProcAddress(hmsvcrt, "_wputenv");
     if (dyn_libintl_wputenv == NULL || dyn_libintl_wputenv == _wputenv)
 	dyn_libintl_wputenv = null_libintl_wputenv;
+
+    // The _nl_msg_cat_cntr variable is optional.  It is used to make gettext
+    // drop the translations it cached.
+    dyn_libintl_nl_msg_cat_cntr = (int *)GetProcAddress(hLibintlDLL,
+							 "_nl_msg_cat_cntr");
 
     return 1;
 }
@@ -767,6 +791,7 @@ dyn_libintl_end(void)
     dyn_libintl_bindtextdomain	= null_libintl_bindtextdomain;
     dyn_libintl_bind_textdomain_codeset = null_libintl_bind_textdomain_codeset;
     dyn_libintl_wputenv		= null_libintl_wputenv;
+    dyn_libintl_nl_msg_cat_cntr	= NULL;
 }
 
     static char *
@@ -821,9 +846,7 @@ null_libintl_wputenv(const wchar_t *envstring UNUSED)
 #endif
 
 #ifdef HAVE_ACL
-# ifndef PROTO
-#  include <aclapi.h>
-# endif
+# include <aclapi.h>
 # ifndef PROTECTED_DACL_SECURITY_INFORMATION
 #  define PROTECTED_DACL_SECURITY_INFORMATION	0x80000000L
 # endif
@@ -834,9 +857,8 @@ null_libintl_wputenv(const wchar_t *envstring UNUSED)
  * Enables or disables the specified privilege.
  */
     static BOOL
-win32_enable_privilege(LPTSTR lpszPrivilege, BOOL bEnable)
+win32_enable_privilege(LPTSTR lpszPrivilege)
 {
-    BOOL		bResult;
     LUID		luid;
     HANDLE		hToken;
     TOKEN_PRIVILEGES	tokenPrivileges;
@@ -853,57 +875,43 @@ win32_enable_privilege(LPTSTR lpszPrivilege, BOOL bEnable)
 
     tokenPrivileges.PrivilegeCount	     = 1;
     tokenPrivileges.Privileges[0].Luid       = luid;
-    tokenPrivileges.Privileges[0].Attributes = bEnable ?
-						    SE_PRIVILEGE_ENABLED : 0;
+    tokenPrivileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
 
-    bResult = AdjustTokenPrivileges(hToken, FALSE, &tokenPrivileges,
-	    sizeof(TOKEN_PRIVILEGES), NULL, NULL);
+    if (!AdjustTokenPrivileges(hToken, FALSE, &tokenPrivileges, 0, NULL, NULL))
+    {
+	CloseHandle(hToken);
+	return FALSE;
+    }
+
+    if (GetLastError() != ERROR_SUCCESS)
+    {
+	CloseHandle(hToken);
+	return FALSE;
+    }
 
     CloseHandle(hToken);
-
-    return bResult && GetLastError() == ERROR_SUCCESS;
+    return TRUE;
 }
 #endif
 
-#ifdef _MSC_VER
-// Suppress the deprecation warning for using GetVersionEx().
-// It is needed for implementing "windowsversion()".
-# pragma warning(push)
-# pragma warning(disable: 4996)
-#endif
 /*
- * Set "win8_or_later" and fill in "windowsVersion" if possible.
+ * Fill in "windowsVersion" if possible and enable security privilege for ACL.
  */
     void
 PlatformId(void)
 {
-    static int done = FALSE;
-
-    if (!done)
-    {
-	OSVERSIONINFO ovi;
-
-	ovi.dwOSVersionInfoSize = sizeof(ovi);
-	GetVersionEx(&ovi);
-
 #ifdef FEAT_EVAL
-	vim_snprintf(windowsVersion, sizeof(windowsVersion), "%d.%d",
-		(int)ovi.dwMajorVersion, (int)ovi.dwMinorVersion);
+    DWORD major = (win_version >> 24) & 0xFF;
+    DWORD minor = (win_version >> 16) & 0xFF;
+    vim_snprintf(windowsVersion, sizeof(windowsVersion), "%d.%d", major, minor);
 #endif
-	if ((ovi.dwMajorVersion == 6 && ovi.dwMinorVersion >= 2)
-		|| ovi.dwMajorVersion > 6)
-	    win8_or_later = TRUE;
 
 #ifdef HAVE_ACL
-	// Enable privilege for getting or setting SACLs.
-	win32_enable_privilege(SE_SECURITY_NAME, TRUE);
+    // Enable privilege for getting or setting SACLs.
+    if (!win32_enable_privilege(SE_SECURITY_NAME))
+	return;
 #endif
-	done = TRUE;
-    }
 }
-#ifdef _MSC_VER
-# pragma warning(pop)
-#endif
 
 #if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
 
@@ -1002,15 +1010,15 @@ win32_kbd_patch_key(
     static WORD awAnsiCode[2];
     static BYTE abKeystate[256];
 
-
     if (s_iIsDead == 2)
     {
-	pker->UChar = (WCHAR) awAnsiCode[1];
+	pker->uChar.UnicodeChar = (WCHAR) awAnsiCode[1];
 	s_iIsDead = 0;
 	return 1;
     }
 
-    if (pker->UChar != 0)
+    // check if it already has a valid unicode character.
+    if (pker->uChar.UnicodeChar != 0)
 	return 1;
 
     CLEAR_FIELD(abKeystate);
@@ -1033,7 +1041,7 @@ win32_kbd_patch_key(
 			abKeystate, awAnsiCode, 2, 0);
 
     if (s_iIsDead > 0)
-	pker->UChar = (WCHAR) awAnsiCode[0];
+	pker->uChar.UnicodeChar = (WCHAR) awAnsiCode[0];
 
     return s_iIsDead;
 }
@@ -1074,29 +1082,6 @@ decode_key_event(
 	break;
     }
 
-    // special cases
-    if ((nModifs & CTRL) != 0 && (nModifs & ~CTRL) == 0 && pker->UChar == NUL)
-    {
-	// Ctrl-6 is Ctrl-^
-	if (pker->wVirtualKeyCode == '6')
-	{
-	    *pch = Ctrl_HAT;
-	    return TRUE;
-	}
-	// Ctrl-2 is Ctrl-@
-	else if (pker->wVirtualKeyCode == '2')
-	{
-	    *pch = NUL;
-	    return TRUE;
-	}
-	// Ctrl-- is Ctrl-_
-	else if (pker->wVirtualKeyCode == 0xBD)
-	{
-	    *pch = Ctrl__;
-	    return TRUE;
-	}
-    }
-
     // Shift-TAB
     if (pker->wVirtualKeyCode == VK_TAB && (nModifs & SHIFT_PRESSED))
     {
@@ -1105,17 +1090,16 @@ decode_key_event(
 	return TRUE;
     }
 
-    for (i = ARRAY_LENGTH(VirtKeyMap);  --i >= 0;  )
+    for (i = ARRAY_LENGTH(VirtKeyMap); --i >= 0; )
     {
 	if (VirtKeyMap[i].wVirtKey == pker->wVirtualKeyCode)
 	{
-	    if (nModifs == 0)
-		*pch = VirtKeyMap[i].chAlone;
-	    else if ((nModifs & SHIFT) != 0 && (nModifs & ~SHIFT) == 0)
+	    *pch = VirtKeyMap[i].chAlone;
+	    if ((nModifs & SHIFT) != 0)
 		*pch = VirtKeyMap[i].chShift;
 	    else if ((nModifs & CTRL) != 0 && (nModifs & ~CTRL) == 0)
 		*pch = VirtKeyMap[i].chCtrl;
-	    else if ((nModifs & ALT) != 0 && (nModifs & ~ALT) == 0)
+	    else if ((nModifs & ALT) != 0)
 		*pch = VirtKeyMap[i].chAlt;
 
 	    if (*pch != 0)
@@ -1124,6 +1108,99 @@ decode_key_event(
 		{
 		    *pch2 = *pch;
 		    *pch = K_NUL;
+		    if (pmodifiers)
+		    {
+			if (pker->wVirtualKeyCode >= VK_F1
+			    && pker->wVirtualKeyCode <= VK_F12)
+			{
+			    if ((nModifs & ALT) != 0)
+			    {
+				*pmodifiers |= MOD_MASK_ALT;
+				if ((nModifs & SHIFT) == 0)
+				    *pch2 = VirtKeyMap[i].chAlone;
+			    }
+			    if ((nModifs & CTRL) != 0)
+			    {
+				*pmodifiers |= MOD_MASK_CTRL;
+				if ((nModifs & SHIFT) == 0)
+				    *pch2 = VirtKeyMap[i].chAlone;
+			    }
+			}
+			else if (pker->wVirtualKeyCode >= VK_END
+				&& pker->wVirtualKeyCode <= VK_DOWN)
+			{
+			    // (0x23 - 0x28): VK_END, VK_HOME,
+			    // VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN
+
+			    *pmodifiers = 0;
+			    *pch2 = VirtKeyMap[i].chAlone;
+			    if ((nModifs & SHIFT) != 0
+						    && (nModifs & ~SHIFT) == 0)
+			    {
+				*pch2 = VirtKeyMap[i].chShift;
+			    }
+			    if ((nModifs & CTRL) != 0
+						     && (nModifs & ~CTRL) == 0)
+			    {
+				*pch2 = VirtKeyMap[i].chCtrl;
+				if (pker->wVirtualKeyCode == VK_UP
+				    || pker->wVirtualKeyCode == VK_DOWN)
+				{
+				    *pmodifiers |= MOD_MASK_CTRL;
+				    *pch2 = VirtKeyMap[i].chAlone;
+				}
+			    }
+			    if ((nModifs & SHIFT) != 0
+						      && (nModifs & CTRL) != 0)
+			    {
+				*pmodifiers |= MOD_MASK_CTRL;
+				*pch2 = VirtKeyMap[i].chShift;
+			    }
+			    if ((nModifs & ALT) != 0)
+			    {
+				*pch2 = VirtKeyMap[i].chAlt;
+				*pmodifiers |= MOD_MASK_ALT;
+				if ((nModifs & ~ALT) == 0)
+				{
+				    *pch2 = VirtKeyMap[i].chAlone;
+				}
+				else if ((nModifs & SHIFT) != 0)
+				{
+				    *pch2 = VirtKeyMap[i].chShift;
+				}
+				else if ((nModifs & CTRL) != 0)
+				{
+				    if (pker->wVirtualKeyCode == VK_UP
+					|| pker->wVirtualKeyCode == VK_DOWN)
+				    {
+					*pmodifiers |= MOD_MASK_CTRL;
+					*pch2 = VirtKeyMap[i].chAlone;
+				    }
+				    else
+				    {
+					*pch2 = VirtKeyMap[i].chCtrl;
+				    }
+				}
+			    }
+			}
+			else if (pker->wVirtualKeyCode == VK_INSERT
+					&& (nModifs & SHIFT) != 0
+					&& (nModifs & ~SHIFT) == 0)
+			{
+			    *pmodifiers = 0;
+			    *pch2 = VirtKeyMap[i].chShift;
+			}
+			else
+			{
+			    *pch2 = VirtKeyMap[i].chAlone;
+			    if ((nModifs & SHIFT) != 0)
+				*pmodifiers |= MOD_MASK_SHIFT;
+			    if ((nModifs & CTRL) != 0)
+				*pmodifiers |= MOD_MASK_CTRL;
+			    if ((nModifs & ALT) != 0)
+				*pmodifiers |= MOD_MASK_ALT;
+			}
+		    }
 		}
 
 		return TRUE;
@@ -1137,7 +1214,7 @@ decode_key_event(
 	*pch = NUL;
     else
     {
-	*pch = (i > 0) ? pker->UChar : NUL;
+	*pch = (i > 0) ? pker->uChar.UnicodeChar : NUL;
 
 	if (pmodifiers != NULL)
 	{
@@ -1163,25 +1240,119 @@ decode_key_event(
     return (*pch != NUL);
 }
 
-#endif // FEAT_GUI_MSWIN
+# if defined(FEAT_EVAL)
+    static int
+encode_key_event(dict_T *args, INPUT_RECORD *ir)
+{
+    static int s_dwMods = 0;
+
+    char_u *action = dict_get_string(args, "event", TRUE);
+    if (action && (STRICMP(action, "keydown") == 0
+					|| STRICMP(action, "keyup") == 0))
+    {
+	BOOL isKeyDown = STRICMP(action, "keydown") == 0;
+	WORD vkCode = dict_get_number_def(args, "keycode", 0);
+	if (vkCode <= 0 || vkCode >= 0xFF)
+	{
+	    semsg(_(e_invalid_argument_nr), (long)vkCode);
+	    return FALSE;
+	}
+
+	ir->EventType = KEY_EVENT;
+	KEY_EVENT_RECORD ker;
+	ZeroMemory(&ker, sizeof(ker));
+	ker.bKeyDown = isKeyDown;
+	ker.wRepeatCount = 1;
+	ker.wVirtualScanCode = 0;
+	ker.dwControlKeyState = 0;
+	int mods = (int)dict_get_number(args, "modifiers");
+	// Encode the win32 console key modifiers from Vim keyboard modifiers.
+	if (mods)
+	{
+	    // If "modifiers" is explicitly set in the args, then we reset any
+	    // remembered modifier key state that may have been set from
+	    // earlier mod-key-down events, even if they are not yet unset by
+	    // earlier mod-key-up events.
+	    s_dwMods = 0;
+	    if (mods & MOD_MASK_SHIFT)
+		ker.dwControlKeyState |= SHIFT_PRESSED;
+	    if (mods & MOD_MASK_CTRL)
+		ker.dwControlKeyState |= LEFT_CTRL_PRESSED;
+	    if (mods & MOD_MASK_ALT)
+		ker.dwControlKeyState |= LEFT_ALT_PRESSED;
+	}
+
+	if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT || vkCode == VK_SHIFT)
+	{
+	    if (isKeyDown)
+		s_dwMods |= SHIFT_PRESSED;
+	    else
+		s_dwMods &= ~SHIFT_PRESSED;
+	}
+	else if (vkCode == VK_LCONTROL || vkCode == VK_CONTROL)
+	{
+	    if (isKeyDown)
+		s_dwMods |= LEFT_CTRL_PRESSED;
+	    else
+		s_dwMods &= ~LEFT_CTRL_PRESSED;
+	}
+	else if (vkCode == VK_RCONTROL)
+	{
+	    if (isKeyDown)
+		s_dwMods |= RIGHT_CTRL_PRESSED;
+	    else
+		s_dwMods &= ~RIGHT_CTRL_PRESSED;
+	}
+	else if (vkCode == VK_LMENU || vkCode == VK_MENU)
+	{
+	    if (isKeyDown)
+		s_dwMods |= LEFT_ALT_PRESSED;
+	    else
+		s_dwMods &= ~LEFT_ALT_PRESSED;
+	}
+	else if (vkCode == VK_RMENU)
+	{
+	    if (isKeyDown)
+		s_dwMods |= RIGHT_ALT_PRESSED;
+	    else
+		s_dwMods &= ~RIGHT_ALT_PRESSED;
+	}
+	ker.dwControlKeyState |= s_dwMods;
+	ker.wVirtualKeyCode = vkCode;
+	ker.uChar.UnicodeChar = 0;
+	ir->Event.KeyEvent = ker;
+	vim_free(action);
+    }
+    else
+    {
+	if (action == NULL)
+	{
+	    semsg(_(e_missing_argument_str), "event");
+	}
+	else
+	{
+	    semsg(_(e_invalid_value_for_argument_str_str), "event", action);
+	    vim_free(action);
+	}
+	return FALSE;
+    }
+    return TRUE;
+}
+# endif  // FEAT_EVAL
+#endif // !FEAT_GUI_MSWIN || VIMDLL
 
 
 /*
  * For the GUI the mouse handling is in gui_w32.c.
  */
-#if defined(FEAT_GUI_MSWIN) && !defined(VIMDLL)
-    void
-mch_setmouse(int on UNUSED)
-{
-}
-#else
+#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
 static int g_fMouseAvail = FALSE;   // mouse present
 static int g_fMouseActive = FALSE;  // mouse enabled
 static int g_nMouseClick = -1;	    // mouse status
 static int g_xMouse;		    // mouse x coordinate
 static int g_yMouse;		    // mouse y coordinate
-static DWORD g_cmodein = 0;         // Original console input mode
-static DWORD g_cmodeout = 0;        // Original console output mode
+static DWORD g_cmodein = 0;	    // Original console input mode
+static DWORD g_cmodeout = 0;	    // Original console output mode
 
 /*
  * Enable or disable mouse input
@@ -1216,7 +1387,7 @@ mch_setmouse(int on)
 }
 
 
-# if defined(FEAT_BEVAL_TERM) || defined(PROTO)
+# if defined(FEAT_BEVAL_TERM)
 /*
  * Called when 'balloonevalterm' changed.
  */
@@ -1226,6 +1397,95 @@ mch_bevalterm_changed(void)
     mch_setmouse(g_fMouseActive);
 }
 # endif
+
+/*
+ * Win32 console mouse scroll event handler.
+ * Console version of the _OnMouseWheel() function in gui_w32.c
+ *
+ * This encodes the mouse scroll direction and keyboard modifiers into
+ * g_nMouseClick, and the mouse position into g_xMouse and g_yMouse
+ *
+ * The direction of the scroll is decoded from two fields of the win32 console
+ * mouse event record;
+ *    1. The orientation - vertical or horizontal flag - from dwEventFlags
+ *    2. The sign - positive or negative (aka delta flag) - from dwButtonState
+ *
+ * When scroll orientation is HORIZONTAL
+ *    -  If the high word of the dwButtonState member contains a positive
+ *	 value, the wheel was rotated to the right.
+ *    -  Otherwise, the wheel was rotated to the left.
+ * When scroll orientation is VERTICAL
+ *    -  If the high word of the dwButtonState member contains a positive value,
+ *       the wheel was rotated forward, away from the user.
+ *    -  Otherwise, the wheel was rotated backward, toward the user.
+ */
+    static void
+decode_mouse_wheel(MOUSE_EVENT_RECORD *pmer)
+{
+    int	    horizontal = (pmer->dwEventFlags == MOUSE_HWHEELED);
+    int	    zDelta = pmer->dwButtonState;
+
+    g_xMouse = pmer->dwMousePosition.X;
+    g_yMouse = pmer->dwMousePosition.Y;
+
+# ifdef FEAT_PROP_POPUP
+    int lcol = g_xMouse;
+    int lrow = g_yMouse;
+    win_T *wp = mouse_find_win(&lrow, &lcol, FIND_POPUP);
+    if (wp != NULL && popup_is_popup(wp))
+    {
+	g_nMouseClick = -1;
+	cmdarg_T cap;
+	oparg_T oa;
+	CLEAR_FIELD(cap);
+	clear_oparg(&oa);
+	cap.oap = &oa;
+	if (horizontal)
+	{
+	    cap.arg = zDelta < 0 ? MSCR_LEFT : MSCR_RIGHT;
+	    cap.cmdchar = zDelta < 0 ? K_MOUSELEFT : K_MOUSERIGHT;
+	}
+	else
+	{
+	    cap.cmdchar = zDelta < 0 ? K_MOUSEUP : K_MOUSEDOWN;
+	    cap.arg = zDelta < 0 ? MSCR_UP : MSCR_DOWN;
+	}
+
+	// Mouse hovers over popup window, scroll it if possible.
+	mouse_row = wp->w_winrow;
+	mouse_col = wp->w_wincol;
+	nv_mousescroll(&cap);
+	update_screen(0);
+	setcursor();
+	out_flush();
+    }
+# endif
+    mouse_col = g_xMouse;
+    mouse_row = g_yMouse;
+
+    char_u modifiers = 0;
+    char_u direction = 0;
+
+    // Decode the direction into an event that Vim can process
+    if (horizontal)
+	direction = zDelta >= 0 ? KE_MOUSELEFT : KE_MOUSERIGHT;
+    else
+	direction = zDelta >= 0 ? KE_MOUSEDOWN : KE_MOUSEUP;
+
+    // Decode the win32 console key modifiers into Vim mouse modifiers.
+    if (pmer->dwControlKeyState & SHIFT_PRESSED)
+	modifiers |= MOD_MASK_SHIFT; // MOUSE_SHIFT;
+    if (pmer->dwControlKeyState & (RIGHT_CTRL_PRESSED | LEFT_CTRL_PRESSED))
+	modifiers |= MOD_MASK_CTRL; // MOUSE_CTRL;
+    if (pmer->dwControlKeyState & (RIGHT_ALT_PRESSED  | LEFT_ALT_PRESSED))
+	modifiers |= MOD_MASK_ALT; // MOUSE_ALT;
+
+    // add (bitwise or) the scroll direction and the key modifier chars
+    // together.
+    g_nMouseClick = ((direction << 8) | modifiers);
+
+    return;
+}
 
 /*
  * Decode a MOUSE_EVENT.  If it's a valid event, return MOUSE_LEFT,
@@ -1296,9 +1556,16 @@ decode_mouse_event(
 	return FALSE;
     }
 
-    // unprocessed mouse click?
+    // If there is an unprocessed mouse click drop this one.
     if (g_nMouseClick != -1)
 	return TRUE;
+
+    if (pmer->dwEventFlags == MOUSE_WHEELED
+				       || pmer->dwEventFlags == MOUSE_HWHEELED)
+    {
+	decode_mouse_wheel(pmer);
+	return TRUE;  // we now should have a mouse scroll in g_nMouseClick
+    }
 
     nButton = -1;
     g_xMouse = pmer->dwMousePosition.X;
@@ -1492,10 +1759,258 @@ decode_mouse_event(
     return TRUE;
 }
 
-#endif // FEAT_GUI_MSWIN
+# ifdef FEAT_EVAL
+    static int
+encode_mouse_event(dict_T *args, INPUT_RECORD *ir)
+{
+    int		button;
+    int		row;
+    int		col;
+    int		repeated_click;
+    int_u	mods = 0;
+    int		move;
 
+    if (!dict_has_key(args, "row") || !dict_has_key(args, "col"))
+	return FALSE;
 
-#ifdef MCH_CURSOR_SHAPE
+    // Note: "move" is optional, requires fewer arguments
+    move = (int)dict_get_bool(args, "move", FALSE);
+    if (!move && (!dict_has_key(args, "button")
+	    || !dict_has_key(args, "multiclick")
+	    || !dict_has_key(args, "modifiers")))
+	return FALSE;
+
+    row = (int)dict_get_number(args, "row") - 1;
+    col = (int)dict_get_number(args, "col") - 1;
+
+    ir->EventType = MOUSE_EVENT;
+    MOUSE_EVENT_RECORD mer;
+    ZeroMemory(&mer, sizeof(mer));
+    mer.dwMousePosition.X  = col;
+    mer.dwMousePosition.Y  = row;
+
+    if (move)
+    {
+	mer.dwButtonState = 0;
+	mer.dwEventFlags = MOUSE_MOVED;
+    }
+    else
+    {
+	button = (int)dict_get_number(args, "button");
+	repeated_click = (int)dict_get_number(args, "multiclick");
+	mods = (int)dict_get_number(args, "modifiers");
+	// Reset the scroll values to known values.
+	// XXX: Remove this when/if the scroll step is made configurable.
+	mouse_set_hor_scroll_step(6);
+	mouse_set_vert_scroll_step(3);
+
+	switch (button)
+	{
+	    case MOUSE_LEFT:
+		mer.dwButtonState = FROM_LEFT_1ST_BUTTON_PRESSED;
+		mer.dwEventFlags = repeated_click == 1 ? DOUBLE_CLICK : 0;
+		break;
+	    case MOUSE_MIDDLE:
+		mer.dwButtonState = FROM_LEFT_2ND_BUTTON_PRESSED;
+		mer.dwEventFlags = repeated_click == 1 ? DOUBLE_CLICK : 0;
+		break;
+	    case MOUSE_RIGHT:
+		mer.dwButtonState = RIGHTMOST_BUTTON_PRESSED;
+		mer.dwEventFlags = repeated_click == 1 ? DOUBLE_CLICK : 0;
+		break;
+	    case MOUSE_RELEASE:
+		// umm?  Assume Left Release?
+		mer.dwEventFlags = 0;
+
+	    case MOUSE_MOVE:
+		mer.dwButtonState = 0;
+		mer.dwEventFlags = MOUSE_MOVED;
+		break;
+	    case MOUSE_X1:
+		mer.dwButtonState = FROM_LEFT_3RD_BUTTON_PRESSED;
+		break;
+	    case MOUSE_X2:
+		mer.dwButtonState = FROM_LEFT_4TH_BUTTON_PRESSED;
+		break;
+	    case MOUSE_4:  // KE_MOUSEDOWN;
+		mer.dwButtonState = -1;
+		mer.dwEventFlags = MOUSE_WHEELED;
+		break;
+	    case MOUSE_5:  // KE_MOUSEUP;
+		mer.dwButtonState = +1;
+		mer.dwEventFlags = MOUSE_WHEELED;
+		break;
+	    case MOUSE_6:  // KE_MOUSELEFT;
+		mer.dwButtonState = -1;
+		mer.dwEventFlags = MOUSE_HWHEELED;
+		break;
+	    case MOUSE_7:  // KE_MOUSERIGHT;
+		mer.dwButtonState = +1;
+		mer.dwEventFlags = MOUSE_HWHEELED;
+		break;
+	    default:
+		semsg(_(e_invalid_argument_str), "button");
+		return FALSE;
+	}
+    }
+
+    mer.dwControlKeyState = 0;
+    if (mods != 0)
+    {
+	// Encode the win32 console key modifiers from Vim MOUSE modifiers.
+	if (mods & MOUSE_SHIFT)
+	    mer.dwControlKeyState |= SHIFT_PRESSED;
+	if (mods & MOUSE_CTRL)
+	    mer.dwControlKeyState |= LEFT_CTRL_PRESSED;
+	if (mods & MOUSE_ALT)
+	    mer.dwControlKeyState |= LEFT_ALT_PRESSED;
+    }
+    ir->Event.MouseEvent = mer;
+    return TRUE;
+}
+# endif  // FEAT_EVAL
+
+    static int
+write_input_record_buffer(INPUT_RECORD* irEvents, int nLength)
+{
+    int				nCount = 0;
+    input_record_buffer_node_T	*event_node;
+
+    while (nCount < nLength)
+    {
+	event_node = alloc(sizeof(input_record_buffer_node_T));
+	if (event_node == NULL)
+	    return -1;
+
+	event_node->ir = irEvents[nCount++];
+	event_node->next = NULL;
+
+	input_record_buffer.length++;
+	if (input_record_buffer.tail == NULL)
+	{
+	    input_record_buffer.head = event_node;
+	    input_record_buffer.tail = event_node;
+	}
+	else
+	{
+	    input_record_buffer.tail->next = event_node;
+	    input_record_buffer.tail = input_record_buffer.tail->next;
+	}
+    }
+    return nCount;
+}
+
+    static int
+read_input_record_buffer(INPUT_RECORD* irEvents, int nMaxLength)
+{
+    int nCount = 0;
+    while (nCount < nMaxLength && input_record_buffer.head != NULL)
+    {
+	input_record_buffer.length--;
+	input_record_buffer_node_T *pop_head = input_record_buffer.head;
+	irEvents[nCount++] = pop_head->ir;
+	input_record_buffer.head = pop_head->next;
+	vim_free(pop_head);
+	if (input_record_buffer.length == 0)
+	    input_record_buffer.tail = NULL;
+    }
+    return nCount;
+}
+#else  // FEAT_GUI_MSWIN && !VIMDLL
+    void
+mch_setmouse(int on UNUSED)
+{
+}
+#endif // FEAT_GUI_MSWIN && !VIMDLL
+
+#ifdef FEAT_EVAL
+/*
+ * The 'test_mswin_event' function is for testing Vim's low-level handling of
+ * user input events.  ie, this manages the encoding of INPUT_RECORD events
+ * so that we have a way to test how Vim decodes INPUT_RECORD events in Windows
+ * consoles.
+ *
+ * The 'test_mswin_event' function is based on 'test_gui_event'.  In fact, when
+ * the Windows GUI is running, the arguments; 'event' and 'args', are the same.
+ * So, it acts as an alias for 'test_gui_event' for the Windows GUI.
+ *
+ * When the Windows console is running, the arguments; 'event' and 'args', are
+ * a subset of what 'test_gui_event' handles, ie, only "key" and "mouse"
+ * events are encoded as INPUT_RECORD events.
+ *
+ * Note: INPUT_RECORDs are only used by the Windows console, not the GUI.  The
+ * GUI sends MSG structs instead.
+ */
+    int
+test_mswin_event(char_u *event, dict_T *args)
+{
+    int lpEventsWritten = 0;
+
+# if defined(VIMDLL) || defined(FEAT_GUI_MSWIN)
+    if (gui.in_use)
+	return test_gui_w32_sendevent(event, args);
+# endif
+
+# if defined(VIMDLL) || !defined(FEAT_GUI_MSWIN)
+
+// Currently implemented event record types are; KEY_EVENT and MOUSE_EVENT
+// Potentially could also implement: FOCUS_EVENT and WINDOW_BUFFER_SIZE_EVENT
+// Maybe also:  MENU_EVENT
+
+    INPUT_RECORD ir;
+    BOOL input_encoded = FALSE;
+    BOOL execute = FALSE;
+    if (STRCMP(event, "key") == 0)
+    {
+	execute = dict_get_bool(args, "execute", FALSE);
+	if (dict_has_key(args, "event"))
+	    input_encoded = encode_key_event(args, &ir);
+	else if (!execute)
+	{
+	    semsg(_(e_missing_argument_str), "event");
+	    return FALSE;
+	}
+    }
+    else if (STRCMP(event, "mouse") == 0)
+    {
+	execute = TRUE;
+	input_encoded = encode_mouse_event(args, &ir);
+    }
+    else
+    {
+	semsg(_(e_invalid_value_for_argument_str_str), "event", event);
+	return FALSE;
+    }
+
+    // Ideally, WriteConsoleInput would be used to inject these low-level
+    // events.  But, this doesn't work well in the CI test environment.  So
+    // implementing an input_record_buffer instead.
+    if (input_encoded)
+    {
+	if ((lpEventsWritten = write_input_record_buffer(&ir, 1)) < 0)
+	{
+	    semsg(_(e_out_of_memory), "event");
+	    return FALSE;
+	}
+    }
+
+    // Set flags to execute the event, ie. like feedkeys mode X.
+    if (execute)
+    {
+	int save_msg_scroll = msg_scroll;
+	// Avoid a 1 second delay when the keys start Insert mode.
+	msg_scroll = FALSE;
+	ch_log(NULL, "test_mswin_event() executing");
+	exec_normal(TRUE, TRUE, TRUE);
+	msg_scroll |= save_msg_scroll;
+    }
+
+# endif
+    return lpEventsWritten;
+}
+#endif // FEAT_EVAL
+
+#if defined(MCH_CURSOR_SHAPE)
 /*
  * Set the shape of the cursor.
  * 'thickness' can be from 1 (thin) to 99 (block)
@@ -1503,13 +2018,27 @@ decode_mouse_event(
     static void
 mch_set_cursor_shape(int thickness)
 {
-    CONSOLE_CURSOR_INFO ConsoleCursorInfo;
-    ConsoleCursorInfo.dwSize = thickness;
-    ConsoleCursorInfo.bVisible = s_cursor_visible;
+    if (vtp_working)
+    {
+	if (*T_CSI == NUL)
+	{
+	    // If 't_SI' is not set, use the default cursor styles.
+	    if (thickness < 50)
+		vtp_printf("\033[3 q");	// underline
+	    else
+		vtp_printf("\033[0 q");	// default
+	}
+    }
+    else
+    {
+	CONSOLE_CURSOR_INFO ConsoleCursorInfo;
+	ConsoleCursorInfo.dwSize = thickness;
+	ConsoleCursorInfo.bVisible = s_cursor_visible;
 
-    SetConsoleCursorInfo(g_hConOut, &ConsoleCursorInfo);
-    if (s_cursor_visible)
-	SetConsoleCursorPosition(g_hConOut, g_coord);
+	SetConsoleCursorInfo(g_hConOut, &ConsoleCursorInfo);
+	if (s_cursor_visible)
+	    SetConsoleCursorPosition(g_hConOut, g_coord);
+    }
 }
 
     void
@@ -1658,7 +2187,7 @@ WaitForChar(long msec, int ignore_input)
 # ifdef FEAT_MBYTE_IME
 	// May have to redraw if the cursor ends up in the wrong place.
 	// Only when not peeking.
-	if (State & CMDLINE && msg_row == Rows - 1 && msec != 0)
+	if (State == MODE_CMDLINE && msg_row == Rows - 1 && msec != 0)
 	{
 	    CONSOLE_SCREEN_BUFFER_INFO csbi;
 
@@ -1668,7 +2197,7 @@ WaitForChar(long msec, int ignore_input)
 		{
 		    // The screen is now messed up, must redraw the command
 		    // line and later all the windows.
-		    redraw_all_later(CLEAR);
+		    redraw_all_later(UPD_CLEAR);
 		    compute_cmdrow();
 		    redrawcmd();
 		}
@@ -1683,7 +2212,7 @@ WaitForChar(long msec, int ignore_input)
 # ifdef FEAT_MBYTE_IME
 		// Windows IME sends two '\n's with only one 'ENTER'.  First:
 		// wVirtualKeyCode == 13. second: wVirtualKeyCode == 0
-		if (ir.Event.KeyEvent.UChar == 0
+		if (ir.Event.KeyEvent.uChar.UnicodeChar == 0
 			&& ir.Event.KeyEvent.wVirtualKeyCode == 13)
 		{
 		    read_console_input(g_hConIn, &ir, 1, &cRecords);
@@ -1748,7 +2277,7 @@ mch_char_avail(void)
     return WaitForChar(0L, FALSE);
 }
 
-# if defined(FEAT_TERMINAL) || defined(PROTO)
+# if defined(FEAT_TERMINAL)
 /*
  * Check for any pending input or messages.
  */
@@ -1902,10 +2431,11 @@ mch_inchar(
 # endif
 
     // Keep looping until there is something in the typeahead buffer and more
-    // to get and still room in the buffer (up to two bytes for a char and
-    // three bytes for a modifier).
+    // to get and still room in the buffer.  A mouse event uses up to
+    // 10 bytes: 3 (modifier) + 3 (scroll event) + 4 (coordinates), and a
+    // keyboard input uses up to 7 bytes: 3 (modifier) + 4 (UTF-8 char).
     while ((typeaheadlen == 0 || WaitForChar(0L, FALSE))
-		         && typeaheadlen + 5 + TYPEAHEADSPACE <= TYPEAHEADLEN)
+			  && typeaheadlen + 10 + TYPEAHEADSPACE <= TYPEAHEADLEN)
     {
 	if (typebuf_changed(tb_change_cnt))
 	{
@@ -1921,11 +2451,40 @@ mch_inchar(
 		fprintf(fdDump, "{%02x @ %d, %d}",
 			g_nMouseClick, g_xMouse, g_yMouse);
 # endif
-	    typeahead[typeaheadlen++] = ESC + 128;
-	    typeahead[typeaheadlen++] = 'M';
-	    typeahead[typeaheadlen++] = g_nMouseClick;
-	    typeahead[typeaheadlen++] = g_xMouse + '!';
-	    typeahead[typeaheadlen++] = g_yMouse + '!';
+	    char_u modifiers = ((char_u *)(&g_nMouseClick))[0];
+	    char_u scroll_dir = ((char_u *)(&g_nMouseClick))[1];
+
+	    if (scroll_dir == KE_MOUSEDOWN
+		    || scroll_dir == KE_MOUSEUP
+		    || scroll_dir == KE_MOUSELEFT
+		    || scroll_dir == KE_MOUSERIGHT)
+	    {
+		if (modifiers > 0)
+		{
+		    // use K_SPECIAL instead of CSI to make mappings work
+		    typeahead[typeaheadlen++] = K_SPECIAL;
+		    typeahead[typeaheadlen++] = KS_MODIFIER;
+		    typeahead[typeaheadlen++] = modifiers;
+		}
+		typeahead[typeaheadlen++] = CSI;
+		typeahead[typeaheadlen++] = KS_EXTRA;
+		typeahead[typeaheadlen++] = scroll_dir;
+	    }
+	    else
+	    {
+		typeahead[typeaheadlen++] = ESC + 128;
+		typeahead[typeaheadlen++] = 'M';
+		typeahead[typeaheadlen++] = g_nMouseClick;
+	    }
+
+	    // Pass the pointer coordinates of the mouse event in 2 bytes,
+	    // allowing for > 223 columns.  Both for click and scroll events.
+	    // This is the same as what is used for the GUI.
+	    typeahead[typeaheadlen++] = (char_u)(g_xMouse / 128 + ' ' + 1);
+	    typeahead[typeaheadlen++] = (char_u)(g_xMouse % 128 + ' ' + 1);
+	    typeahead[typeaheadlen++] = (char_u)(g_yMouse / 128 + ' ' + 1);
+	    typeahead[typeaheadlen++] = (char_u)(g_yMouse % 128 + ' ' + 1);
+
 	    g_nMouseClick = -1;
 	}
 	else
@@ -1934,6 +2493,17 @@ mch_inchar(
 	    int		modifiers = 0;
 
 	    c = tgetch(&modifiers, &ch2);
+
+	    c = simplify_key(c, &modifiers);
+
+	    // Some chars need adjustment when the Ctrl modifier is used.
+	    ++no_reduce_keys;
+	    c = may_adjust_key_for_ctrl(modifiers, c);
+	    --no_reduce_keys;
+
+	    // remove the SHIFT modifier for keys where it's already included,
+	    // e.g., '(' and '*'
+	    modifiers = may_remove_shift_modifier(modifiers, c);
 
 	    if (typebuf_changed(tb_change_cnt))
 	    {
@@ -2077,25 +2647,19 @@ theend:
 	buf[len++] = typeahead[0];
 	mch_memmove(typeahead, typeahead + 1, --typeaheadlen);
     }
-#  ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_EVAL
     if (len > 0)
     {
 	buf[len] = NUL;
 	ch_log(NULL, "raw key input: \"%s\"", buf);
     }
-#  endif
+# endif
     return len;
 
-#else // FEAT_GUI_MSWIN
+#else // FEAT_GUI_MSWIN && !VIMDLL
     return 0;
-#endif // FEAT_GUI_MSWIN
+#endif // FEAT_GUI_MSWIN && !VIMDLL
 }
-
-#ifndef PROTO
-# ifndef __MINGW32__
-#  include <shellapi.h>	// required for FindExecutable()
-# endif
-#endif
 
 /*
  * Return TRUE if "name" is an executable file, FALSE if not or it doesn't exist.
@@ -2106,13 +2670,57 @@ theend:
     static int
 executable_file(char *name, char_u **path)
 {
-    if (mch_getperm((char_u *)name) != -1 && !mch_isdir((char_u *)name))
+    int attrs = win32_getattrs((char_u *)name);
+
+    // The file doesn't exist or is a folder.
+    if (attrs == -1 || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+	return FALSE;
+    // Check if the file is an AppExecLink, a special alias used by Windows
+    // Store for its apps.
+    if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
     {
+	char_u	*res = resolve_appexeclink((char_u *)name);
+	if (res == NULL)
+	    res = resolve_reparse_point((char_u *)name);
+	if (res == NULL)
+	    return FALSE;
+	// The path is already absolute.
 	if (path != NULL)
-	    *path = FullName_save((char_u *)name, FALSE);
-	return TRUE;
+	    *path = res;
+	else
+	    vim_free(res);
     }
-    return FALSE;
+    else if (path != NULL)
+	*path = FullName_save((char_u *)name, FALSE);
+    return TRUE;
+}
+
+/*
+ * Check for a matching prefix; "name" includes the trailing wildcard.
+ * An inconclusive search (e.g. a directory which cannot be enumerated) must
+ * not skip the normal checks.
+ */
+    static bool
+executable_prefix_exists(char_u *name)
+{
+    WCHAR		*wn;
+    WIN32_FIND_DATAW	data;
+    HANDLE		handle;
+    DWORD		error;
+
+    wn = enc_to_utf16(name, NULL);
+    if (wn == NULL)
+	return true;
+    handle = FindFirstFileExW(wn, FindExInfoBasic, &data,
+					    FindExSearchNameMatch, NULL, 0);
+    error = GetLastError();
+    vim_free(wn);
+    if (handle != INVALID_HANDLE_VALUE)
+    {
+	FindClose(handle);
+	return true;
+    }
+    return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
 }
 
 /*
@@ -2123,23 +2731,29 @@ executable_file(char *name, char_u **path)
  * the allocated memory.
  */
     static int
-executable_exists(char *name, char_u **path, int use_path, int use_pathext)
+executable_exists(
+    char	*name,
+    size_t	namelen,
+    char_u	**path,
+    int		use_path,
+    int		use_pathext)
 {
     // WinNT and later can use _MAX_PATH wide characters for a pathname, which
     // means that the maximum pathname is _MAX_PATH * 3 bytes when 'enc' is
     // UTF-8.
     char_u	buf[_MAX_PATH * 3];
-    size_t	len = STRLEN(name);
-    size_t	tmplen;
-    char_u	*p, *e, *e2;
-    char_u	*pathbuf = NULL;
-    char_u	*pathext = NULL;
-    char_u	*pathextbuf = NULL;
+    char_u	*p;
+    string_T	pathbuf = {NULL, 0};
+    int		pathbuf_allocated = FALSE;
+    string_T	pathext = {NULL, 0};
+    int		pathext_allocated = FALSE;
     char_u	*shname = NULL;
     int		noext = FALSE;
+    bool	simple_pathext = true;
+    int		ext_count = 0;
     int		retval = FALSE;
 
-    if (len >= sizeof(buf))	// safety check
+    if (namelen >= sizeof(buf))	// safety check
 	return FALSE;
 
     // Using the name directly when a Unix-shell like 'shell'.
@@ -2151,32 +2765,46 @@ executable_exists(char *name, char_u **path, int use_path, int use_pathext)
 
     if (use_pathext)
     {
-	pathext = mch_getenv("PATHEXT");
-	if (pathext == NULL)
-	    pathext = (char_u *)".com;.exe;.bat;.cmd";
+	pathext.string = mch_getenv("PATHEXT");
+	if (pathext.string == NULL)
+	    STR_LITERAL_SET(pathext, ".com;.exe;.bat;.cmd");
+	else
+	    pathext.length = STRLEN(pathext.string);
 
 	if (noext == FALSE)
 	{
+	    char_u  *e;
+	    char_u  *q;
+	    size_t  plen;
+
 	    /*
 	     * Loop over all extensions in $PATHEXT.
 	     * Check "name" ends with extension.
 	     */
-	    p = pathext;
+	    p = pathext.string;
 	    while (*p)
 	    {
 		if (p[0] == ';'
 			    || (p[0] == '.' && (p[1] == NUL || p[1] == ';')))
 		{
 		    // Skip empty or single ".".
+		    if (*p == '.')
+			simple_pathext = false;
 		    ++p;
 		    continue;
 		}
 		e = vim_strchr(p, ';');
 		if (e == NULL)
-		    e = p + STRLEN(p);
-		tmplen = e - p;
+		    e = pathext.string + pathext.length;
+		plen = (size_t)(e - p);
+		++ext_count;
+		if (*p != '.')
+		    simple_pathext = false;
+		for (q = p + 1; q < e; ++q)
+		    if (!ASCII_ISALNUM(*q))
+			simple_pathext = false;
 
-		if (_strnicoll(name + len - tmplen, (char *)p, tmplen) == 0)
+		if (_strnicoll(name + namelen - plen, (char *)p, plen) == 0)
 		{
 		    noext = TRUE;
 		    break;
@@ -2187,21 +2815,25 @@ executable_exists(char *name, char_u **path, int use_path, int use_pathext)
 	}
     }
 
-    // Prepend single "." to pathext, it's means no extension added.
-    if (pathext == NULL)
-	pathext = (char_u *)".";
+    // Prepend single "." to pathext, it means no extension added.
+    if (pathext.string == NULL)
+	STR_LITERAL_SET(pathext, ".");
     else if (noext == TRUE)
     {
-	if (pathextbuf == NULL)
-	    pathextbuf = alloc(STRLEN(pathext) + 3);
-	if (pathextbuf == NULL)
+	char_u  *tmp;
+
+	tmp = alloc(pathext.length + 3);
+	if (tmp == NULL)
 	{
 	    retval = FALSE;
 	    goto theend;
 	}
-	STRCPY(pathextbuf, ".;");
-	STRCAT(pathextbuf, pathext);
-	pathext = pathextbuf;
+
+	STRCPY(tmp, ".;");
+	STRCPY(tmp + 2, pathext.string);
+	pathext.string = tmp;
+	pathext.length += 2;
+	pathext_allocated = TRUE;
     }
 
     // Use $PATH when "use_path" is TRUE and "name" is basename.
@@ -2210,14 +2842,24 @@ executable_exists(char *name, char_u **path, int use_path, int use_pathext)
 	p = mch_getenv("PATH");
 	if (p != NULL)
 	{
-	    pathbuf = alloc(STRLEN(p) + 3);
-	    if (pathbuf == NULL)
+	    size_t  plen = STRLEN(p);
+
+	    pathbuf.string = alloc(plen + 3);
+	    if (pathbuf.string == NULL)
 	    {
 		retval = FALSE;
 		goto theend;
 	    }
-	    STRCPY(pathbuf, ".;");
-	    STRCAT(pathbuf, p);
+
+	    if (mch_getenv("NoDefaultCurrentDirectoryInExePath") == NULL &&
+		    strstr((char *)gettail(p_sh), "cmd.exe") != NULL)
+	    {
+		STRCPY(pathbuf.string, ".;");
+		pathbuf.length = 2;
+	    }
+	    STRCPY(pathbuf.string + pathbuf.length, p);
+	    pathbuf.length += plen;
+	    pathbuf_allocated = TRUE;
 	}
     }
 
@@ -2225,9 +2867,14 @@ executable_exists(char *name, char_u **path, int use_path, int use_pathext)
      * Walk through all entries in $PATH to check if "name" exists there and
      * is an executable file.
      */
-    p = (pathbuf != NULL) ? pathbuf : (char_u *)".";
+    if (pathbuf.string == NULL)
+	STR_LITERAL_SET(pathbuf, ".");
+    p = pathbuf.string;
     while (*p)
     {
+	char_u	*e;
+	size_t	buflen;
+
 	if (*p == ';') // Skip empty entry
 	{
 	    ++p;
@@ -2235,50 +2882,81 @@ executable_exists(char *name, char_u **path, int use_path, int use_pathext)
 	}
 	e = vim_strchr(p, ';');
 	if (e == NULL)
-	    e = p + STRLEN(p);
+	    e = pathbuf.string + pathbuf.length;
 
-	if (e - p + len + 2 > sizeof(buf))
+	if (e - p + namelen + 2 > sizeof(buf))
 	{
 	    retval = FALSE;
 	    goto theend;
 	}
 	// A single "." that means current dir.
 	if (e - p == 1 && *p == '.')
+	{
 	    STRCPY(buf, name);
+	    buflen = namelen;
+	}
 	else
 	{
-	    vim_strncpy(buf, p, e - p);
-	    add_pathsep(buf);
-	    STRCAT(buf, name);
+	    buflen = vim_snprintf_safelen(
+		(char *)buf,
+		sizeof(buf),
+		"%.*s%s%s", (int)(e - p), p,
+		!after_pathsep(p, e) ? PATHSEPSTR : "",
+		name);
 	}
-	tmplen = STRLEN(buf);
+
+	// Most directories in $PATH do not contain this command.  One prefix
+	// search can avoid a separate file query for every extension.  With
+	// few extensions, or an explicit executable suffix, it is cheaper to
+	// use the normal checks.  Leave unusual paths and suffixes to those
+	// checks as well, to preserve their path normalization and semantics.
+	if (!noext && simple_pathext && ext_count >= 3 && buflen > 0
+		&& buflen + 2 <= sizeof(buf)
+		&& buf[buflen - 1] != '.' && buf[buflen - 1] != ' '
+		&& vim_strpbrk(buf, (char_u *)"*?") == NULL
+		&& vim_strchr(gettail(buf), ':') == NULL)
+	{
+	    bool exists;
+
+	    buf[buflen] = '*';
+	    buf[buflen + 1] = NUL;
+	    exists = executable_prefix_exists(buf);
+	    buf[buflen] = NUL;
+	    if (!exists)
+	    {
+		p = e;
+		continue;
+	    }
+	}
 
 	/*
 	 * Loop over all extensions in $PATHEXT.
 	 * Check "name" with extension added.
 	 */
-	p = pathext;
+	p = pathext.string;
 	while (*p)
 	{
+	    char_u  *e2;
+
 	    if (*p == ';')
 	    {
 		// Skip empty entry
 		++p;
 		continue;
 	    }
-	    e2 = vim_strchr(p, (int)';');
+	    e2 = vim_strchr(p, ';');
 	    if (e2 == NULL)
-		e2 = p + STRLEN(p);
+		e2 = pathext.string + pathext.length;
 
 	    if (!(p[0] == '.' && (p[1] == NUL || p[1] == ';')))
 	    {
 		// Not a single "." that means no extension is added.
-		if (e2 - p + tmplen + 1 > sizeof(buf))
+		if (e2 - p + buflen + 1 > sizeof(buf))
 		{
 		    retval = FALSE;
 		    goto theend;
 		}
-		vim_strncpy(buf + tmplen, p, e2 - p);
+		vim_strncpy(buf + buflen, p, e2 - p);
 	    }
 	    if (executable_file((char *)buf, path))
 	    {
@@ -2293,8 +2971,10 @@ executable_exists(char *name, char_u **path, int use_path, int use_pathext)
     }
 
 theend:
-    free(pathextbuf);
-    free(pathbuf);
+    if (pathbuf_allocated)
+	free(pathbuf.string);
+    if (pathext_allocated)
+	free(pathext.string);
     return retval;
 }
 
@@ -2313,11 +2993,11 @@ theend:
  * worth allowing these to make debugging of issues easier.
  */
     static void
-bad_param_handler(const wchar_t *expression,
-    const wchar_t *function,
-    const wchar_t *file,
-    unsigned int line,
-    uintptr_t pReserved)
+bad_param_handler(const wchar_t *expression UNUSED,
+    const wchar_t *function UNUSED,
+    const wchar_t *file UNUSED,
+    unsigned int line UNUSED,
+    uintptr_t pReserved UNUSED)
 {
 }
 
@@ -2352,31 +3032,60 @@ mch_init_g(void)
     Rows = 25;
     Columns = 80;
 
-    // Look for 'vimrun'
+    // Look for 'vimrun'.
     {
-	char_u vimrun_location[_MAX_PATH + 4];
+	char_u	vimrun_location[_MAX_PATH + 4];
+	size_t	exe_pathlen = (size_t)(gettail(exe_name) - exe_name);
 
-	// First try in same directory as gvim.exe
-	STRCPY(vimrun_location, exe_name);
-	STRCPY(gettail(vimrun_location), "vimrun.exe");
-	if (mch_getperm(vimrun_location) >= 0)
+	// Note: 10 is length of 'vimrun.exe'.
+	if (exe_pathlen + 10 >= sizeof(vimrun_location))
 	{
-	    if (*skiptowhite(vimrun_location) != NUL)
-	    {
-		// Enclose path with white space in double quotes.
-		mch_memmove(vimrun_location + 1, vimrun_location,
-						 STRLEN(vimrun_location) + 1);
-		*vimrun_location = '"';
-		STRCPY(gettail(vimrun_location), "vimrun\" ");
-	    }
-	    else
-		STRCPY(gettail(vimrun_location), "vimrun ");
-
-	    vimrun_path = (char *)vim_strsave(vimrun_location);
-	    s_dont_use_vimrun = FALSE;
+	    if (executable_exists("vimrun.exe", STRLEN_LITERAL("vimrun.exe"),
+		    NULL, TRUE, FALSE))
+		s_dont_use_vimrun = FALSE;
 	}
-	else if (executable_exists("vimrun.exe", NULL, TRUE, FALSE))
-	    s_dont_use_vimrun = FALSE;
+	else
+	{
+	    // First try in same directory as gvim.exe.
+	    if (exe_pathlen > 0)
+		vim_strncpy(vimrun_location, exe_name, exe_pathlen);
+	    STRCPY(vimrun_location + exe_pathlen, "vimrun.exe");
+
+	    if (mch_getperm(vimrun_location) >= 0)
+	    {
+		char_u  *p;
+		size_t  plen;
+
+		if (exe_pathlen > 0 && *skiptowhite(vimrun_location) != NUL)
+		{
+		    // Enclose path with white space in double quotes.
+		    plen = vim_snprintf_safelen(
+			(char *)vimrun_location,
+			sizeof(vimrun_location),
+			"\"%.*svimrun\" ",
+			(int)exe_pathlen, exe_name);
+		}
+		else
+		{
+		    // Remove the suffix ('.exe').
+		    vimrun_location[exe_pathlen + 6] = ' ';
+		    vimrun_location[exe_pathlen + 7] = NUL;
+		    plen = exe_pathlen + 7;
+		}
+
+		p = vim_strnsave(vimrun_location, plen);
+		if (p != NULL)
+		{
+		    vimrun_path.string = p;
+		    vimrun_path.length = plen;
+		    vimrun_path_allocated = TRUE;
+		    s_dont_use_vimrun = FALSE;
+		}
+	    }
+	    else if (executable_exists("vimrun.exe", STRLEN_LITERAL("vimrun.exe"),
+		    NULL, TRUE, FALSE))
+		s_dont_use_vimrun = FALSE;
+	}
 
 	// Don't give the warning for a missing vimrun.exe right now, but only
 	// when vimrun was supposed to be used.  Don't bother people that do
@@ -2386,11 +3095,13 @@ mch_init_g(void)
     }
 
     /*
-     * If "finstr.exe" doesn't exist, use "grep -n" for 'grepprg'.
+     * If "findstr.exe" doesn't exist, use "grep -n" for 'grepprg'.
      * Otherwise the default "findstr /n" is used.
      */
-    if (!executable_exists("findstr.exe", NULL, TRUE, FALSE))
-	set_option_value((char_u *)"grepprg", 0, (char_u *)"grep -n", 0);
+    if (!executable_exists("findstr.exe", STRLEN_LITERAL("findstr.exe"),
+	    NULL, TRUE, FALSE))
+	set_option_value_give_err((char_u *)"grepprg",
+						    0, (char_u *)"grep -n", 0);
 
 # ifdef FEAT_CLIPBOARD
     win_clip_init();
@@ -2455,40 +3166,38 @@ FitConsoleWindow(
     COORD dwWindowSize;
     BOOL NeedAdjust = FALSE;
 
-    if (GetConsoleScreenBufferInfo(g_hConOut, &csbi))
-    {
-	/*
-	 * A buffer resize will fail if the current console window does
-	 * not lie completely within that buffer.  To avoid this, we might
-	 * have to move and possibly shrink the window.
-	 */
-	if (csbi.srWindow.Right >= dwBufferSize.X)
-	{
-	    dwWindowSize.X = SRWIDTH(csbi.srWindow);
-	    if (dwWindowSize.X > dwBufferSize.X)
-		dwWindowSize.X = dwBufferSize.X;
-	    csbi.srWindow.Right = dwBufferSize.X - 1;
-	    csbi.srWindow.Left = dwBufferSize.X - dwWindowSize.X;
-	    NeedAdjust = TRUE;
-	}
-	if (csbi.srWindow.Bottom >= dwBufferSize.Y)
-	{
-	    dwWindowSize.Y = SRHEIGHT(csbi.srWindow);
-	    if (dwWindowSize.Y > dwBufferSize.Y)
-		dwWindowSize.Y = dwBufferSize.Y;
-	    csbi.srWindow.Bottom = dwBufferSize.Y - 1;
-	    csbi.srWindow.Top = dwBufferSize.Y - dwWindowSize.Y;
-	    NeedAdjust = TRUE;
-	}
-	if (NeedAdjust && WantAdjust)
-	{
-	    if (!SetConsoleWindowInfo(g_hConOut, TRUE, &csbi.srWindow))
-		return FALSE;
-	}
-	return TRUE;
-    }
+    if (!GetConsoleScreenBufferInfo(g_hConOut, &csbi))
+	return FALSE;
 
-    return FALSE;
+    /*
+     * A buffer resize will fail if the current console window does
+     * not lie completely within that buffer.  To avoid this, we might
+     * have to move and possibly shrink the window.
+     */
+    if (csbi.srWindow.Right >= dwBufferSize.X)
+    {
+	dwWindowSize.X = SRWIDTH(csbi.srWindow);
+	if (dwWindowSize.X > dwBufferSize.X)
+	    dwWindowSize.X = dwBufferSize.X;
+	csbi.srWindow.Right = dwBufferSize.X - 1;
+	csbi.srWindow.Left = dwBufferSize.X - dwWindowSize.X;
+	NeedAdjust = TRUE;
+    }
+    if (csbi.srWindow.Bottom >= dwBufferSize.Y)
+    {
+	dwWindowSize.Y = SRHEIGHT(csbi.srWindow);
+	if (dwWindowSize.Y > dwBufferSize.Y)
+	    dwWindowSize.Y = dwBufferSize.Y;
+	csbi.srWindow.Bottom = dwBufferSize.Y - 1;
+	csbi.srWindow.Top = dwBufferSize.Y - dwWindowSize.Y;
+	NeedAdjust = TRUE;
+    }
+    if (NeedAdjust && WantAdjust)
+    {
+	if (!SetConsoleWindowInfo(g_hConOut, TRUE, &csbi.srWindow))
+	    return FALSE;
+    }
+    return TRUE;
 }
 
 typedef struct ConsoleBufferStruct
@@ -2530,6 +3239,11 @@ SaveConsoleBuffer(
 	return FALSE;
     }
     cb->IsValid = TRUE;
+
+    // VTP uses alternate screen buffer.
+    // No need to save buffer contents for restoration.
+    if (use_alternate_screen_buffer)
+	return TRUE;
 
     /*
      * Allocate a buffer large enough to hold the entire console screen
@@ -2654,6 +3368,11 @@ RestoreConsoleBuffer(
     if (!SetConsoleWindowInfo(g_hConOut, TRUE, &cb->Info.srWindow))
 	return FALSE;
 
+    // VTP uses alternate screen buffer.
+    // No need to restore buffer contents.
+    if (use_alternate_screen_buffer)
+	return TRUE;
+
     /*
      * Restore the screen buffer contents.
      */
@@ -2683,7 +3402,6 @@ static ConsoleBuffer g_cbOrig = { 0 };
 static ConsoleBuffer g_cbNonTermcap = { 0 };
 static ConsoleBuffer g_cbTermcap = { 0 };
 
-# ifdef FEAT_TITLE
 char g_szOrigTitle[256] = { 0 };
 HWND g_hWnd = NULL;	// also used in os_mswin.c
 static HICON g_hOrigIconSmall = NULL;
@@ -2691,13 +3409,6 @@ static HICON g_hOrigIcon = NULL;
 static HICON g_hVimIcon = NULL;
 static BOOL g_fCanChangeIcon = FALSE;
 
-// ICON* are not defined in VC++ 4.0
-#  ifndef ICON_SMALL
-#   define ICON_SMALL 0
-#  endif
-#  ifndef ICON_BIG
-#   define ICON_BIG 1
-#  endif
 /*
  * GetConsoleIcon()
  * Description:
@@ -2784,12 +3495,15 @@ SaveConsoleTitleAndIcon(void)
 	return;
 
     // Extract the first icon contained in the Vim executable.
-    if (mch_icon_load((HANDLE *)&g_hVimIcon) == FAIL || g_hVimIcon == NULL)
+    if (
+# ifdef FEAT_LIBCALL
+	    mch_icon_load((HANDLE *)&g_hVimIcon) == FAIL ||
+# endif
+	    g_hVimIcon == NULL)
 	g_hVimIcon = ExtractIcon(NULL, (LPCSTR)exe_name, 0);
     if (g_hVimIcon != NULL)
 	g_fCanChangeIcon = TRUE;
 }
-# endif
 
 static int g_fWindInitCalled = FALSE;
 static int g_fTermcapMode = FALSE;
@@ -2825,6 +3539,8 @@ mch_init_c(void)
 	create_conin();
     g_hConOut = GetStdHandle(STD_OUTPUT_HANDLE);
 
+    wt_init();
+    vtp_flag_init();
 # ifdef FEAT_RESTORE_ORIG_SCREEN
     // Save the initial console buffer for later restoration
     SaveConsoleBuffer(&g_cbOrig);
@@ -2850,7 +3566,6 @@ mch_init_c(void)
     GetConsoleMode(g_hConIn,  &g_cmodein);
     GetConsoleMode(g_hConOut, &g_cmodeout);
 
-# ifdef FEAT_TITLE
     SaveConsoleTitleAndIcon();
     /*
      * Set both the small and big icons of the console window to Vim's icon.
@@ -2859,9 +3574,13 @@ mch_init_c(void)
      */
     if (g_fCanChangeIcon)
 	SetConsoleIcon(g_hWnd, g_hVimIcon, g_hVimIcon);
-# endif
 
     ui_get_shellsize();
+
+    vtp_init();
+    // Switch to a new alternate screen buffer.
+    if (use_alternate_screen_buffer)
+	vtp_printf("\033[?1049h");
 
 # ifdef MCH_WRITE_DUMP
     fdDump = fopen("dump", "wt");
@@ -2883,10 +3602,6 @@ mch_init_c(void)
 # ifdef FEAT_CLIPBOARD
     win_clip_init();
 # endif
-
-    vtp_flag_init();
-    vtp_init();
-    wt_init();
 }
 
 /*
@@ -2897,11 +3612,18 @@ mch_init_c(void)
     static void
 mch_exit_c(int r)
 {
+    // Copy flag since stoptermcap() will clear the flag.
+    int fTermcapMode = g_fTermcapMode;
+
     exiting = TRUE;
 
     vtp_exit();
 
     stoptermcap();
+    // Switch back to main screen buffer if TermcapMode was not active.
+    if (!fTermcapMode &&  use_alternate_screen_buffer)
+	vtp_printf("\033[?1049l");
+
     if (g_fWindInitCalled)
 	settmode(TMODE_COOK);
 
@@ -2909,7 +3631,6 @@ mch_exit_c(int r)
 
     if (g_fWindInitCalled)
     {
-# ifdef FEAT_TITLE
 	mch_restore_title(SAVE_RESTORE_BOTH);
 	/*
 	 * Restore both the small and big icons of the console window to
@@ -2918,7 +3639,6 @@ mch_exit_c(int r)
 	 */
 	if (g_fCanChangeIcon && !g_fForceExit)
 	    SetConsoleIcon(g_hWnd, g_hOrigIconSmall, g_hOrigIcon);
-# endif
 
 # ifdef MCH_WRITE_DUMP
 	if (fdDump)
@@ -2943,7 +3663,7 @@ mch_exit_c(int r)
 
     exit(r);
 }
-#endif // !FEAT_GUI_MSWIN
+#endif // !FEAT_GUI_MSWIN || VIMDLL
 
     void
 mch_init(void)
@@ -2968,11 +3688,16 @@ mch_exit(int r)
 #endif
 
 #ifdef VIMDLL
+    if (vimrun_path_allocated)
+	vim_free(vimrun_path.string);
+
     if (gui.in_use || gui.starting)
 	mch_exit_g(r);
     else
 	mch_exit_c(r);
 #elif defined(FEAT_GUI_MSWIN)
+    if (vimrun_path_allocated)
+	vim_free(vimrun_path.string);
     mch_exit_g(r);
 #else
     mch_exit_c(r);
@@ -2987,7 +3712,7 @@ mch_check_win(
     int argc UNUSED,
     char **argv UNUSED)
 {
-    get_exe_name();
+    mch_get_exe_name();
 
 #if defined(FEAT_GUI_MSWIN) && !defined(VIMDLL)
     return OK;	    // GUI always has a tty
@@ -3011,12 +3736,10 @@ fname_case(
     char_u	*name,
     int		len)
 {
-    int	    flen;
     WCHAR   *p;
     WCHAR   buf[_MAX_PATH + 1];
 
-    flen = (int)STRLEN(name);
-    if (flen == 0)
+    if (*name == NUL)
 	return;
 
     slash_adjust(name);
@@ -3031,8 +3754,15 @@ fname_case(
 
 	if (q != NULL)
 	{
-	    if (len > 0 || flen >= (int)STRLEN(q))
-		vim_strncpy(name, q, (len > 0) ? len - 1 : flen);
+	    if (len > 0)
+		vim_strncpy(name, q, len - 1);
+	    else
+	    {
+		size_t  namelen = STRLEN(name);
+
+		if (namelen >= STRLEN(q))
+		    vim_strncpy(name, q, namelen);
+	    }
 	    vim_free(q);
 	}
     }
@@ -3078,17 +3808,15 @@ mch_get_host_name(
     WCHAR wszHostName[256 + 1];
     DWORD wcch = ARRAY_LENGTH(wszHostName);
 
-    if (GetComputerNameW(wszHostName, &wcch))
-    {
-	char_u  *p = utf16_to_enc(wszHostName, NULL);
+    if (!GetComputerNameW(wszHostName, &wcch))
+	return;
 
-	if (p != NULL)
-	{
-	    vim_strncpy(s, p, len - 1);
-	    vim_free(p);
-	    return;
-	}
-    }
+    char_u  *p = utf16_to_enc(wszHostName, NULL);
+    if (p == NULL)
+	return;
+
+    vim_strncpy(s, p, len - 1);
+    vim_free(p);
 }
 
 
@@ -3113,7 +3841,7 @@ mch_process_running(long pid)
 
     if (hProcess == NULL)
 	return FALSE;  // might not have access
-    if (GetExitCodeProcess(hProcess, &status) )
+    if (GetExitCodeProcess(hProcess, &status))
 	ret = status == STILL_ACTIVE;
     CloseHandle(hProcess);
     return ret;
@@ -3136,32 +3864,33 @@ mch_dirname(
      * But the Win32s known bug list says that getcwd() doesn't work
      * so use the Win32 system call instead. <Negri>
      */
-    if (GetCurrentDirectoryW(_MAX_PATH, wbuf) != 0)
-    {
-	WCHAR   wcbuf[_MAX_PATH + 1];
-	char_u  *p = NULL;
+    if (GetCurrentDirectoryW(_MAX_PATH, wbuf) == 0)
+	return FAIL;
 
-	if (GetLongPathNameW(wbuf, wcbuf, _MAX_PATH) != 0)
+    WCHAR   wcbuf[_MAX_PATH + 1];
+    char_u  *p = NULL;
+
+    if (GetLongPathNameW(wbuf, wcbuf, _MAX_PATH) != 0)
+    {
+	p = utf16_to_enc(wcbuf, NULL);
+	if (p != NULL)
 	{
-	    p = utf16_to_enc(wcbuf, NULL);
 	    if (STRLEN(p) >= (size_t)len)
 	    {
 		// long path name is too long, fall back to short one
-		vim_free(p);
-		p = NULL;
+		VIM_CLEAR(p);
 	    }
 	}
-	if (p == NULL)
-	    p = utf16_to_enc(wbuf, NULL);
-
-	if (p != NULL)
-	{
-	    vim_strncpy(buf, p, len - 1);
-	    vim_free(p);
-	    return OK;
-	}
     }
-    return FAIL;
+    if (p == NULL)
+	p = utf16_to_enc(wbuf, NULL);
+
+    if (p == NULL)
+	return FAIL;
+
+    vim_strncpy(buf, p, len - 1);
+    vim_free(p);
+    return OK;
 }
 
 /*
@@ -3172,10 +3901,10 @@ mch_dirname(
 mch_getperm(char_u *name)
 {
     stat_T	st;
-    int		n;
 
-    n = mch_stat((char *)name, &st);
-    return n == 0 ? (long)(unsigned short)st.st_mode : -1L;
+    return (mch_stat((char *)name, &st) == 0)
+	? (long)(unsigned short)st.st_mode
+	: -1L;
 }
 
 
@@ -3245,6 +3974,31 @@ mch_isdir(char_u *name)
 	return FALSE;		    // file does not exist at all
 
     return (f & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+/*
+ * Return TRUE if "name" is a directory or does not exist.
+ * Return FALSE otherwise, also when the attributes cannot be obtained for
+ * another reason.
+ */
+    int
+mch_isdir_or_missing(char_u *name)
+{
+    WCHAR	*p;
+    DWORD	attr;
+    DWORD	error = 0;
+
+    p = enc_to_utf16(name, NULL);
+    if (p == NULL)
+	return FALSE;
+    attr = GetFileAttributesW(p);
+    if (attr == INVALID_FILE_ATTRIBUTES)
+	error = GetLastError();
+    vim_free(p);
+
+    if (attr == INVALID_FILE_ATTRIBUTES)
+	return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    return (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
 /*
@@ -3378,14 +4132,14 @@ win32_fileinfo(char_u *fname, BY_HANDLE_FILE_INFORMATION *info)
 	    NULL);		// handle to template file
     vim_free(wn);
 
-    if (hFile != INVALID_HANDLE_VALUE)
-    {
-	if (GetFileInformationByHandle(hFile, info) != 0)
-	    res = FILEINFO_OK;
-	else
-	    res = FILEINFO_INFO_FAIL;
-	CloseHandle(hFile);
-    }
+    if (hFile == INVALID_HANDLE_VALUE)
+	return FILEINFO_READ_FAIL;
+
+    if (GetFileInformationByHandle(hFile, info) != 0)
+	res = FILEINFO_OK;
+    else
+	res = FILEINFO_INFO_FAIL;
+    CloseHandle(hFile);
 
     return res;
 }
@@ -3467,9 +4221,9 @@ mch_writable(char_u *name)
  * the allocated memory.
  */
     int
-mch_can_exe(char_u *name, char_u **path, int use_path)
+mch_can_exe(char_u *name, char_u **path, int use_path UNUSED)
 {
-    return executable_exists((char *)name, path, TRUE, TRUE);
+    return executable_exists((char *)name, STRLEN(name), path, TRUE, TRUE);
 }
 
 /*
@@ -3713,7 +4467,7 @@ handler_routine(
     case CTRL_CLOSE_EVENT:
     case CTRL_LOGOFF_EVENT:
     case CTRL_SHUTDOWN_EVENT:
-	windgoto((int)Rows - 1, 0);
+	windgoto((int)Rows - 1, cmdline_col_off);
 	g_fForceExit = TRUE;
 
 	vim_snprintf((char *)IObuff, IOSIZE, _("Vim: Caught %s event\n"),
@@ -3845,6 +4599,9 @@ ResizeConBuf(
     HANDLE  hConsole,
     COORD   coordScreen)
 {
+    if (use_alternate_screen_buffer)
+	return;
+
     if (!SetConsoleScreenBufferSize(hConsole, coordScreen))
     {
 # ifdef MCH_WRITE_DUMP
@@ -4019,7 +4776,49 @@ mch_set_winsize_now(void)
     }
     suppress_winsize = 0;
 }
-#endif // FEAT_GUI_MSWIN
+
+# if defined(FEAT_IMAGE) || defined(FEAT_EVAL)
+/*
+ * Try to get the current terminal cell size in pixels.
+ */
+    void
+mch_calc_cell_size(struct cellsize *cs_out)
+{
+    CONSOLE_FONT_INFOEX cfi;
+    DWORD cmodeold;
+    DWORD cmodein;
+
+    cs_out->cs_xpixel = -1;
+    cs_out->cs_ypixel = -1;
+
+    if (g_hConOut == INVALID_HANDLE_VALUE)
+	return;
+
+    cfi.cbSize = sizeof(cfi);
+    if (GetCurrentConsoleFontEx(g_hConOut, FALSE, &cfi)
+	    && cfi.dwFontSize.X > 0 && cfi.dwFontSize.Y > 0)
+    {
+	cs_out->cs_xpixel = cfi.dwFontSize.X;
+	cs_out->cs_ypixel = cfi.dwFontSize.Y;
+	return;
+    }
+
+    GetConsoleMode(g_hConIn, &cmodein);
+    cmodeold = cmodein;
+    cmodein &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT
+	    | ENABLE_PROCESSED_INPUT);
+    cmodein |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+
+    if (SetConsoleMode(g_hConIn, cmodein))
+    {
+	// We will receive the window dimensions later
+	vtp_printf("\033[14t");
+	SetConsoleMode(g_hConIn, cmodeold);
+    }
+}
+# endif
+
+#endif
 
     static BOOL
 vim_create_process(
@@ -4080,7 +4879,7 @@ vim_shell_execute(
 }
 
 
-#if defined(FEAT_GUI_MSWIN) || defined(PROTO)
+#if defined(FEAT_GUI_MSWIN)
 
 /*
  * Specialised version of system() for Win32 GUI mode.
@@ -4121,7 +4920,6 @@ mch_system_classic(char *cmd, int options)
 
     // Wait for the command to terminate before continuing
     {
-# ifdef FEAT_GUI
 	int	    delay = 1;
 
 	// Keep updating the window while waiting for the shell to finish.
@@ -4129,10 +4927,10 @@ mch_system_classic(char *cmd, int options)
 	{
 	    MSG	msg;
 
-	    if (pPeekMessage(&msg, (HWND)NULL, 0, 0, PM_REMOVE))
+	    if (PeekMessageW(&msg, (HWND)NULL, 0, 0, PM_REMOVE))
 	    {
 		TranslateMessage(&msg);
-		pDispatchMessage(&msg);
+		DispatchMessageW(&msg);
 		delay = 1;
 		continue;
 	    }
@@ -4145,9 +4943,6 @@ mch_system_classic(char *cmd, int options)
 	    if (delay < 50)
 		delay += 10;
 	}
-# else
-	WaitForSingleObject(pi.hProcess, INFINITE);
-# endif
 
 	// Get the command exit code
 	GetExitCodeProcess(pi.hProcess, &ret);
@@ -4159,6 +4954,10 @@ mch_system_classic(char *cmd, int options)
 
     // Try to get input focus back.  Doesn't always work though.
     PostMessage(hwnd, WM_SETFOCUS, 0, 0);
+    // To increase the chances that WM_SETFOCUS will work, run the message loop
+    // here.  In addition, it prevents problems caused by delayed WM_SETFOCUS
+    // processing.
+    gui_mch_update();
 
     return ret;
 }
@@ -4196,7 +4995,7 @@ sub_process_writer(LPVOID param)
 		      s == NULL ? l : (DWORD)(s - (lp + written)),
 		      &len, NULL);
 	}
-	if (len == (int)l)
+	if (len == l)
 	{
 	    // Finished a line, add a NL, unless this line should not have
 	    // one.
@@ -4246,7 +5045,6 @@ dump_pipe(int	    options,
     int		ret;
     DWORD	len;
     DWORD	toRead;
-    int		repeatCount;
 
     // we query the pipe to see if there is any data to read
     // to avoid to perform a blocking read
@@ -4257,11 +5055,9 @@ dump_pipe(int	    options,
 			&availableBytes,    // available bytes total
 			NULL);		    // byteLeft
 
-    repeatCount = 0;
     // We got real data in the pipe, read it
     while (ret != 0 && availableBytes > 0)
     {
-	repeatCount++;
 	toRead = (DWORD)(BUFLEN - *buffer_off);
 	toRead = availableBytes < toRead ? availableBytes : toRead;
 	ReadFile(g_hChildStd_OUT_Rd, buffer + *buffer_off, toRead , &len, NULL);
@@ -4335,7 +5131,7 @@ dump_pipe(int	    options,
 	    msg_puts((char *)buffer);
 	}
 
-	windgoto(msg_row, msg_col);
+	windgoto(msg_row, cmdline_col_off + msg_col);
 	cursor_on();
 	out_flush();
     }
@@ -4423,8 +5219,8 @@ mch_system_piped(char *cmd, int options)
     // About "Inherit handles" being TRUE: this command can be litigious,
     // handle inheritance was deactivated for pending temp file, but, if we
     // deactivate it, the pipes don't work for some reason.
-     vim_create_process(p, TRUE, CREATE_DEFAULT_ERROR_MODE,
-	     &si, &pi, NULL, NULL);
+    vim_create_process(p, TRUE, CREATE_DEFAULT_ERROR_MODE,
+						&si, &pi, NULL, NULL);
 
     if (p != cmd)
 	vim_free(p);
@@ -4451,10 +5247,10 @@ mch_system_piped(char *cmd, int options)
     {
 	MSG	msg;
 
-	if (pPeekMessage(&msg, (HWND)NULL, 0, 0, PM_REMOVE))
+	if (PeekMessageW(&msg, (HWND)NULL, 0, 0, PM_REMOVE))
 	{
 	    TranslateMessage(&msg);
-	    pDispatchMessage(&msg);
+	    DispatchMessageW(&msg);
 	}
 
 	// write pipe information in the window
@@ -4465,8 +5261,7 @@ mch_system_piped(char *cmd, int options)
 	    )
 	{
 	    len = 0;
-	    if (!(options & SHELL_EXPAND)
-		&& ((options &
+	    if (((options &
 			(SHELL_READ|SHELL_WRITE|SHELL_COOKED))
 		    != (SHELL_READ|SHELL_WRITE|SHELL_COOKED)
 # ifdef FEAT_GUI
@@ -4486,7 +5281,7 @@ mch_system_piped(char *cmd, int options)
 		{
 		    /*
 		     * For pipes: Check for CTRL-C: send interrupt signal to
-		     * child.  Check for CTRL-D: EOF, close pipe to child.
+		     * child.
 		     */
 		    if (len == 1 && cmd != NULL)
 		    {
@@ -4496,14 +5291,26 @@ mch_system_piped(char *cmd, int options)
 			// now put 9 as SIGKILL
 			    TerminateProcess(pi.hProcess, 9);
 			}
-			if (ta_buf[ta_len] == Ctrl_D)
+		    }
+
+		    /*
+		     * Check for CTRL-D: EOF, close pipe to child.
+		     * Ctrl_D may be decorated by _OnChar()
+		     */
+		    if ((len == 1 || len == 4 ) && cmd != NULL)
+		    {
+			if (ta_buf[0] == Ctrl_D
+			    || (ta_buf[0] == CSI
+				&& ta_buf[1] == KS_MODIFIER
+				&& ta_buf[3] == Ctrl_D))
 			{
 			    CloseHandle(g_hChildStd_IN_Wr);
 			    g_hChildStd_IN_Wr = NULL;
+			    len = 0;
 			}
 		    }
 
-		    term_replace_bs_del_keycode(ta_buf, ta_len, len);
+		    len = term_replace_keycodes(ta_buf, ta_len, len);
 
 		    /*
 		     * For pipes: echo the typed characters.  For a pty this
@@ -4523,7 +5330,7 @@ mch_system_piped(char *cmd, int options)
 			else
 			    msg_outtrans_len(ta_buf + i, 1);
 		    }
-		    windgoto(msg_row, msg_col);
+		    windgoto(msg_row, cmdline_col_off + msg_col);
 		    out_flush();
 
 		    ta_len += len;
@@ -4717,27 +5524,30 @@ mch_call_shell_terminal(
 
     // Find a window to make "buf" curbuf.
     aucmd_prepbuf(&aco, buf);
-
-    clear_oparg(&oa);
-    while (term_use_loop())
+    if (curbuf == buf)
     {
-	if (oa.op_type == OP_NOP && oa.regname == NUL && !VIsual_active)
+	// Only do this when a window was found for "buf".
+	clear_oparg(&oa);
+	while (term_use_loop())
 	{
-	    // If terminal_loop() returns OK we got a key that is handled
-	    // in Normal model. We don't do redrawing anyway.
-	    if (terminal_loop(TRUE) == OK)
+	    if (oa.op_type == OP_NOP && oa.regname == NUL && !VIsual_active)
+	    {
+		// If terminal_loop() returns OK we got a key that is handled
+		// in Normal model. We don't do redrawing anyway.
+		if (terminal_loop(TRUE) == OK)
+		    normal_cmd(&oa, TRUE);
+	    }
+	    else
 		normal_cmd(&oa, TRUE);
 	}
-	else
-	    normal_cmd(&oa, TRUE);
+	retval = job->jv_exitval;
+	ch_log(NULL, "system command finished");
+
+	job_unref(job);
+
+	// restore curwin/curbuf and a few other things
+	aucmd_restbuf(&aco);
     }
-    retval = job->jv_exitval;
-    ch_log(NULL, "system command finished");
-
-    job_unref(job);
-
-    // restore curwin/curbuf and a few other things
-    aucmd_restbuf(&aco);
 
     wait_return(TRUE);
     do_buffer(DOBUF_WIPE, DOBUF_FIRST, FORWARD, buf->b_fnum, TRUE);
@@ -4746,6 +5556,21 @@ mch_call_shell_terminal(
     return retval;
 }
 #endif
+/* Restore a previous environment variable value, or unset it if NULL.
+ * 'must_free' indicates whether 'old_value' was allocated.
+ */
+    static void
+restore_env_var(char_u *name, char_u *old_value, int must_free)
+{
+    if (old_value != NULL)
+    {
+	vim_setenv(name, old_value);
+	if (must_free)
+	    vim_free(old_value);
+	return;
+    }
+    vim_unsetenv(name);
+}
 
 /*
  * Either execute a command by calling the shell or start a new shell
@@ -4757,9 +5582,13 @@ mch_call_shell(
 {
     int		x = 0;
     int		tmode = cur_tmode;
-#ifdef FEAT_TITLE
     WCHAR	szShellTitle[512];
+    int		must_free;
+    char_u	*oldval;
 
+#ifdef FEAT_EVAL
+    ch_log(NULL, "executing shell command: %s", cmd);
+#endif
     // Change the title to reflect that we are in a subshell.
     if (GetConsoleTitleW(szShellTitle, ARRAY_LENGTH(szShellTitle) - 4) > 0)
     {
@@ -4780,7 +5609,11 @@ mch_call_shell(
 	    }
 	}
     }
-#endif
+    // do not execute anything from the current directory by setting the
+    // environment variable $NoDefaultCurrentDirectoryInExePath
+    oldval = vim_getenv((char_u *)"NoDefaultCurrentDirectoryInExePath",
+	    &must_free);
+    vim_setenv((char_u *)"NoDefaultCurrentDirectoryInExePath", (char_u *)"1");
 
     out_flush();
 
@@ -4813,9 +5646,9 @@ mch_call_shell(
 	{
 	    // Use a terminal window to run the command in.
 	    x = mch_call_shell_terminal(cmd, options);
-# ifdef FEAT_TITLE
 	    resettitle();
-# endif
+	    restore_env_var((char_u *)"NoDefaultCurrentDirectoryInExePath",
+		    oldval, must_free);
 	    return x;
 	}
     }
@@ -4825,17 +5658,13 @@ mch_call_shell(
      * Catch all deadly signals while running the external command, because a
      * CTRL-C, Ctrl-Break or illegal instruction  might otherwise kill us.
      */
-    signal(SIGINT, SIG_IGN);
-#if defined(__GNUC__) && !defined(__MINGW32__)
-    signal(SIGKILL, SIG_IGN);
-#else
-    signal(SIGBREAK, SIG_IGN);
-#endif
-    signal(SIGILL, SIG_IGN);
-    signal(SIGFPE, SIG_IGN);
-    signal(SIGSEGV, SIG_IGN);
-    signal(SIGTERM, SIG_IGN);
-    signal(SIGABRT, SIG_IGN);
+    mch_signal(SIGINT, SIG_IGN);
+    mch_signal(SIGBREAK, SIG_IGN);
+    mch_signal(SIGILL, SIG_IGN);
+    mch_signal(SIGFPE, SIG_IGN);
+    mch_signal(SIGSEGV, SIG_IGN);
+    mch_signal(SIGTERM, SIG_IGN);
+    mch_signal(SIGABRT, SIG_IGN);
 
     if (options & SHELL_COOKED)
 	settmode(TMODE_COOK);	// set to normal mode
@@ -4964,7 +5793,7 @@ mch_call_shell(
 # ifdef VIMDLL
 		if (gui.in_use)
 # endif
-		    emsg(_("E371: Command not found"));
+		    emsg(_(e_command_not_found));
 #endif
 	    }
 
@@ -4986,7 +5815,7 @@ mch_call_shell(
 #ifdef FEAT_GUI_MSWIN
 		((gui.in_use || gui.starting) ?
 		    (!s_dont_use_vimrun && p_stmp ?
-			STRLEN(vimrun_path) : STRLEN(p_sh) + STRLEN(p_shcf))
+			vimrun_path.length : STRLEN(p_sh) + STRLEN(p_shcf))
 		    : 0) +
 #endif
 		STRLEN(p_sh) + STRLEN(p_shcf) + STRLEN(cmd) + 10;
@@ -5022,7 +5851,7 @@ mch_call_shell(
 		    // Use vimrun to execute the command.  It opens a console
 		    // window, which can be closed without killing Vim.
 		    vim_snprintf((char *)newcmd, cmdlen, "%s%s%s %s %s",
-			    vimrun_path,
+			    vimrun_path.string,
 			    (msg_silent != 0 || (options & SHELL_DOOUT))
 								 ? "-s " : "",
 			    p_sh, p_shcf, cmd);
@@ -5044,6 +5873,10 @@ mch_call_shell(
 	}
     }
 
+    // Restore original value of NoDefaultCurrentDirectoryInExePath
+    restore_env_var((char_u *)"NoDefaultCurrentDirectoryInExePath",
+	    oldval, must_free);
+
     if (tmode == TMODE_RAW)
     {
 	// The shell may have messed with the mode, always set it.
@@ -5062,26 +5895,20 @@ mch_call_shell(
 	smsg(_("shell returned %d"), x);
 	msg_putchar('\n');
     }
-#ifdef FEAT_TITLE
     resettitle();
-#endif
 
-    signal(SIGINT, SIG_DFL);
-#if defined(__GNUC__) && !defined(__MINGW32__)
-    signal(SIGKILL, SIG_DFL);
-#else
-    signal(SIGBREAK, SIG_DFL);
-#endif
-    signal(SIGILL, SIG_DFL);
-    signal(SIGFPE, SIG_DFL);
-    signal(SIGSEGV, SIG_DFL);
-    signal(SIGTERM, SIG_DFL);
-    signal(SIGABRT, SIG_DFL);
+    mch_signal(SIGINT, SIG_DFL);
+    mch_signal(SIGBREAK, SIG_DFL);
+    mch_signal(SIGILL, SIG_DFL);
+    mch_signal(SIGFPE, SIG_DFL);
+    mch_signal(SIGSEGV, SIG_DFL);
+    mch_signal(SIGTERM, SIG_DFL);
+    mch_signal(SIGABRT, SIG_DFL);
 
     return x;
 }
 
-#if defined(FEAT_JOB_CHANNEL) || defined(PROTO)
+#if defined(FEAT_JOB_CHANNEL)
     static HANDLE
 job_io_file_open(
 	char_u *fname,
@@ -5122,7 +5949,7 @@ win32_build_env(dict_T *env, garray_T *gap, int is_terminal)
 
     if (env != NULL)
     {
-	for (hi = env->dv_hashtab.ht_array; todo > 0; ++hi)
+	FOR_ALL_HASHTAB_ITEMS(&env->dv_hashtab, hi, todo)
 	{
 	    if (!HASHITEM_EMPTY(hi))
 	    {
@@ -5136,7 +5963,7 @@ win32_build_env(dict_T *env, garray_T *gap, int is_terminal)
 		    size_t	lkey = wcslen(wkey);
 		    size_t	lval = wcslen(wval);
 
-		    if (ga_grow(gap, (int)(lkey + lval + 2)) != OK)
+		    if (ga_grow(gap, (int)(lkey + lval + 2)) == FAIL)
 			continue;
 		    for (n = 0; n < lkey; n++)
 			*((WCHAR*)gap->ga_data + gap->ga_len++) = wkey[n];
@@ -5165,7 +5992,7 @@ win32_build_env(dict_T *env, garray_T *gap, int is_terminal)
 		*((WCHAR*)gap->ga_data + gap->ga_len++) = *p;
 	    p++;
 	}
-	FreeEnvironmentStrings(base);
+	FreeEnvironmentStringsW(base);
 	*((WCHAR*)gap->ga_data + gap->ga_len++) = L'\0';
     }
 
@@ -5262,6 +6089,222 @@ create_pipe_pair(HANDLE handles[2])
     return TRUE;
 }
 
+#endif // FEAT_JOB_CHANNEL
+
+#if defined(FEAT_EVAL)
+/*
+ * Execute "argv" directly without the shell and return the output.
+ * Used by system() and systemlist() when the command is a List.
+ * "infile" is an optional temp file for stdin input.
+ * When "ret_len" is not NULL, set it to the length of the output.
+ * Returns the output in allocated memory (or NULL on error).
+ * Sets v:shell_error to the exit status.
+ */
+    char_u *
+mch_get_cmd_output_direct(
+    char	**argv,
+    char_u	*infile,
+    int		flags UNUSED,
+    int		*ret_len)
+{
+    STARTUPINFO		si;
+    PROCESS_INFORMATION pi;
+    SECURITY_ATTRIBUTES saAttr;
+    HANDLE		hChildStdoutRd = INVALID_HANDLE_VALUE;
+    HANDLE		hChildStdoutWr = INVALID_HANDLE_VALUE;
+    HANDLE		hChildStdinRd = INVALID_HANDLE_VALUE;
+    garray_T		cmd_ga;
+    garray_T		out_ga;
+    char_u		*buffer = NULL;
+    DWORD		exit_code = (DWORD)-1;
+    int			i;
+
+    // Build a command string from argv.
+    ga_init2(&cmd_ga, 1, 256);
+    for (i = 0; argv[i] != NULL; i++)
+    {
+	char_u	*arg = (char_u *)argv[i];
+	char_u	*s = arg;
+	int	has_spaces = FALSE;
+	int	j;
+
+	for (j = 0; s[j] != NUL; j++)
+	    if (s[j] == ' ' || s[j] == '\t' || s[j] == '"')
+	    {
+		has_spaces = TRUE;
+		break;
+	    }
+
+	if (i > 0)
+	    ga_append(&cmd_ga, ' ');
+
+	if (has_spaces)
+	{
+	    int	num_bs;
+
+	    ga_append(&cmd_ga, '"');
+	    for (j = 0; arg[j] != NUL; j++)
+	    {
+		num_bs = 0;
+		while (arg[j] == '\\')
+		{
+		    num_bs++;
+		    j++;
+		}
+
+		if (arg[j] == NUL)
+		{
+		    // Backslashes before closing quote must be doubled.
+		    while (num_bs-- > 0)
+		    {
+			ga_append(&cmd_ga, '\\');
+			ga_append(&cmd_ga, '\\');
+		    }
+		    break;
+		}
+		else if (arg[j] == '"')
+		{
+		    // Backslashes before a double quote must be doubled,
+		    // and the double quote must be escaped.
+		    while (num_bs-- > 0)
+		    {
+			ga_append(&cmd_ga, '\\');
+			ga_append(&cmd_ga, '\\');
+		    }
+		    ga_append(&cmd_ga, '\\');
+		    ga_append(&cmd_ga, '"');
+		}
+		else
+		{
+		    while (num_bs-- > 0)
+			ga_append(&cmd_ga, '\\');
+		    ga_append(&cmd_ga, arg[j]);
+		}
+	    }
+	    ga_append(&cmd_ga, '"');
+	}
+	else
+	    ga_concat(&cmd_ga, arg);
+    }
+    ga_append(&cmd_ga, NUL);
+
+    ga_init2(&out_ga, 1, 4096);
+
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    // Create a pipe for the child's stdout.
+    if (!CreatePipe(&hChildStdoutRd, &hChildStdoutWr, &saAttr, 0)
+	    || !SetHandleInformation(hChildStdoutRd, HANDLE_FLAG_INHERIT, 0))
+    {
+	emsg(_(e_cannot_create_pipes));
+	goto done;
+    }
+
+    // Set up stdin from infile if provided.
+    if (infile != NULL)
+    {
+	WCHAR *winfile = enc_to_utf16(infile, NULL);
+
+	if (winfile != NULL)
+	{
+	    hChildStdinRd = CreateFileW(winfile, GENERIC_READ,
+		    FILE_SHARE_READ, &saAttr, OPEN_EXISTING,
+		    FILE_ATTRIBUTE_NORMAL, NULL);
+	    vim_free(winfile);
+	}
+    }
+
+    ZeroMemory(&pi, sizeof(pi));
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hChildStdoutWr;
+    si.hStdError = hChildStdoutWr;
+    si.hStdInput = (hChildStdinRd != INVALID_HANDLE_VALUE)
+		    ? hChildStdinRd : INVALID_HANDLE_VALUE;
+
+    ch_log(NULL, "directly executing: %s", (char *)cmd_ga.ga_data);
+
+    // Create the child process directly, without going through the shell.
+    if (!vim_create_process((char *)cmd_ga.ga_data, TRUE,
+		CREATE_DEFAULT_ERROR_MODE | CREATE_NEW_PROCESS_GROUP,
+		&si, &pi, NULL, NULL))
+    {
+	semsg(_(e_invalid_argument_str), cmd_ga.ga_data);
+	goto done;
+    }
+
+    // Close the write end of stdout pipe and stdin in the parent so that
+    // ReadFile() will get EOF when the child process exits.
+    CloseHandle(hChildStdoutWr);
+    hChildStdoutWr = INVALID_HANDLE_VALUE;
+    if (hChildStdinRd != INVALID_HANDLE_VALUE)
+    {
+	CloseHandle(hChildStdinRd);
+	hChildStdinRd = INVALID_HANDLE_VALUE;
+    }
+
+    // Read output from child process.
+    for (;;)
+    {
+	char	buf[4096];
+	DWORD	n;
+
+	if (!ReadFile(hChildStdoutRd, buf, sizeof(buf), &n, NULL) || n == 0)
+	    break;
+	if (ga_grow(&out_ga, (int)n) == OK)
+	{
+	    mch_memmove((char *)out_ga.ga_data + out_ga.ga_len, buf, n);
+	    out_ga.ga_len += (int)n;
+	}
+    }
+
+    // Wait for child to finish and get exit code.
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    set_vim_var_nr(VV_SHELL_ERROR, (long)exit_code);
+
+    if (out_ga.ga_len > 0)
+    {
+	buffer = alloc(out_ga.ga_len + 1);
+	if (buffer != NULL)
+	{
+	    mch_memmove(buffer, out_ga.ga_data, out_ga.ga_len);
+	    if (ret_len == NULL)
+	    {
+		// Change NUL into SOH, otherwise the string is truncated.
+		for (i = 0; i < out_ga.ga_len; ++i)
+		    if (buffer[i] == NUL)
+			buffer[i] = 1;
+		buffer[out_ga.ga_len] = NUL;
+	    }
+	    else
+		*ret_len = out_ga.ga_len;
+	}
+    }
+    else if (ret_len != NULL)
+	*ret_len = 0;
+
+done:
+    ga_clear(&cmd_ga);
+    ga_clear(&out_ga);
+    if (hChildStdoutRd != INVALID_HANDLE_VALUE)
+	CloseHandle(hChildStdoutRd);
+    if (hChildStdoutWr != INVALID_HANDLE_VALUE)
+	CloseHandle(hChildStdoutWr);
+    if (hChildStdinRd != INVALID_HANDLE_VALUE)
+	CloseHandle(hChildStdinRd);
+    return buffer;
+}
+#endif // FEAT_EVAL
+
+#if defined(FEAT_JOB_CHANNEL)
     void
 mch_job_start(char *cmd, job_T *job, jobopt_T *options)
 {
@@ -5292,7 +6335,7 @@ mch_job_start(char *cmd, job_T *job, jobopt_T *options)
     ofd[1] = INVALID_HANDLE_VALUE;
     efd[0] = INVALID_HANDLE_VALUE;
     efd[1] = INVALID_HANDLE_VALUE;
-    ga_init2(&ga, (int)sizeof(wchar_t), 500);
+    ga_init2(&ga, sizeof(wchar_t), 500);
 
     jo = CreateJobObject(NULL, NULL);
     if (jo == NULL)
@@ -5323,7 +6366,7 @@ mch_job_start(char *cmd, job_T *job, jobopt_T *options)
 		&saAttr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL);
 	if (ifd[0] == INVALID_HANDLE_VALUE)
 	{
-	    semsg(_(e_notopen), fname);
+	    semsg(_(e_cant_open_file_str), fname);
 	    goto failed;
 	}
     }
@@ -5341,7 +6384,7 @@ mch_job_start(char *cmd, job_T *job, jobopt_T *options)
 		&saAttr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL);
 	if (ofd[1] == INVALID_HANDLE_VALUE)
 	{
-	    semsg(_(e_notopen), fname);
+	    semsg(_(e_cant_open_file_str), fname);
 	    goto failed;
 	}
     }
@@ -5359,7 +6402,7 @@ mch_job_start(char *cmd, job_T *job, jobopt_T *options)
 		&saAttr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL);
 	if (efd[1] == INVALID_HANDLE_VALUE)
 	{
-	    semsg(_(e_notopen), fname);
+	    semsg(_(e_cant_open_file_str), fname);
 	    goto failed;
 	}
     }
@@ -5556,7 +6599,7 @@ mch_signal_job(job_T *job, char_u *how)
 	{
 	    if (job->jv_channel != NULL && job->jv_channel->ch_anonymous_pipe)
 		job->jv_channel->ch_killing = TRUE;
-	    return TerminateJobObject(job->jv_job_object, -1) ? OK : FAIL;
+	    return TerminateJobObject(job->jv_job_object, (UINT)-1) ? OK : FAIL;
 	}
 	return terminate_all(job->jv_proc_info.hProcess, -1) ? OK : FAIL;
     }
@@ -5577,12 +6620,12 @@ mch_signal_job(job_T *job, char_u *how)
     void
 mch_clear_job(job_T *job)
 {
-    if (job->jv_status != JOB_FAILED)
-    {
-	if (job->jv_job_object != NULL)
-	    CloseHandle(job->jv_job_object);
-	CloseHandle(job->jv_proc_info.hProcess);
-    }
+    if (job->jv_status == JOB_FAILED)
+	return;
+
+    if (job->jv_job_object != NULL)
+	CloseHandle(job->jv_job_object);
+    CloseHandle(job->jv_proc_info.hProcess);
 }
 #endif
 
@@ -5599,9 +6642,6 @@ termcap_mode_start(void)
 
     if (g_fTermcapMode)
 	return;
-
-    if (!p_rs && USE_VTP)
-	vtp_printf("\033[?1049h");
 
     SaveConsoleBuffer(&g_cbNonTermcap);
 
@@ -5631,9 +6671,7 @@ termcap_mode_start(void)
 	ResizeConBufAndWindow(g_hConOut, Columns, Rows);
     }
 
-# ifdef FEAT_TITLE
     resettitle();
-# endif
 
     GetConsoleMode(g_hConIn, &cmodein);
     if (g_fMouseActive)
@@ -5682,9 +6720,12 @@ termcap_mode_end(void)
 # endif
     RestoreConsoleBuffer(cb, p_rs);
     restore_console_color_rgb();
-    SetConsoleCursorInfo(g_hConOut, &g_cci);
 
-    if (p_rs || exiting)
+    // Switch back to main screen buffer.
+    if (exiting && use_alternate_screen_buffer)
+	vtp_printf("\033[?1049l");
+
+    if (!USE_WT && (p_rs || exiting))
     {
 	/*
 	 * Clear anything that happens to be on the current line.
@@ -5708,25 +6749,13 @@ termcap_mode_end(void)
 	 */
 	SetConsoleCursorPosition(g_hConOut, coord);
     }
-
-    if (!p_rs && USE_VTP)
-	vtp_printf("\033[?1049l");
-
+    SetConsoleCursorInfo(g_hConOut, &g_cci);
     g_fTermcapMode = FALSE;
 }
-#endif // FEAT_GUI_MSWIN
+#endif
 
 
-#if defined(FEAT_GUI_MSWIN) && !defined(VIMDLL)
-    void
-mch_write(
-    char_u  *s UNUSED,
-    int	    len UNUSED)
-{
-    // never used
-}
-
-#else
+#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
 
 /*
  * clear `n' chars, starting from `coord'
@@ -5736,7 +6765,7 @@ clear_chars(
     COORD coord,
     DWORD n)
 {
-    if (!USE_VTP)
+    if (!vtp_working)
     {
 	DWORD dwDummy;
 
@@ -5761,7 +6790,7 @@ clear_screen(void)
 {
     g_coord.X = g_coord.Y = 0;
 
-    if (!USE_VTP)
+    if (!vtp_working)
 	clear_chars(g_coord, Rows * Columns);
     else
     {
@@ -5780,7 +6809,7 @@ clear_to_end_of_display(void)
 {
     COORD save = g_coord;
 
-    if (!USE_VTP)
+    if (!vtp_working)
 	clear_chars(g_coord, (Rows - g_coord.Y - 1)
 					   * Columns + (Columns - g_coord.X));
     else
@@ -5803,7 +6832,7 @@ clear_to_end_of_line(void)
 {
     COORD save = g_coord;
 
-    if (!USE_VTP)
+    if (!vtp_working)
 	clear_chars(g_coord, Columns - g_coord.X);
     else
     {
@@ -5934,7 +6963,7 @@ insert_lines(unsigned cLines)
 	}
     }
 
-    if (USE_WT)
+    if (vtp_working)
     {
 	COORD coord;
 	int i;
@@ -5976,7 +7005,7 @@ delete_lines(unsigned cLines)
     clip.Bottom = g_srScrollRegion.Bottom;
 
     fill.Char.AsciiChar = ' ';
-    if (!USE_VTP)
+    if (!vtp_working)
 	fill.Attributes = g_attrCurrent;
     else
 	fill.Attributes = g_attrDefault;
@@ -6003,7 +7032,7 @@ delete_lines(unsigned cLines)
 	}
     }
 
-    if (USE_WT)
+    if (vtp_working)
     {
 	COORD coord;
 	int i;
@@ -6075,7 +7104,7 @@ textcolor(WORD wAttr)
 {
     g_attrCurrent = (g_attrCurrent & 0xf0) + (wAttr & 0x0f);
 
-    if (!USE_VTP)
+    if (!vtp_working)
 	SetConsoleTextAttribute(g_hConOut, g_attrCurrent);
     else
 	vtp_sgr_bulk(wAttr);
@@ -6087,7 +7116,7 @@ textbackground(WORD wAttr)
 {
     g_attrCurrent = (g_attrCurrent & 0x0f) + ((wAttr & 0x0f) << 4);
 
-    if (!USE_VTP)
+    if (!vtp_working)
 	SetConsoleTextAttribute(g_hConOut, g_attrCurrent);
     else
 	vtp_sgr_bulk(wAttr);
@@ -6100,7 +7129,7 @@ textbackground(WORD wAttr)
     static void
 normvideo(void)
 {
-    if (!USE_VTP)
+    if (!vtp_working)
 	textattr(g_attrDefault);
     else
 	vtp_sgr_bulk(0);
@@ -6176,20 +7205,30 @@ visual_bell(void)
     WORD    attrFlash = ~g_attrCurrent & 0xff;
 
     DWORD   dwDummy;
-    LPWORD  oldattrs = ALLOC_MULT(WORD, Rows * Columns);
+    LPWORD  oldattrs = NULL;
 
-    if (oldattrs == NULL)
-	return;
-    ReadConsoleOutputAttribute(g_hConOut, oldattrs, Rows * Columns,
+# ifdef FEAT_TERMGUICOLORS
+    if (!(p_tgc || t_colors >= 256))
+# endif
+    {
+	oldattrs = ALLOC_MULT(WORD, Rows * Columns);
+	if (oldattrs == NULL)
+	    return;
+	ReadConsoleOutputAttribute(g_hConOut, oldattrs, Rows * Columns,
 			       coordOrigin, &dwDummy);
+    }
+
     FillConsoleOutputAttribute(g_hConOut, attrFlash, Rows * Columns,
 			       coordOrigin, &dwDummy);
 
     Sleep(15);	    // wait for 15 msec
-    if (!USE_VTP)
+
+    if (oldattrs != NULL)
+    {
 	WriteConsoleOutputAttribute(g_hConOut, oldattrs, Rows * Columns,
 				coordOrigin, &dwDummy);
-    vim_free(oldattrs);
+	vim_free(oldattrs);
+    }
 }
 
 
@@ -6201,10 +7240,20 @@ cursor_visible(BOOL fVisible)
 {
     s_cursor_visible = fVisible;
 
-    if (USE_VTP)
+    if (vtp_working)
+    {
+	// In vtp mode, visibility is controlled solely by DECTCEM.  Skip
+	// mch_update_cursor() since shape is independent of visibility and
+	// re-emitting DECSCUSR can cause the terminal to briefly redisplay
+	// the cursor while a redraw is in progress.
 	vtp_printf("\033[?25%c", fVisible ? 'h' : 'l');
+	return;
+    }
 
 # ifdef MCH_CURSOR_SHAPE
+    // Non-vtp Windows console: SetConsoleCursorInfo() consults
+    // s_cursor_visible inside mch_set_cursor_shape(), so the call is needed
+    // to apply the new visibility.
     mch_update_cursor();
 # endif
 }
@@ -6244,7 +7293,7 @@ write_chars(
 	    vim_free(unicodebuf);
 	    unicodebuf = length ? LALLOC_MULT(WCHAR, length) : NULL;
 	    unibuflen = unibuflen ? 0 : length;
-	} while(1);
+	} while (TRUE);
 	cells = mb_string2cells(pchBuf, cbToWrite);
     }
     else // cbToWrite == 1 && *pchBuf == ' ' && enc_utf8
@@ -6291,7 +7340,7 @@ write_chars(
 	    cchwritten = 1;
     }
 
-    if (cchwritten == length)
+    if (cchwritten == (DWORD)length)
     {
 	written = cbToWrite;
 	g_coord.X += (SHORT)cells;
@@ -6426,6 +7475,52 @@ sgrn2cn(
     return p && p[0] == 0x0a && p[1] == '\033' ? ++p : NULL;
 }
 
+static bool in_dcs = false;	// inside a DCS (sixel) sequence
+static bool dcs_esc = false;	// last DCS byte written was ESC
+
+/*
+ * Write "len" bytes at "s" with WriteConsoleW, so that the console's own VT
+ * parser processes them.  Needed for DCS sequences when USE_VTP is off.
+ */
+    static void
+write_vt(char_u *s, int len)
+{
+    int		wlen;
+    WCHAR	*ws;
+    DWORD	written;
+
+    wlen = MultiByteToWideChar(CP_UTF8, 0, (LPCSTR)s, len, NULL, 0);
+    if (wlen <= 0)
+	return;
+    ws = ALLOC_MULT(WCHAR, wlen);
+    if (ws == NULL)
+	return;
+    MultiByteToWideChar(CP_UTF8, 0, (LPCSTR)s, len, ws, wlen);
+    WriteConsoleW(g_hConOut, ws, wlen, &written, NULL);
+    vim_free(ws);
+}
+
+/*
+ * Return the pointer just after the ST (ESC '\') that ends a DCS sequence.
+ * Returns "end" when the ST is not in this chunk; "in_dcs" then stays set so
+ * that the next mch_write() call continues the scan.
+ */
+    static char_u *
+skip_dcs(char_u *s, char_u *end)
+{
+    for (char_u *p = s; p < end; ++p)
+    {
+	if (dcs_esc && *p == '\\')
+	{
+	    dcs_esc = false;
+	    in_dcs = false;
+	    return p + 1;
+	}
+	dcs_esc = *p == ESC;
+    }
+    return end;
+}
+
 /*
  * mch_write(): write the output buffer to the screen, translating ESC
  * sequences into calls to console output routines.
@@ -6458,8 +7553,20 @@ mch_write(
 	// sequence may be inserted asynchronously.
 	if (len < 0)
 	{
-	    redraw_all_later(CLEAR);
+	    redraw_all_later(UPD_CLEAR);
 	    return;
+	}
+
+	if (in_dcs)
+	{
+	    // Continuation of a DCS sequence split over several writes.
+	    int	l = (int)(skip_dcs(s, end) - s);
+
+	    if (vtp_working)
+		write_vt(s, l);
+	    len -= l - 1;
+	    s += l;
+	    continue;
 	}
 
 	while (s + ++prefix < end)
@@ -6594,7 +7701,7 @@ mch_write(
 		    p = sp;
 
 		// If restoreFG and FG are connected, the restoreFG can be
-	        // omitted.
+		// omitted.
 		if (sgrn2((sp = sgrnc(p, 39)), 38))
 		    p = sp;
 
@@ -6610,11 +7717,11 @@ notsgr:
 		    else if (argc == 1)
 		    {
 			if (USE_VTP)
-			    textcolor((WORD) arg1);
+			    textcolor((WORD)arg1);
 			else
-			    textattr((WORD) arg1);
+			    textattr((WORD)arg1);
 		    }
-		    else if (USE_VTP)
+		    else if (vtp_working)
 			vtp_sgr_bulks(argc, args);
 		}
 		else if (argc == 2 && *p == 'H')
@@ -6744,6 +7851,46 @@ notsgr:
 	    }
 # endif
 	}
+	else if (s[0] == ESC && len >= 3-1 && s[1] == '[')
+	{
+	    // CSI sequences should not be written as plain text to the
+	    // console.  Parse the sequence and skip over it.  When
+	    // USE_VTP is active, pass through known safe ones (e.g.
+	    // DECSCUSR for cursor shape, SGR for undercurl from t_Cs) via
+	    // vtp_printf().
+	    int l = 2;
+
+	    // skip parameter and intermediate bytes (0x20-0x3F)
+	    while (s + l < end && s[l] >= 0x20 && s[l] <= 0x3F)
+		l++;
+	    // skip the final byte (0x40-0x7E)
+	    if (s + l < end && s[l] >= 0x40 && s[l] <= 0x7E)
+	    {
+		// DECSCUSR (cursor style) and SGR (attributes, e.g. "t_Cs",
+		// "t_Ce" and "t_8u"): pass through to terminal.  Neither
+		// generates a response from the console.  vtp_printf() uses a
+		// 100 byte buffer, skip anything longer.
+		if (USE_VTP && (s[l] == 'q' || s[l] == 'm') && l + 1 < 100)
+		    vtp_printf("%.*s", l + 1, s);
+		l++;
+	    }
+	    len -= l - 1;
+	    s += l;
+	}
+	else if (s[0] == ESC && len >= 2-1 && s[1] == 'P')
+	{
+	    // DCS (e.g. sixel image): write_chars() would print it as raw text
+	    // when USE_VTP is off, so let the console's VT parser handle it.
+	    int	l;
+
+	    in_dcs = true;
+	    dcs_esc = false;
+	    l = (int)(skip_dcs(s + 2, end) - s);
+	    if (vtp_working)
+		write_vt(s, l);
+	    len -= l - 1;
+	    s += l;
+	}
 	else
 	{
 	    // Write a single character
@@ -6770,7 +7917,16 @@ notsgr:
 # endif
 }
 
-#endif // FEAT_GUI_MSWIN
+#else // FEAT_GUI_MSWIN && !VIMDLL
+    void
+mch_write(
+    char_u  *s UNUSED,
+    int	    len UNUSED)
+{
+    // never used
+}
+
+#endif
 
 
 /*
@@ -6895,20 +8051,25 @@ mch_total_mem(int special UNUSED)
 }
 
 /*
+ * Expand a path into all matching files and/or directories.  Handles "*",
+ * "?", "[a-z]", "**", etc.
+ * "path" has backslashes before chars that are not to be expanded.
+ * Returns the number of matches found.
+ */
+    int
+mch_expandpath(
+    garray_T	*gap,
+    char_u	*path,
+    int		flags)		// EW_* flags
+{
+    return dos_expandpath(gap, path, 0, flags, FALSE);
+}
+
+/*
  * mch_wrename() works around a bug in rename (aka MoveFile) in
- * Windows 95: rename("foo.bar", "foo.bar~") will generate a
- * file whose short file name is "FOO.BAR" (its long file name will
- * be correct: "foo.bar~").  Because a file can be accessed by
- * either its SFN or its LFN, "foo.bar" has effectively been
- * renamed to "foo.bar", which is not at all what was wanted.  This
- * seems to happen only when renaming files with three-character
- * extensions by appending a suffix that does not include ".".
- * Windows NT gets it right, however, with an SFN of "FOO~1.BAR".
- *
- * There is another problem, which isn't really a bug but isn't right either:
+ * Windows, the bug can be demonstrated with the following scenario:
  * When renaming "abcdef~1.txt" to "abcdef~1.txt~", the short name can be
- * "abcdef~1.txt" again.  This has been reported on Windows NT 4.0 with
- * service pack 6.  Doesn't seem to happen on Windows 98.
+ * "abcdef~1.txt" again.
  *
  * Like rename(), returns 0 upon success, non-zero upon failure.
  * Should probably set errno appropriately when errors occur.
@@ -6917,19 +8078,33 @@ mch_total_mem(int special UNUSED)
 mch_wrename(WCHAR *wold, WCHAR *wnew)
 {
     WCHAR	*p;
-    int		i;
+    WCHAR	*q;
     WCHAR	szTempFile[_MAX_PATH + 1];
     WCHAR	szNewPath[_MAX_PATH + 1];
     HANDLE	hf;
 
     // No need to play tricks unless the file name contains a "~" as the
     // seventh character.
-    p = wold;
-    for (i = 0; wold[i] != NUL; ++i)
-	if ((wold[i] == '/' || wold[i] == '\\' || wold[i] == ':')
-		&& wold[i + 1] != 0)
-	    p = wold + i + 1;
-    if ((int)(wold + i - p) < 8 || p[6] != '~')
+    for (p = q = wold; *p != L'\0'; ++p)
+    {
+	switch (*p)
+	{
+	case L'/':
+	case L'\\':
+	case L':':
+	    if (*(p + 1) != L'\0')
+		q = p + 1;	    // point to the character after the path
+				    // separator.
+	    break;
+
+	default:
+	    break;
+	}
+    }
+
+    // If the length of the file name is less than 8 characters or the seventh
+    // character is not a "~', do a normal move.
+    if ((int)(p - q) < 8 || q[6] != L'~')
 	return (MoveFileW(wold, wnew) == 0);
 
     // Get base path of new file name.  Undocumented feature: If pszNewFile is
@@ -7138,7 +8313,8 @@ mch_fopen(const char *name, const char *mode)
     vim_free(wm);
 
 #if defined(DEBUG) && _MSC_VER >= 1400
-    _set_fmode(oldMode);
+    if (oldMode != 0)
+	_set_fmode(oldMode);
 #endif
     return f;
 }
@@ -7156,7 +8332,7 @@ mch_fopen(const char *name, const char *mode)
  * Incomplete explanation:
  *	http://msdn.microsoft.com/library/en-us/dnw2k/html/ntfs5.asp
  * More useful info and an example:
- *	http://www.sysinternals.com/ntw2k/source/misc.shtml#streams
+ *	https://learn.microsoft.com/en-us/sysinternals/downloads/streams
  */
 
 /*
@@ -7170,7 +8346,10 @@ copy_substream(HANDLE sh, void *context, WCHAR *to, WCHAR *substream, long len)
     HANDLE  hTo;
     WCHAR   *to_name;
 
-    to_name = malloc((wcslen(to) + wcslen(substream) + 1) * sizeof(WCHAR));
+    to_name = alloc((wcslen(to) + wcslen(substream) + 1) * sizeof(WCHAR));
+    if (to_name == NULL)
+	return;
+
     wcscpy(to_name, to);
     wcscat(to_name, substream);
 
@@ -7306,6 +8485,7 @@ typedef struct _FILE_EA_INFORMATION_ {
     ULONG EaSize;
 } FILE_EA_INFORMATION_, *PFILE_EA_INFORMATION_;
 
+#ifndef PROTO
 typedef NTSTATUS (NTAPI *PfnNtOpenFile)(
 	PHANDLE FileHandle,
 	ACCESS_MASK DesiredAccess,
@@ -7316,10 +8496,10 @@ typedef NTSTATUS (NTAPI *PfnNtOpenFile)(
 typedef NTSTATUS (NTAPI *PfnNtClose)(
 	HANDLE Handle);
 typedef NTSTATUS (NTAPI *PfnNtSetEaFile)(
-	HANDLE           FileHandle,
-	PIO_STATUS_BLOCK IoStatusBlock,
-	PVOID            Buffer,
-	ULONG            Length);
+	HANDLE		    FileHandle,
+	PIO_STATUS_BLOCK    IoStatusBlock,
+	PVOID		    Buffer,
+	ULONG		    Length);
 typedef NTSTATUS (NTAPI *PfnNtQueryEaFile)(
 	HANDLE FileHandle,
 	PIO_STATUS_BLOCK IoStatusBlock,
@@ -7331,10 +8511,10 @@ typedef NTSTATUS (NTAPI *PfnNtQueryEaFile)(
 	PULONG EaIndex,
 	BOOLEAN RestartScan);
 typedef NTSTATUS (NTAPI *PfnNtQueryInformationFile)(
-	HANDLE                 FileHandle,
-	PIO_STATUS_BLOCK       IoStatusBlock,
-	PVOID                  FileInformation,
-	ULONG                  Length,
+	HANDLE			FileHandle,
+	PIO_STATUS_BLOCK	IoStatusBlock,
+	PVOID			FileInformation,
+	ULONG			Length,
 	FILE_INFORMATION_CLASS FileInformationClass);
 typedef VOID (NTAPI *PfnRtlInitUnicodeString)(
 	PUNICODE_STRING DestinationString,
@@ -7346,6 +8526,7 @@ PfnNtSetEaFile pNtSetEaFile = NULL;
 PfnNtQueryEaFile pNtQueryEaFile = NULL;
 PfnNtQueryInformationFile pNtQueryInformationFile = NULL;
 PfnRtlInitUnicodeString pRtlInitUnicodeString = NULL;
+#endif
 
 /*
  * Load ntdll.dll functions.
@@ -7355,32 +8536,32 @@ load_ntdll(void)
 {
     static int	loaded = -1;
 
-    if (loaded == -1)
+    if (loaded != -1)
+	return (BOOL) loaded;
+
+    HMODULE hNtdll = GetModuleHandle("ntdll.dll");
+    if (hNtdll != NULL)
     {
-	HMODULE hNtdll = GetModuleHandle("ntdll.dll");
-	if (hNtdll != NULL)
-	{
-	    pNtOpenFile = (PfnNtOpenFile) GetProcAddress(hNtdll, "NtOpenFile");
-	    pNtClose = (PfnNtClose) GetProcAddress(hNtdll, "NtClose");
-	    pNtSetEaFile = (PfnNtSetEaFile)
-		GetProcAddress(hNtdll, "NtSetEaFile");
-	    pNtQueryEaFile = (PfnNtQueryEaFile)
-		GetProcAddress(hNtdll, "NtQueryEaFile");
-	    pNtQueryInformationFile = (PfnNtQueryInformationFile)
-		GetProcAddress(hNtdll, "NtQueryInformationFile");
-	    pRtlInitUnicodeString = (PfnRtlInitUnicodeString)
-		GetProcAddress(hNtdll, "RtlInitUnicodeString");
-	}
-	if (pNtOpenFile == NULL
-		|| pNtClose == NULL
-		|| pNtSetEaFile == NULL
-		|| pNtQueryEaFile == NULL
-		|| pNtQueryInformationFile == NULL
-		|| pRtlInitUnicodeString == NULL)
-	    loaded = FALSE;
-	else
-	    loaded = TRUE;
+	pNtOpenFile = (PfnNtOpenFile) GetProcAddress(hNtdll, "NtOpenFile");
+	pNtClose = (PfnNtClose) GetProcAddress(hNtdll, "NtClose");
+	pNtSetEaFile = (PfnNtSetEaFile)
+	    GetProcAddress(hNtdll, "NtSetEaFile");
+	pNtQueryEaFile = (PfnNtQueryEaFile)
+	    GetProcAddress(hNtdll, "NtQueryEaFile");
+	pNtQueryInformationFile = (PfnNtQueryInformationFile)
+	    GetProcAddress(hNtdll, "NtQueryInformationFile");
+	pRtlInitUnicodeString = (PfnRtlInitUnicodeString)
+	    GetProcAddress(hNtdll, "RtlInitUnicodeString");
     }
+    if (pNtOpenFile == NULL
+	    || pNtClose == NULL
+	    || pNtSetEaFile == NULL
+	    || pNtQueryEaFile == NULL
+	    || pNtQueryInformationFile == NULL
+	    || pRtlInitUnicodeString == NULL)
+	loaded = FALSE;
+    else
+	loaded = TRUE;
     return (BOOL) loaded;
 }
 
@@ -7410,9 +8591,9 @@ copy_extattr(char_u *from, char_u *to)
     if (fromf == NULL || tof == NULL)
 	goto theend;
     STRCPY(fromf, "\\??\\");
-    STRCAT(fromf, from);
+    STRCPY(fromf + STRLEN_LITERAL("\\??\\"), from);
     STRCPY(tof, "\\??\\");
-    STRCAT(tof, to);
+    STRCPY(tof + STRLEN_LITERAL("\\??\\"), to);
 
     // Convert the names to wide characters.
     fromw = enc_to_utf16(fromf, NULL);
@@ -7436,8 +8617,7 @@ copy_extattr(char_u *from, char_u *to)
 	    if (pNtQueryEaFile(h, &iosb, ea, eainfo.EaSize, FALSE,
 			NULL, 0, NULL, TRUE) != STATUS_SUCCESS)
 	    {
-		vim_free(ea);
-		ea = NULL;
+		VIM_CLEAR(ea);
 	    }
 	}
     }
@@ -7478,88 +8658,6 @@ mch_copy_file_attribute(char_u *from, char_u *to)
     return 0;
 }
 
-#if defined(MYRESETSTKOFLW) || defined(PROTO)
-/*
- * Recreate a destroyed stack guard page in win32.
- * Written by Benjamin Peterson.
- */
-
-// These magic numbers are from the MS header files
-# define MIN_STACK_WINNT 2
-
-/*
- * This function does the same thing as _resetstkoflw(), which is only
- * available in DevStudio .net and later.
- * Returns 0 for failure, 1 for success.
- */
-    int
-myresetstkoflw(void)
-{
-    BYTE	*pStackPtr;
-    BYTE	*pGuardPage;
-    BYTE	*pStackBase;
-    BYTE	*pLowestPossiblePage;
-    MEMORY_BASIC_INFORMATION mbi;
-    SYSTEM_INFO si;
-    DWORD	nPageSize;
-    DWORD	dummy;
-
-    // We need to know the system page size.
-    GetSystemInfo(&si);
-    nPageSize = si.dwPageSize;
-
-    // ...and the current stack pointer
-    pStackPtr = (BYTE*)_alloca(1);
-
-    // ...and the base of the stack.
-    if (VirtualQuery(pStackPtr, &mbi, sizeof mbi) == 0)
-	return 0;
-    pStackBase = (BYTE*)mbi.AllocationBase;
-
-    // ...and the page that's min_stack_req pages away from stack base; this is
-    // the lowest page we could use.
-    pLowestPossiblePage = pStackBase + MIN_STACK_WINNT * nPageSize;
-
-    {
-	// We want the first committed page in the stack Start at the stack
-	// base and move forward through memory until we find a committed block.
-	BYTE *pBlock = pStackBase;
-
-	for (;;)
-	{
-	    if (VirtualQuery(pBlock, &mbi, sizeof mbi) == 0)
-		return 0;
-
-	    pBlock += mbi.RegionSize;
-
-	    if (mbi.State & MEM_COMMIT)
-		break;
-	}
-
-	// mbi now describes the first committed block in the stack.
-	if (mbi.Protect & PAGE_GUARD)
-	    return 1;
-
-	// decide where the guard page should start
-	if ((long_u)(mbi.BaseAddress) < (long_u)pLowestPossiblePage)
-	    pGuardPage = pLowestPossiblePage;
-	else
-	    pGuardPage = (BYTE*)mbi.BaseAddress;
-
-	// allocate the guard page
-	if (!VirtualAlloc(pGuardPage, nPageSize, MEM_COMMIT, PAGE_READWRITE))
-	    return 0;
-
-	// apply the guard attribute to the page
-	if (!VirtualProtect(pGuardPage, nPageSize, PAGE_READWRITE | PAGE_GUARD,
-								      &dummy))
-	    return 0;
-    }
-
-    return 1;
-}
-#endif
-
 
 /*
  * The command line arguments in UTF-16
@@ -7577,7 +8675,9 @@ static int	*used_file_indexes = NULL; // indexes in global_argv[] for
 static int	used_file_count = 0;	// nr of entries in used_file_indexes
 static int	used_file_literal = FALSE;  // take file names literally
 static int	used_file_full_path = FALSE;  // file name was full path
+#ifdef FEAT_DIFF
 static int	used_file_diff_mode = FALSE;  // file name was with diff mode
+#endif
 static int	used_alist_count = 0;
 
 
@@ -7596,7 +8696,7 @@ get_cmd_argsW(char ***argvp)
     ArglistW = CommandLineToArgvW(GetCommandLineW(), &nArgsW);
     if (ArglistW != NULL)
     {
-	argv = malloc((nArgsW + 1) * sizeof(char *));
+	argv = alloc((nArgsW + 1) * sizeof(char *));
 	if (argv != NULL)
 	{
 	    argc = nArgsW;
@@ -7628,7 +8728,7 @@ get_cmd_argsW(char ***argvp)
     {
 	if (used_file_indexes != NULL)
 	    free(used_file_indexes);
-	used_file_indexes = malloc(argc * sizeof(int));
+	used_file_indexes = alloc(argc * sizeof(int));
     }
 
     if (argvp != NULL)
@@ -7639,11 +8739,11 @@ get_cmd_argsW(char ***argvp)
     void
 free_cmd_argsW(void)
 {
-    if (ArglistW != NULL)
-    {
-	GlobalFree(ArglistW);
-	ArglistW = NULL;
-    }
+    if (ArglistW == NULL)
+	return;
+
+    GlobalFree(ArglistW);
+    ArglistW = NULL;
 }
 
 /*
@@ -7667,7 +8767,9 @@ used_file_arg(char *name, int literal, int full_path, int diff_mode)
 	}
     used_file_literal = literal;
     used_file_full_path = full_path;
+#ifdef FEAT_DIFF
     used_file_diff_mode = diff_mode;
+#endif
 }
 
 /*
@@ -7731,13 +8833,15 @@ fix_arg_enc(void)
 	    if (used_file_diff_mode && mch_isdir(str) && GARGCOUNT > 0
 				      && !mch_isdir(alist_name(&GARGLIST[0])))
 	    {
-		char_u	    *r;
+		char_u	    *tail;
+		string_T    ret;
 
-		r = concat_fnames(str, gettail(alist_name(&GARGLIST[0])), TRUE);
-		if (r != NULL)
+		tail = gettail(alist_name(&GARGLIST[0]));
+		concat_fnames(str, STRLEN(str), tail, STRLEN(tail), TRUE, &ret);
+		if (ret.string != NULL)
 		{
 		    vim_free(str);
-		    str = r;
+		    str = ret.string;
 		}
 	    }
 #endif
@@ -7764,15 +8868,18 @@ fix_arg_enc(void)
 	// Now expand wildcards in the arguments.
 	// Temporarily add '(' and ')' to 'isfname'.  These are valid
 	// filename characters but are excluded from 'isfname' to make
-	// "gf" work on a file name in parenthesis (e.g.: see vim.h).
+	// "gf" work on a file name in parentheses (e.g.: see vim.h).
 	// Also, unset wildignore to not be influenced by this option.
 	// The arguments specified in command-line should be kept even if
 	// encoding options were changed.
-	do_cmdline_cmd((char_u *)":let SaVe_ISF = &isf|set isf+=(,)");
-	do_cmdline_cmd((char_u *)":let SaVe_WIG = &wig|set wig=");
+	// Use :legacy so that it also works when in Vim9 script.
+	do_cmdline_cmd((char_u *)":legacy let g:SaVe_ISF = &isf|set isf+=(,)");
+	do_cmdline_cmd((char_u *)":legacy let g:SaVe_WIG = &wig|set wig=");
 	alist_expand(fnum_list, used_alist_count);
-	do_cmdline_cmd((char_u *)":let &isf = SaVe_ISF|unlet SaVe_ISF");
-	do_cmdline_cmd((char_u *)":let &wig = SaVe_WIG|unlet SaVe_WIG");
+	do_cmdline_cmd(
+		(char_u *)":legacy let &isf = g:SaVe_ISF|unlet g:SaVe_ISF");
+	do_cmdline_cmd(
+		(char_u *)":legacy let &wig = g:SaVe_WIG|unlet g:SaVe_WIG");
     }
 
     // If wildcard expansion failed, we are editing the first file of the
@@ -7780,8 +8887,9 @@ fix_arg_enc(void)
     if (curwin->w_arg_idx == 0 && curbuf->b_fname == NULL)
     {
 	do_cmdline_cmd((char_u *)":rewind");
-	if (GARGCOUNT == 1 && used_file_full_path)
-	    (void)vim_chdirfile(alist_name(&GARGLIST[0]), "drop");
+	if (GARGCOUNT == 1 && used_file_full_path
+		&& vim_chdirfile(alist_name(&GARGLIST[0]), "drop") == OK)
+	    last_chdir_reason = "drop";
     }
 
     set_alist_count();
@@ -7818,7 +8926,7 @@ mch_setenv(char *var, char *value, int x UNUSED)
  * Support for 256 colors and 24-bit colors was added in Windows 10
  * version 1703 (Creators update).
  */
-#define VTP_FIRST_SUPPORT_BUILD MAKE_VER(10, 0, 15063)
+#define VTP_FIRST_SUPPORT_BUILD	    MAKE_VER(10, 0, 15063)
 
 /*
  * Support for pseudo-console (ConPTY) was added in windows 10
@@ -7850,14 +8958,19 @@ mch_setenv(char *var, char *value, int x UNUSED)
 #define CONPTY_INSIDER_BUILD	    MAKE_VER(10, 0, 18995)
 
 /*
- * Not stable now.
+ * Make conpty default on Windows 11
  */
-#define CONPTY_STABLE_BUILD	    MAKE_VER(10, 0, 32767)  // T.B.D.
+#define CONPTY_STABLE_BUILD	    MAKE_VER(10, 0, 22000)
+// Notes:
+// Win 10 22H2 Final is build 19045, its conpty is widely used.
+// Strangely, 19045 is newer but is a lower build number than the 2020 insider
+// preview which had a build 19587.  And, not sure how stable that was?
+// Win Server 2022 (May 10, 2022) is build 20348, its conpty is widely used.
+// Win 11 starts from build 22000, even though the major version says 10!
 
     static void
 vtp_flag_init(void)
 {
-    DWORD   ver = get_build_number();
 #if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
     DWORD   mode;
     HANDLE  out;
@@ -7868,75 +8981,61 @@ vtp_flag_init(void)
     {
 	out = GetStdHandle(STD_OUTPUT_HANDLE);
 
-	vtp_working = (ver >= VTP_FIRST_SUPPORT_BUILD) ? 1 : 0;
+	vtp_working = (win_version >= VTP_FIRST_SUPPORT_BUILD) ? 1 : 0;
 	GetConsoleMode(out, &mode);
 	mode |= (ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 	if (SetConsoleMode(out, mode) == 0)
 	    vtp_working = 0;
+
+	// VTP uses alternate screen buffer.
+	// But, not if running in a nested terminal
+	use_alternate_screen_buffer = win_version >= MAKE_VER(10, 0, 19045)
+	    && p_rs && vtp_working && !mch_getenv("VIM_TERMINAL");
     }
 #endif
 
-    if (ver >= CONPTY_FIRST_SUPPORT_BUILD)
+    if (win_version >= CONPTY_FIRST_SUPPORT_BUILD)
 	conpty_working = 1;
-    if (ver >= CONPTY_STABLE_BUILD)
+    if (win_version >= CONPTY_STABLE_BUILD)
 	conpty_stable = 1;
 
-    if (ver <= CONPTY_INSIDER_BUILD)
+    if (win_version <= CONPTY_INSIDER_BUILD)
 	conpty_type = 3;
-    if (ver <= CONPTY_1909_BUILD)
+    if (win_version <= CONPTY_1909_BUILD)
 	conpty_type = 2;
-    if (ver <= CONPTY_1903_BUILD)
+    if (win_version <= CONPTY_1903_BUILD)
 	conpty_type = 2;
-    if (ver < CONPTY_FIRST_SUPPORT_BUILD)
+    if (win_version < CONPTY_FIRST_SUPPORT_BUILD)
 	conpty_type = 1;
 
-    if (ver >= CONPTY_NEXT_UPDATE_BUILD)
+    if (win_version >= CONPTY_NEXT_UPDATE_BUILD)
 	conpty_fix_type = 1;
 }
 
-#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL) || defined(PROTO)
+#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
 
     static void
 vtp_init(void)
 {
-    HMODULE hKerneldll;
-    DYN_CONSOLE_SCREEN_BUFFER_INFOEX csbi;
 # ifdef FEAT_TERMGUICOLORS
-    COLORREF fg, bg;
-# endif
-
-    // Use functions supported from Vista
-    hKerneldll = GetModuleHandle("kernel32.dll");
-    if (hKerneldll != NULL)
-    {
-	pGetConsoleScreenBufferInfoEx =
-		(PfnGetConsoleScreenBufferInfoEx)GetProcAddress(
-		hKerneldll, "GetConsoleScreenBufferInfoEx");
-	pSetConsoleScreenBufferInfoEx =
-		(PfnSetConsoleScreenBufferInfoEx)GetProcAddress(
-		hKerneldll, "SetConsoleScreenBufferInfoEx");
-	if (pGetConsoleScreenBufferInfoEx != NULL
-		&& pSetConsoleScreenBufferInfoEx != NULL)
-	    has_csbiex = TRUE;
-    }
-
+    CONSOLE_SCREEN_BUFFER_INFOEX csbi;
     csbi.cbSize = sizeof(csbi);
-    if (has_csbiex)
-	pGetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
     save_console_bg_rgb = (guicolor_T)csbi.ColorTable[g_color_index_bg];
     save_console_fg_rgb = (guicolor_T)csbi.ColorTable[g_color_index_fg];
     store_console_bg_rgb = save_console_bg_rgb;
     store_console_fg_rgb = save_console_fg_rgb;
 
-# ifdef FEAT_TERMGUICOLORS
+    COLORREF bg;
     bg = (COLORREF)csbi.ColorTable[g_color_index_bg];
-    fg = (COLORREF)csbi.ColorTable[g_color_index_fg];
     bg = (GetRValue(bg) << 16) | (GetGValue(bg) << 8) | GetBValue(bg);
-    fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
     default_console_color_bg = bg;
+
+    COLORREF fg;
+    fg = (COLORREF)csbi.ColorTable[g_color_index_fg];
+    fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
     default_console_color_fg = fg;
 # endif
-
     set_console_color_rgb();
 }
 
@@ -7956,6 +9055,9 @@ vtp_printf(
     DWORD   result;
     int	    len;
 
+    if (silent_mode)
+	return 0;
+
     va_start(list, format);
     len = vim_vsnprintf((char *)buf, 100, (char *)format, list);
     va_end(list);
@@ -7973,12 +9075,12 @@ vtp_sgr_bulk(
     vtp_sgr_bulks(1, args);
 }
 
-#define FAST256(x) \
+# define FAST256(x) \
     if ((*p-- = "0123456789"[(n = x % 10)]) \
 	    && x >= 10 && (*p-- = "0123456789"[((m = x % 100) - n) / 10]) \
 	    && x >= 100 && (*p-- = "012"[((x & 0xff) - m) / 100]));
 
-#define FAST256CASE(x) \
+# define FAST256CASE(x) \
     case x: \
 	FAST256(newargs[x - 1]);
 
@@ -7987,8 +9089,8 @@ vtp_sgr_bulks(
     int argc,
     int *args)
 {
-#define MAXSGR 16
-#define SGRBUFSIZE 2 + 4 * MAXSGR + 1 // '\033[' + SGR + 'm'
+# define MAXSGR 16
+# define SGRBUFSIZE 2 + 4 * MAXSGR + 1 // '\033[' + SGR + 'm'
     char_u  buf[SGRBUFSIZE];
     char_u  *p;
     int	    in, out;
@@ -7999,7 +9101,7 @@ vtp_sgr_bulks(
     if (argc == 0)
     {
 	sgrfgr = sgrbgr = -1;
-	vtp_printf("033[m");
+	vtp_printf("\033[m");
 	return;
     }
 
@@ -8122,13 +9224,7 @@ vtp_sgr_bulks(
     static void
 wt_init(void)
 {
-    wt_working = (mch_getenv("WT_SESSION") != NULL);
-}
-
-    int
-use_wt(void)
-{
-    return USE_WT;
+    wt_working = mch_getenv("WT_SESSION") != NULL;
 }
 
 # ifdef FEAT_TERMGUICOLORS
@@ -8147,28 +9243,30 @@ ctermtoxterm(
 set_console_color_rgb(void)
 {
 # ifdef FEAT_TERMGUICOLORS
-    DYN_CONSOLE_SCREEN_BUFFER_INFOEX csbi;
+    CONSOLE_SCREEN_BUFFER_INFOEX csbi;
     guicolor_T	fg, bg;
     int		ctermfg, ctermbg;
 
-    if (!USE_VTP)
+    if (!vtp_working)
 	return;
 
     get_default_console_color(&ctermfg, &ctermbg, &fg, &bg);
 
-    if (USE_WT)
+    if (p_tgc || t_colors >= 256)
     {
 	term_fg_rgb_color(fg);
 	term_bg_rgb_color(bg);
 	return;
     }
 
+    if (use_alternate_screen_buffer)
+	return;
+
     fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
     bg = (GetRValue(bg) << 16) | (GetGValue(bg) << 8) | GetBValue(bg);
 
     csbi.cbSize = sizeof(csbi);
-    if (has_csbiex)
-	pGetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 
     csbi.cbSize = sizeof(csbi);
     csbi.srWindow.Right += 1;
@@ -8177,12 +9275,11 @@ set_console_color_rgb(void)
     store_console_fg_rgb = csbi.ColorTable[g_color_index_fg];
     csbi.ColorTable[g_color_index_bg] = (COLORREF)bg;
     csbi.ColorTable[g_color_index_fg] = (COLORREF)fg;
-    if (has_csbiex)
-	pSetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    SetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 # endif
 }
 
-# if defined(FEAT_TERMGUICOLORS) || defined(PROTO)
+# if defined(FEAT_TERMGUICOLORS)
     void
 get_default_console_color(
     int *cterm_fg,
@@ -8195,6 +9292,7 @@ get_default_console_color(
     guicolor_T guibg = INVALCOLOR;
     int ctermfg = 0;
     int ctermbg = 0;
+    int dummynull = 0;
 
     id = syn_name2id((char_u *)"Normal");
     if (id > 0 && p_tgc)
@@ -8203,9 +9301,11 @@ get_default_console_color(
     {
 	ctermfg = -1;
 	if (id > 0)
-	    syn_id2cterm_bg(id, &ctermfg, &ctermbg);
-	guifg = ctermfg != -1 ? ctermtoxterm(ctermfg)
-						    : default_console_color_fg;
+	    syn_id2cterm_bg(id, &ctermfg, &dummynull);
+	if (ctermfg != -1)
+	    guifg = ctermtoxterm(ctermfg);
+	else
+	    guifg = USE_WT ? INVALCOLOR : default_console_color_fg;
 	cterm_normal_fg_gui_color = guifg;
 	ctermfg = ctermfg < 0 ? 0 : ctermfg;
     }
@@ -8213,9 +9313,11 @@ get_default_console_color(
     {
 	ctermbg = -1;
 	if (id > 0)
-	    syn_id2cterm_bg(id, &ctermfg, &ctermbg);
-	guibg = ctermbg != -1 ? ctermtoxterm(ctermbg)
-						    : default_console_color_bg;
+	    syn_id2cterm_bg(id, &dummynull, &ctermbg);
+	if (ctermbg != -1)
+	    guibg = ctermtoxterm(ctermbg);
+	else
+	    guibg = USE_WT ? INVALCOLOR : default_console_color_bg;
 	cterm_normal_bg_gui_color = guibg;
 	ctermbg = ctermbg < 0 ? 0 : ctermbg;
     }
@@ -8234,22 +9336,20 @@ get_default_console_color(
 reset_console_color_rgb(void)
 {
 # ifdef FEAT_TERMGUICOLORS
-    DYN_CONSOLE_SCREEN_BUFFER_INFOEX csbi;
-
-    if (USE_WT)
+    if (use_alternate_screen_buffer)
 	return;
 
+    CONSOLE_SCREEN_BUFFER_INFOEX csbi;
+
     csbi.cbSize = sizeof(csbi);
-    if (has_csbiex)
-	pGetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 
     csbi.cbSize = sizeof(csbi);
     csbi.srWindow.Right += 1;
     csbi.srWindow.Bottom += 1;
     csbi.ColorTable[g_color_index_bg] = (COLORREF)store_console_bg_rgb;
     csbi.ColorTable[g_color_index_fg] = (COLORREF)store_console_fg_rgb;
-    if (has_csbiex)
-	pSetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    SetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 # endif
 }
 
@@ -8260,26 +9360,27 @@ reset_console_color_rgb(void)
 restore_console_color_rgb(void)
 {
 # ifdef FEAT_TERMGUICOLORS
-    DYN_CONSOLE_SCREEN_BUFFER_INFOEX csbi;
+    if (use_alternate_screen_buffer)
+	return;
+
+    CONSOLE_SCREEN_BUFFER_INFOEX csbi;
 
     csbi.cbSize = sizeof(csbi);
-    if (has_csbiex)
-	pGetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 
     csbi.cbSize = sizeof(csbi);
     csbi.srWindow.Right += 1;
     csbi.srWindow.Bottom += 1;
     csbi.ColorTable[g_color_index_bg] = (COLORREF)save_console_bg_rgb;
     csbi.ColorTable[g_color_index_fg] = (COLORREF)save_console_fg_rgb;
-    if (has_csbiex)
-	pSetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    SetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 # endif
 }
 
     void
 control_console_color_rgb(void)
 {
-    if (USE_VTP)
+    if (vtp_working)
 	set_console_color_rgb();
     else
 	reset_console_color_rgb();
@@ -8329,43 +9430,146 @@ get_conpty_fix_type(void)
     return conpty_fix_type;
 }
 
-#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL) || defined(PROTO)
+#if !defined(FEAT_GUI_MSWIN) || defined(VIMDLL)
     void
 resize_console_buf(void)
 {
+    if (use_alternate_screen_buffer)
+	return;
+
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     COORD coord;
     SMALL_RECT newsize;
 
-    if (GetConsoleScreenBufferInfo(g_hConOut, &csbi))
-    {
-	coord.X = SRWIDTH(csbi.srWindow);
-	coord.Y = SRHEIGHT(csbi.srWindow);
-	SetConsoleScreenBufferSize(g_hConOut, coord);
+    if (!GetConsoleScreenBufferInfo(g_hConOut, &csbi))
+	return;
 
-	newsize.Left = 0;
-	newsize.Top = 0;
-	newsize.Right = coord.X - 1;
-	newsize.Bottom = coord.Y - 1;
-	SetConsoleWindowInfo(g_hConOut, TRUE, &newsize);
+    coord.X = SRWIDTH(csbi.srWindow);
+    coord.Y = SRHEIGHT(csbi.srWindow);
+    SetConsoleScreenBufferSize(g_hConOut, coord);
 
-	SetConsoleScreenBufferSize(g_hConOut, coord);
-    }
+    newsize.Left = 0;
+    newsize.Top = 0;
+    newsize.Right = coord.X - 1;
+    newsize.Bottom = coord.Y - 1;
+    SetConsoleWindowInfo(g_hConOut, TRUE, &newsize);
+
+    SetConsoleScreenBufferSize(g_hConOut, coord);
 }
 #endif
 
     char *
 GetWin32Error(void)
 {
-    char *msg = NULL;
-    FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM,
-	    NULL, GetLastError(), 0, (LPSTR)&msg, 0, NULL);
-    if (msg != NULL)
+    static char	*oldmsg = NULL;
+    char	*acp_msg = NULL;
+    DWORD	acp_len;
+    char	*enc_msg = NULL;
+    int		enc_len = 0;
+
+    // get formatted message from OS
+    acp_len = FormatMessage(
+	    FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM,
+	    NULL, GetLastError(), 0, (LPSTR)&acp_msg, 0, NULL);
+    if (acp_len == 0 || acp_msg == NULL)
+	return NULL;
+
+    // clean oldmsg if remained.
+    if (oldmsg != NULL)
     {
-	// remove trailing \r\n
-	char *pcrlf = strstr(msg, "\r\n");
-	if (pcrlf != NULL)
-	    *pcrlf = '\0';
+	vim_free(oldmsg);
+	oldmsg = NULL;
     }
-    return msg;
+
+    acp_to_enc((char_u *)acp_msg, (int)acp_len, (char_u **)&enc_msg, &enc_len);
+    LocalFree(acp_msg);
+    if (enc_msg == NULL)
+	return NULL;
+
+    // remove trailing \r\n
+    char *pcrlf = strstr(enc_msg, "\r\n");
+    if (pcrlf != NULL)
+	*pcrlf = NUL;
+
+    oldmsg = enc_msg;
+    return enc_msg;
 }
+
+#if defined(FEAT_RELTIME)
+static HANDLE   timer_handle;
+static int      timer_active = FALSE;
+
+/*
+ * Calls to start_timeout alternate the return value pointer between the two
+ * entries in timeout_flags. If the previously active timeout is very close to
+ * expiring when start_timeout() is called then a race condition means that the
+ * set_flag() function may still be invoked after the previous timer is
+ * deleted. Ping-ponging between the two flags prevents this causing 'fake'
+ * timeouts.
+ */
+static sig_atomic_t timeout_flags[2];
+static int	    timeout_flag_idx = 0;
+static sig_atomic_t *timeout_flag = &timeout_flags[0];
+
+
+    static void CALLBACK
+set_flag(void *param, BOOLEAN unused2 UNUSED)
+{
+    *(sig_atomic_t *)param = TRUE;
+}
+
+/*
+ * Stop any active timeout.
+ */
+    void
+stop_timeout(void)
+{
+    if (timer_active)
+    {
+	BOOL ret = DeleteTimerQueueTimer(NULL, timer_handle, NULL);
+	timer_active = FALSE;
+	if (!ret && GetLastError() != ERROR_IO_PENDING)
+	{
+	    semsg(_(e_could_not_clear_timeout_str), GetWin32Error());
+	}
+    }
+    *timeout_flag = FALSE;
+}
+
+/*
+ * Start the timeout timer.
+ *
+ * The period is defined in milliseconds.
+ *
+ * The return value is a pointer to a flag that is initialised to 0.  If the
+ * timeout expires, the flag is set to 1. This will only return pointers to
+ * static memory; i.e. any pointer returned by this function may always be
+ * safely dereferenced.
+ *
+ * This function is not expected to fail, but if it does it still returns a
+ * valid flag pointer; the flag will remain stuck at zero.
+ */
+    volatile sig_atomic_t *
+start_timeout(long msec)
+{
+    BOOL ret;
+
+    timeout_flag = &timeout_flags[timeout_flag_idx];
+
+    stop_timeout();
+    ret = CreateTimerQueueTimer(
+	    &timer_handle, NULL, set_flag, timeout_flag,
+	    (DWORD)msec, 0, WT_EXECUTEDEFAULT);
+    if (!ret)
+    {
+	semsg(_(e_could_not_set_timeout_str), GetWin32Error());
+    }
+    else
+    {
+	timeout_flag_idx = (timeout_flag_idx + 1) % 2;
+	timer_active = TRUE;
+	*timeout_flag = FALSE;
+    }
+    return timeout_flag;
+}
+#endif

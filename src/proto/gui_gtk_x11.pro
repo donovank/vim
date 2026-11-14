@@ -1,4 +1,4 @@
-/* gui_gtk_x11.c */
+// gui_gtk_x11.c
 void gui_mch_prepare(int *argc, char **argv);
 void gui_mch_free_all(void);
 int gui_mch_is_blinking(void);
@@ -13,7 +13,7 @@ void gui_mch_show_tabline(int showit);
 int gui_mch_showing_tabline(void);
 void gui_mch_update_tabline(void);
 void gui_mch_set_curtab(int nr);
-void gui_gtk_set_selection_targets(void);
+void gui_gtk_set_selection_targets(GdkAtom selection);
 void gui_gtk_set_dnd_targets(void);
 int gui_mch_init(void);
 void gui_mch_forked(void);
@@ -37,12 +37,14 @@ int gui_mch_init_font(char_u *font_name, int fontset);
 GuiFont gui_mch_get_font(char_u *name, int report_error);
 char_u *gui_mch_get_fontname(GuiFont font, char_u *name);
 void gui_mch_free_font(GuiFont font);
+void gui_mch_expand_font(optexpand_T *args, void *param, int (*add_match)(char_u *val));
 guicolor_T gui_mch_get_color(char_u *name);
 guicolor_T gui_mch_get_rgb_color(int r, int g, int b);
 void gui_mch_set_fg_color(guicolor_T color);
 void gui_mch_set_bg_color(guicolor_T color);
 void gui_mch_set_sp_color(guicolor_T color);
-int gui_gtk2_draw_string(int row, int col, char_u *s, int len, int flags);
+int gui_gtk_draw_string(int row, int col, char_u *s, int len, int flags);
+int gui_gtk_draw_string_ext(int row, int col, char_u *s, int len, int flags, int force_pango);
 int gui_mch_haskey(char_u *name);
 int gui_get_x11_windis(Window *win, Display **dis);
 Display *gui_mch_get_display(void);
@@ -77,4 +79,10 @@ void mch_set_mouse_shape(int shape);
 void gui_mch_drawsign(int row, int col, int typenr);
 void *gui_mch_register_sign(char_u *signfile);
 void gui_mch_destroy_sign(void *sign);
-/* vim: set ft=c : */
+int image_gui_init(image_T *img);
+void image_gui_uninit(image_T *img);
+int image_placement_gui_init(image_placement_T *place);
+void image_placement_gui_uninit(image_placement_T *place);
+void image_placement_gui_draw(image_placement_T *place);
+void image_placement_gui_clear(image_placement_T *place);
+// vim: ft=c

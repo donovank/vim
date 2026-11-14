@@ -1,8 +1,7 @@
 " Test try-catch-finally exception handling
 " Most of this was formerly in test49.
 
-source check.vim
-source shared.vim
+import './util/vim9.vim' as v9
 
 "-------------------------------------------------------------------------------
 " Test environment							    {{{1
@@ -49,7 +48,7 @@ func T25_F()
   Xpath 'i'
 endfunc
 
-" Also try using "fina" and "final" and "finall" as abbraviations.
+" Also try using "fina" and "final" and "finall" as abbreviations.
 func T25_G()
   if 1
     try
@@ -1849,7 +1848,7 @@ func T75_R()
       Xpath 'f'
     finally
       Xpath 'g'
-      if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21'
+      if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21:'
         Xpath 'h'
       endif
       break		" discard error for $VIMNOERRTHROW
@@ -1876,7 +1875,7 @@ func Test_builtin_func_error()
         Xpath 'k'
       finally
         Xpath 'l'
-        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21'
+        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21:'
           Xpath 'm'
         endif
         break		" discard error for $VIMNOERRTHROW
@@ -1895,7 +1894,7 @@ func Test_builtin_func_error()
         Xpath 'o'
       finally
         Xpath 'p'
-        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21'
+        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21:'
           Xpath 'q'
         endif
         break		" discard error for $VIMNOERRTHROW
@@ -1914,7 +1913,7 @@ func Test_builtin_func_error()
         Xpath 's'
       finally
         Xpath 't'
-        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21'
+        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21:'
           Xpath 'u'
         endif
         break		" discard error for $VIMNOERRTHROW
@@ -1937,7 +1936,7 @@ func Test_builtin_func_error()
         Xpath 'x'
       finally
         Xpath 'y'
-        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21'
+        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21:'
           Xpath 'z'
         endif
         break		" discard error for $VIMNOERRTHROW
@@ -1957,7 +1956,7 @@ func Test_builtin_func_error()
         Xpath 'B'
       finally
         Xpath 'C'
-        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21'
+        if caught || $VIMNOERRTHROW && v:errmsg =~ 'E21:'
           Xpath 'D'
         endif
         call assert_equal('a', x)
@@ -1974,7 +1973,7 @@ func Test_builtin_func_error()
 endfunc
 
 func Test_reload_in_try_catch()
-  call writefile(['x'], 'Xreload')
+  call writefile(['x'], 'Xreload', 'D')
   set autoread
   edit Xreload
   tabnew
@@ -1994,7 +1993,6 @@ func Test_reload_in_try_catch()
   autocmd! ReLoad
   set noautoread
   bwipe! Xreload
-  call delete('Xreload')
 endfunc
 
 " Test for errors with :catch, :throw, :finally                            {{{1
@@ -2008,6 +2006,27 @@ func Test_try_catch_errors()
   call assert_fails('try | for i in range(5) | endif | endtry', 'E580:')
   call assert_fails('try | while v:true | endtry', 'E170:')
   call assert_fails('try | if v:true | endtry', 'E171:')
+
+  " this was using a negative index in cstack[]
+  let lines =<< trim END
+      try
+      for
+      if
+      endwhile
+      if
+      finally
+  END
+  call v9.CheckScriptFailure(lines, 'E690:')
+
+  let lines =<< trim END
+      try
+      for
+      if
+      endwhile
+      if
+      endtry
+  END
+  call v9.CheckScriptFailure(lines, 'E690:')
 endfunc
 
 " Test for verbose messages with :try :catch, and :finally                 {{{1
@@ -2199,6 +2218,36 @@ func Test_BufEnter_exception()
   %bwipe!
 endfunc
 
+" Test for using try/catch when lines are joined by "|" or "\n"           {{{1
+func Test_try_catch_nextcmd()
+  func Throw()
+    throw "Failure"
+  endfunc
+
+  let lines =<< trim END
+    try
+      let s:x = Throw()
+    catch
+      let g:caught = 1
+    endtry
+  END
+
+  let g:caught = 0
+  call execute(lines)
+  call assert_equal(1, g:caught)
+
+  let g:caught = 0
+  call execute(join(lines, '|'))
+  call assert_equal(1, g:caught)
+
+  let g:caught = 0
+  call execute(join(lines, "\n"))
+  call assert_equal(1, g:caught)
+
+  unlet g:caught
+  delfunc Throw
+endfunc
+
 " Test for using try/catch in a user command with a failing expression    {{{1
 func Test_user_command_try_catch()
   let lines =<< trim END
@@ -2222,6 +2271,134 @@ func Test_user_command_try_catch()
 
   call delete('XtestTryCatch')
   unlet g:caught
+endfunc
+
+" Test for using throw in a called function with following error    {{{1
+func Test_user_command_throw_in_function_call()
+  let lines =<< trim END
+      function s:get_dict() abort
+        throw 'my_error'
+      endfunction
+
+      try
+        call s:get_dict().foo()
+      catch /my_error/
+        let caught = 'yes'
+      catch
+        let caught = v:exception
+      endtry
+      call assert_equal('yes', caught)
+  END
+  call writefile(lines, 'XtestThrow')
+  source XtestThrow
+
+  call delete('XtestThrow')
+  unlet g:caught
+endfunc
+
+" Test that after reporting an uncaught exception there is no error for a
+" missing :endif
+func Test_after_exception_no_endif_error()
+  function Throw()
+    throw "Failure"
+  endfunction
+
+  function Foo()
+    if 1
+      call Throw()
+    endif
+  endfunction
+  call assert_fails('call Foo()', ['E605:', 'E605:'])
+  delfunc Throw
+  delfunc Foo
+endfunc
+
+" Test for using throw in a called function with following endtry    {{{1
+func Test_user_command_function_call_with_endtry()
+  let lines =<< trim END
+      funct s:throw(msg) abort
+        throw a:msg
+      endfunc
+      func s:main() abort
+        try
+          try
+            throw 'err1'
+          catch
+            call s:throw('err2') | endtry
+          catch
+            let s:caught = 'yes'
+        endtry
+      endfunc
+
+      call s:main()
+      call assert_equal('yes', s:caught)
+  END
+  call writefile(lines, 'XtestThrow', 'D')
+  source XtestThrow
+endfunc
+
+func ThisWillFail()
+
+endfunc
+
+" This was crashing prior to the fix in 8.2.3478.
+func Test_error_in_catch_and_finally()
+  let lines =<< trim END
+    try
+      echo x
+    catch
+      for l in []
+    finally
+  END
+  call writefile(lines, 'XtestCatchAndFinally', 'D')
+  try
+    source XtestCatchAndFinally
+  catch /E600:/
+  endtry
+endfunc
+
+" This was causing an illegal memory access
+func Test_leave_block_in_endtry_not_called()
+  let lines =<< trim END
+      vim9script
+      try #
+      for x in []
+      if
+      endwhile
+      if
+      endtry
+  END
+  call writefile(lines, 'XtestEndtry', 'D')
+  try
+    source XtestEndtry
+  catch /E171:/
+  endtry
+endfunc
+
+" Ensure | inside_block is correctly executed "{{{1
+func Test_try_endtry_inside_block()
+  let lines =<< trim END
+    vim9script
+
+    augroup testing
+      au User myusertest {
+        try
+          echoerr 'try'
+        catch
+        endtry
+        g:reached_after_endtry = 1
+      }
+    augroup end
+    doautocmd User myusertest
+  END
+  call writefile(lines, 'XtestInsideBlock', 'D')
+  source XtestInsideBlock
+  call assert_equal(1, g:reached_after_endtry)
+  unlet! g:reached_after_endtry
+  augroup testing
+    au!
+  augroup END
+  augroup! testing
 endfunc
 
 " Modeline								    {{{1

@@ -1,21 +1,17 @@
 " Vim compiler file
 " Compiler:	Dart Formatter
 " Maintainer:	Doug Kearns <dougkearns@gmail.com>
-" Last Change:	2019 May 08
+" Last Change:	2026 Aug 04
 
 if exists("current_compiler")
   finish
 endif
 let current_compiler = "dartfmt"
 
-if exists(":CompilerSet") != 2		" older Vim always used :setlocal
-  command -nargs=* CompilerSet setlocal <args>
-endif
-
 let s:cpo_save = &cpo
 set cpo&vim
 
-CompilerSet makeprg=dartfmt
+CompilerSet makeprg=dart\ format
 CompilerSet errorformat=%Eline\ %l\\,\ column\ %c\ of\ %f:\ %m,
 		       \%Z\ %\\{3}│\ %\\+^%\\+,
 		       \%C%.%#,

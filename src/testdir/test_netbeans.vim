@@ -1,9 +1,6 @@
 " Test the netbeans interface.
 
-source check.vim
 CheckFeature netbeans_intg
-
-source shared.vim
 
 let s:python = PythonProg()
 if s:python == ''
@@ -41,8 +38,7 @@ func ReadXnetbeans()
 endfunc
 
 func Nb_basic(port)
-  call delete("Xnetbeans")
-  call writefile([], "Xnetbeans")
+  call writefile([], "Xnetbeans", 'D')
 
   " Last line number in the Xnetbeans file. Used to verify the result of the
   " communication with the netbeans server
@@ -79,7 +75,7 @@ func Nb_basic(port)
   sleep 1m
 
   " getCursor test
-  call writefile(['foo bar', 'foo bar', 'foo bar'], 'Xfile1')
+  call writefile(['foo bar', 'foo bar', 'foo bar'], 'Xfile1', 'D')
   split Xfile1
   call cursor(3, 4)
   sleep 10m
@@ -272,7 +268,7 @@ func Nb_basic(port)
   let g:last += 4
 
   " editFile test
-  call writefile(['foo bar1', 'foo bar2', 'foo bar3'], 'Xfile3')
+  call writefile(['foo bar1', 'foo bar2', 'foo bar3'], 'Xfile3', 'D')
   call appendbufline(cmdbufnr, '$', 'editFile_Test')
   call WaitFor('len(ReadXnetbeans()) >= (g:last + 4)')
   let l = ReadXnetbeans()
@@ -838,9 +834,6 @@ func Nb_basic(port)
   call sign_unplace('*')
   call sign_undefine()
 
-  call delete("Xnetbeans")
-  call delete('Xfile1')
-  call delete('Xfile3')
   call delete('Xfile4')
 endfunc
 
@@ -851,10 +844,10 @@ endfunc
 
 func Nb_file_auth(port)
   call delete("Xnetbeans")
-  call writefile([], "Xnetbeans")
+  call writefile([], "Xnetbeans", 'D')
 
   call assert_fails('nbstart =notexist', 'E660:')
-  call writefile(['host=localhost', 'port=' . a:port, 'auth=bunny'], 'Xnbauth')
+  call writefile(['host=localhost', 'port=' . a:port, 'auth=bunny'], 'Xnbauth', 'D')
   if has('unix')
     call setfperm('Xnbauth', "rw-r--r--")
     call assert_fails('nbstart =Xnbauth', 'E668:')
@@ -871,7 +864,6 @@ func Nb_file_auth(port)
   call assert_equal('0:startupDone=0', lines[2])
 
   call delete("Xnbauth")
-  call delete("Xnetbeans")
 endfunc
 
 func Test_nb_file_auth()
@@ -882,9 +874,9 @@ endfunc
 " Test for quitting Vim with an open netbeans connection
 func Nb_quit_with_conn(port)
   call delete("Xnetbeans")
-  call writefile([], "Xnetbeans")
+  call writefile([], "Xnetbeans", 'D')
   let after =<< trim END
-    source shared.vim
+    source util/shared.vim
     set cpo&vim
 
     func ReadXnetbeans()
@@ -892,28 +884,32 @@ func Nb_quit_with_conn(port)
       return filter(l, 'v:val !~ "^0:geometry="')
     endfunc
 
-    " Establish the connection with the netbeans server
-    exe 'nbstart :localhost:' .. g:port .. ':star'
-    call assert_true(has("netbeans_enabled"))
-    call WaitFor('len(ReadXnetbeans()) >= 3')
-    let l = ReadXnetbeans()
-    call assert_equal(['AUTH star',
-      \ '0:version=0 "2.5"',
-      \ '0:startupDone=0'], l[-3:])
+    try
+      " Establish the connection with the netbeans server
+      exe 'nbstart :localhost:' .. g:port .. ':star'
+      call assert_true(has("netbeans_enabled"))
+      call WaitFor('len(ReadXnetbeans()) >= 3')
+      let l = ReadXnetbeans()
+      call assert_equal(['AUTH star',
+        \ '0:version=0 "2.5"',
+        \ '0:startupDone=0'], l[-3:])
 
-    " Open the command buffer to communicate with the server
-    split Xcmdbuf
-    call WaitFor('len(ReadXnetbeans()) >= 6')
-    let l = ReadXnetbeans()
-    call assert_equal('0:fileOpened=0 "Xcmdbuf" T F',
-          \ substitute(l[-3], '".*/', '"', ''))
-    call assert_equal('send: 1:putBufferNumber!15 "Xcmdbuf"',
-          \ substitute(l[-2], '".*/', '"', ''))
-    call assert_equal('1:startDocumentListen!16', l[-1])
-    sleep 1m
+      " Open the command buffer to communicate with the server
+      split Xcmdbuf
+      call WaitFor('len(ReadXnetbeans()) >= 6')
+      let l = ReadXnetbeans()
+      call assert_equal('0:fileOpened=0 "Xcmdbuf" T F',
+            \ substitute(l[-3], '".*/', '"', ''))
+      call assert_equal('send: 1:putBufferNumber!15 "Xcmdbuf"',
+            \ substitute(l[-2], '".*/', '"', ''))
+      call assert_equal('1:startDocumentListen!16', l[-1])
+      sleep 1m
 
-    quit!
-    quit!
+      quit!
+      quit!
+    finally
+      qall!
+    endtry
   END
   if RunVim(['let g:port = ' .. a:port], after, '')
     call WaitFor('len(ReadXnetbeans()) >= 9')
@@ -922,7 +918,6 @@ func Nb_quit_with_conn(port)
     call assert_equal('1:killed=16', l[-2])
     call assert_equal('0:disconnect=16', l[-1])
   endif
-  call delete('Xnetbeans')
 endfunc
 
 func Test_nb_quit_with_conn()
@@ -963,6 +958,58 @@ func Nb_bwipe_buffer(port)
   sleep 10m
 endfunc
 
+func Nb_specialKeys_overflow(port)
+  call delete("Xnetbeans")
+  call writefile([], "Xnetbeans")
+
+  " Last line number in the Xnetbeans file. Used to verify the result of the
+  " communication with the netbeans server
+  let g:last = 0
+
+  " Establish the connection with the netbeans server
+  exe 'nbstart :localhost:' .. a:port .. ':bunny'
+  call WaitFor('len(ReadXnetbeans()) > (g:last + 2)')
+  let l = ReadXnetbeans()
+  call assert_equal(['AUTH bunny',
+        \ '0:version=0 "2.5"',
+        \ '0:startupDone=0'], l[-3:])
+  let g:last += 3
+
+  " Open the command buffer to communicate with the server
+  split Xcmdbuf
+  let cmdbufnr = bufnr()
+  call WaitFor('len(ReadXnetbeans()) > (g:last + 2)')
+  let l = ReadXnetbeans()
+  call assert_equal('0:fileOpened=0 "Xcmdbuf" T F',
+        \ substitute(l[-3], '".*/', '"', ''))
+  call assert_equal('send: 1:putBufferNumber!15 "Xcmdbuf"',
+        \ substitute(l[-2], '".*/', '"', ''))
+  call assert_equal('1:startDocumentListen!16', l[-1])
+  let g:last += 3
+
+  " Keep the command buffer loaded for communication
+  hide
+
+  sleep 1m
+
+  " Open the command buffer to communicate with the server
+  split Xcmdbuf
+  let cmdbufnr = bufnr()
+  call appendbufline(cmdbufnr, '$', 'specialKeys_overflow_Test')
+  call WaitFor('len(ReadXnetbeans()) >= (g:last + 6)')
+  call WaitForAssert({-> assert_match('send: 0:specialKeys!200 "A\{80}-X"',
+        \ ReadXnetbeans()[-1])})
+
+  " Verify that specialKeys test, still works after the previous junk
+  call appendbufline(cmdbufnr, '$', 'specialKeys_Test')
+  call WaitFor('len(ReadXnetbeans()) >= (g:last + 1)')
+  call WaitForAssert({-> assert_match('^send: 0:specialKeys!91 "F12 F13 C-F13"$',
+        \ ReadXnetbeans()[-1])})
+  let g:last += 1
+
+  sleep 10m
+endfunc
+
 " This test used to reference a buffer after it was freed leading to an ASAN
 " error.
 func Test_nb_bwipe_buffer()
@@ -970,6 +1017,96 @@ func Test_nb_bwipe_buffer()
   silent! %bwipe!
   sleep 100m
   nbclose
+endfunc
+
+" Verify that the specialKeys argument does not overflow
+func Test_nb_specialKeys_overflow()
+  call s:run_server('Nb_specialKeys_overflow')
+endfunc
+
+func Nb_defineAnnoType_injection(port)
+  call writefile([], "Xnetbeans", 'D')
+  let g:last = 0
+
+  exe 'nbstart :localhost:' .. a:port .. ':bunny'
+  call assert_true(has("netbeans_enabled"))
+  call WaitFor('len(ReadXnetbeans()) > (g:last + 2)')
+  let g:last += 3
+
+  split Xcmdbuf
+  let cmdbufnr = bufnr()
+  call WaitFor('len(ReadXnetbeans()) > (g:last + 2)')
+  let g:last += 3
+  hide
+
+  sleep 1m
+
+  call delete('Xinject')
+  call appendbufline(cmdbufnr, '$', 'defineAnnoType_injection_Test')
+  " E475 from :sign is expected — catch it before RunServer sees it.
+  " give it a bit of time to process it
+  try
+    sleep 500m
+  catch /E475/
+  catch /E649/
+  endtry
+
+  " Injected call must not have created this file
+  call assert_false(filereadable('Xinject'))
+  call delete('Xinject')
+  bwipe! Xcmdbuf
+  nbclose
+endfunc
+
+func Test_nb_defineAnnoType_injection()
+  call ch_log('Test_nb_defineAnnoType_injection')
+  call s:run_server('Nb_defineAnnoType_injection')
+endfunc
+
+" getText with a single line of only quote characters: every character is
+" doubled by the quoting, this used to write past the allocated buffer.
+func Nb_getText_quotes(port)
+  call writefile([], "Xnetbeans", 'D')
+  let g:last = 0
+
+  exe 'nbstart :localhost:' .. a:port .. ':bunny'
+  call assert_true(has("netbeans_enabled"))
+  call WaitFor('len(ReadXnetbeans()) > (g:last + 2)')
+  let g:last += 3
+
+  split Xcmdbuf
+  let cmdbufnr = bufnr()
+  call WaitFor('len(ReadXnetbeans()) > (g:last + 2)')
+  let g:last += 3
+  hide
+
+  sleep 1m
+
+  " "editFile_Test" opens Xfile3 as buffer 2
+  call writefile([repeat('"', 10)], 'Xfile3', 'D')
+  call appendbufline(cmdbufnr, '$', 'editFile_Test')
+  call WaitFor('len(ReadXnetbeans()) >= (g:last + 4)')
+  call assert_equal('Xfile3', bufname())
+  let g:last += 4
+
+  let expected = '56 "' .. repeat('\"', 10) .. '\n"'
+  for eol in [1, 0]
+    let &l:eol = eol
+    call appendbufline(cmdbufnr, '$', 'getText_Test')
+    call WaitFor('len(ReadXnetbeans()) >= (g:last + 4)')
+    let l = ReadXnetbeans()
+    call assert_equal(['send: 2:getText/56', expected], l[-2:], 'eol=' .. eol)
+    let g:last += 4
+  endfor
+
+  bwipe! Xfile3
+  bwipe! Xcmdbuf
+  nbclose
+endfunc
+
+func Test_nb_getText_quotes()
+  call ch_log('Test_nb_getText_quotes')
+  call s:run_server('Nb_getText_quotes')
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

@@ -2,13 +2,12 @@
 " This is split in two, because it can take a lot of time.
 " See test_terminal.vim and test_terminal2.vim for further tests.
 
-source check.vim
 CheckFeature terminal
 
-source shared.vim
-source screendump.vim
-source mouse.vim
-source term_util.vim
+source util/screendump.vim
+source util/mouse.vim
+
+import './util/vim9.vim' as v9
 
 let $PROMPT_COMMAND=''
 
@@ -18,7 +17,8 @@ func Test_terminal_altscreen()
   let cmd = "cat Xtext\<CR>"
 
   let buf = term_start(&shell, {})
-  call writefile(["\<Esc>[?1047h"], 'Xtext')
+  call TermWait(buf)
+  call writefile(["\<Esc>[?1047h"], 'Xtext', 'D')
   call term_sendkeys(buf, cmd)
   call WaitForAssert({-> assert_equal(1, term_getaltscreen(buf))})
 
@@ -28,7 +28,6 @@ func Test_terminal_altscreen()
 
   call term_sendkeys(buf, "exit\r")
   exe buf . "bwipe!"
-  call delete('Xtext')
 endfunc
 
 func Test_terminal_shell_option()
@@ -47,9 +46,11 @@ func Test_terminal_shell_option()
     " the %PATH%, "term dir" succeeds unintentionally.  Use dir.com instead.
     try
       term dir.com /b runtest.vim
-      call WaitForAssert({-> assert_match('job failed', term_getline(bufnr(), 1))})
-    catch /CreateProcess/
-      " ignore
+      throw 'dir.com without a shell must fail, so you will never get here'
+    catch /CreateProcess failed/
+      " ignore:
+      " winpty simply fails with "CreateProcess failed".
+      " compty fails with "CreateProcess failed: {localized failure reason}".
     endtry
     bwipe!
 
@@ -66,7 +67,187 @@ func Test_terminal_invalid_arg()
   call assert_fails('terminal ++xyz', 'E181:')
 endfunc
 
+" Check a terminal with different colors
+func Terminal_color(group_name, highlight_cmds, highlight_opt, open_cmds)
+  CheckScreendump
+  CheckRunVimInTerminal
+  CheckUnix
+
+  let lines = [
+	\ 'call setline(1, range(20))',
+    \ 'func NotifyParent()',
+    \ '  call echoraw("' .. TermNotifyParentCmd(v:true) .. '")',
+    \ 'endfunc',
+	\ 'func OpenTerm()',
+	\ '  set noruler',
+	\ "  call term_start('cat', #{vertical: 1, "
+    \      .. 'exit_cb: {->NotifyParent()}, '
+    \      .. a:highlight_opt .. "})",
+    \ '  call NotifyParent()',
+	\ ] + a:open_cmds + [
+	\ 'endfunc',
+	\ ] + a:highlight_cmds + [
+    \ 'call NotifyParent()',
+    \ ]
+  call writefile(lines, 'XtermStart', 'D')
+  let buf = RunVimInTerminal('-S XtermStart', #{rows: 15})
+  call WaitForChildNotification()
+  call term_sendkeys(buf, ":call OpenTerm()\<CR>")
+  call WaitForChildNotification()
+  call term_sendkeys(buf, "hello\<CR>")
+  call VerifyScreenDump(buf, 'Test_terminal_color_' .. a:group_name, {})
+
+  call term_sendkeys(buf, "\<C-D>")
+  call WaitForChildNotification()
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_color_Terminal()
+  call Terminal_color("Terminal", [
+  \ "highlight Terminal ctermfg=blue ctermbg=yellow",
+  \ ], "", [])
+endfunc
+
+func Test_terminal_color_group()
+  call Terminal_color("MyTermCol", [
+  \ "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue",
+  \ ], "term_highlight: 'MyTermCol',", [])
+endfunc
+
+func Test_terminal_color_wincolor()
+  call Terminal_color("MyWinCol", [
+  \ "highlight MyWinCol ctermfg=red ctermbg=darkyellow",
+  \ ], "", [
+  \ 'set wincolor=MyWinCol',
+  \ ])
+endfunc
+
+func Test_terminal_color_group_over_Terminal()
+  call Terminal_color("MyTermCol_over_Terminal", [
+  \ "highlight Terminal ctermfg=blue ctermbg=yellow",
+  \ "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue",
+  \ ], "term_highlight: 'MyTermCol',", [])
+endfunc
+
+func Test_terminal_color_wincolor_over_group()
+  call Terminal_color("MyWinCol_over_group", [
+  \ "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue",
+  \ "highlight MyWinCol ctermfg=red ctermbg=darkyellow",
+  \ ], "term_highlight: 'MyTermCol',", [
+  \ 'set wincolor=MyWinCol',
+  \ ])
+endfunc
+
+func Test_terminal_color_wincolor_split()
+  CheckScreendump
+  CheckRunVimInTerminal
+  CheckUnix
+
+  let lines = [
+	\ 'call setline(1, range(20))',
+	\ 'func OpenTerm()',
+	\ '  set noruler',
+	\ "  call term_start('cat', #{vertical: 1, term_highlight: 'MyTermCol'})",
+	\ 'endfunc',
+  \ 'highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue',
+  \ 'highlight MyWinCol ctermfg=red ctermbg=darkyellow',
+  \ 'highlight MyWinCol2 ctermfg=black ctermbg=blue',
+	\ ]
+  call writefile(lines, 'XtermStart', 'D')
+  let buf = RunVimInTerminal('-S XtermStart', #{rows: 15})
+  call TermWait(buf, 100)
+  call term_sendkeys(buf, ":call OpenTerm()\<CR>")
+  call TermWait(buf, 50)
+  call term_sendkeys(buf, "hello\<CR>")
+  call TermWait(buf, 50)
+
+  call term_sendkeys(buf, "\<C-W>:split\<CR>")
+  call term_sendkeys(buf, "\<C-W>:set wincolor=MyWinCol\<CR>")
+  call VerifyScreenDump(buf, 'Test_terminal_wincolor_split_MyWinCol', {})
+
+  call term_sendkeys(buf, "\<C-W>b:2sb\<CR>")
+  call term_sendkeys(buf, "\<C-W>:set wincolor=MyWinCol2\<CR>")
+  call VerifyScreenDump(buf, 'Test_terminal_wincolor_split_MyWinCol2', {})
+
+  call term_sendkeys(buf, "\<C-D>")
+  call TermWait(buf, 50)
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_color_transp_Terminal()
+  call Terminal_color("transp_Terminal", [
+  \ "highlight Terminal ctermfg=blue",
+  \ ], "", [])
+endfunc
+
+func Test_terminal_color_transp_group()
+  call Terminal_color("transp_MyTermCol", [
+  \ "highlight MyTermCol ctermfg=darkgreen",
+  \ ], "term_highlight: 'MyTermCol',", [])
+endfunc
+
+func Test_terminal_color_transp_wincolor()
+  call Terminal_color("transp_MyWinCol", [
+  \ "highlight MyWinCol ctermfg=red",
+  \ ], "", [
+  \ 'set wincolor=MyWinCol',
+  \ ])
+endfunc
+
+func Test_terminal_color_gui_Terminal()
+  CheckFeature termguicolors
+  call Terminal_color("gui_Terminal", [
+  \ "set termguicolors",
+  \ "highlight Terminal guifg=#3344ff guibg=#b0a700",
+  \ ], "", [])
+endfunc
+
+func Test_terminal_color_gui_group()
+  CheckFeature termguicolors
+  call Terminal_color("gui_MyTermCol", [
+  \ "set termguicolors",
+  \ "highlight MyTermCol guifg=#007800 guibg=#6789ff",
+  \ ], "term_highlight: 'MyTermCol',", [])
+endfunc
+
+func Test_terminal_color_gui_wincolor()
+  CheckFeature termguicolors
+  call Terminal_color("gui_MyWinCol", [
+  \ "set termguicolors",
+  \ "highlight MyWinCol guifg=#fe1122 guibg=#818100",
+  \ ], "", [
+  \ 'set wincolor=MyWinCol',
+  \ ])
+endfunc
+
+func Test_terminal_color_gui_transp_Terminal()
+  CheckFeature termguicolors
+  call Terminal_color("gui_transp_Terminal", [
+  \ "set termguicolors",
+  \ "highlight Terminal guifg=#3344ff",
+  \ ], "", [])
+endfunc
+
+func Test_terminal_color_gui_transp_group()
+  CheckFeature termguicolors
+  call Terminal_color("gui_transp_MyTermCol", [
+  \ "set termguicolors",
+  \ "highlight MyTermCol guifg=#007800",
+  \ ], "term_highlight: 'MyTermCol',", [])
+endfunc
+
+func Test_terminal_color_gui_transp_wincolor()
+  CheckFeature termguicolors
+  call Terminal_color("gui_transp_MyWinCol", [
+  \ "set termguicolors",
+  \ "highlight MyWinCol guifg=#fe1122",
+  \ ], "", [
+  \ 'set wincolor=MyWinCol',
+  \ ])
+endfunc
+
 func Test_terminal_in_popup()
+  CheckScreendump
   CheckRunVimInTerminal
 
   let text =<< trim END
@@ -74,7 +255,7 @@ func Test_terminal_in_popup()
     to edit
     in a popup window
   END
-  call writefile(text, 'Xtext')
+  call writefile(text, 'Xtext', 'D')
   let cmd = GetVimCommandCleanTerm()
   let lines = [
 	\ 'call setline(1, range(20))',
@@ -97,13 +278,13 @@ func Test_terminal_in_popup()
 	\ '  call popup_create(s:buf, #{minwidth: 40, minheight: 6, border: []})',
 	\ 'endfunc',
 	\ ]
-  call writefile(lines, 'XtermPopup')
+  call writefile(lines, 'XtermPopup', 'D')
   let buf = RunVimInTerminal('-S XtermPopup', #{rows: 15})
-  call TermWait(buf, 100)
+  call TermWait(buf,0)
   call term_sendkeys(buf, ":call OpenTerm(0)\<CR>")
-  call TermWait(buf, 500)
+  call TermWait(buf,0)
   call term_sendkeys(buf, ":\<CR>")
-  call TermWait(buf, 100)
+  call TermWait(buf,0)
   call term_sendkeys(buf, "\<C-W>:echo getwinvar(g:winid, \"&buftype\") win_gettype(g:winid)\<CR>")
   call VerifyScreenDump(buf, 'Test_terminal_popup_1', {})
 
@@ -111,16 +292,16 @@ func Test_terminal_in_popup()
   call VerifyScreenDump(buf, 'Test_terminal_popup_2', {})
  
   call term_sendkeys(buf, ":call OpenTerm(1)\<CR>")
-  call TermWait(buf, 500)
+  call TermWait(buf,0)
   call term_sendkeys(buf, ":set hlsearch\<CR>")
-  call TermWait(buf, 100)
+  call TermWait(buf,0)
   call term_sendkeys(buf, "/edit\<CR>")
   call VerifyScreenDump(buf, 'Test_terminal_popup_3', {})
  
   call term_sendkeys(buf, "\<C-W>:call HidePopup()\<CR>")
   call VerifyScreenDump(buf, 'Test_terminal_popup_4', {})
   call term_sendkeys(buf, "\<CR>")
-  call TermWait(buf, 50)
+  call TermWait(buf,0)
 
   call term_sendkeys(buf, "\<C-W>:call ClosePopup()\<CR>")
   call VerifyScreenDump(buf, 'Test_terminal_popup_5', {})
@@ -136,17 +317,16 @@ func Test_terminal_in_popup()
   call term_sendkeys(buf, "A")
   call VerifyScreenDump(buf, 'Test_terminal_popup_8', {})
 
-  call TermWait(buf, 50)
+  call TermWait(buf,0)
   call term_sendkeys(buf, ":q\<CR>")
-  call TermWait(buf, 250)  " wait for terminal to vanish
+  call WaitForAssert({-> assert_equal(0, match(term_getline(buf, 6), '^5\s*$'))}, 250) " wait for terminal to vanish
 
   call StopVimInTerminal(buf)
-  call delete('Xtext')
-  call delete('XtermPopup')
 endfunc
 
 " Check a terminal in popup window uses the default minimum size.
 func Test_terminal_in_popup_min_size()
+  CheckScreendump
   CheckRunVimInTerminal
 
   let text =<< trim END
@@ -154,7 +334,7 @@ func Test_terminal_in_popup_min_size()
     to show
     in a popup window
   END
-  call writefile(text, 'Xtext')
+  call writefile(text, 'Xtext', 'D')
   let lines = [
 	\ 'call setline(1, range(20))',
 	\ 'func OpenTerm()',
@@ -162,7 +342,7 @@ func Test_terminal_in_popup_min_size()
 	\ '  let g:winid = popup_create(s:buf, #{ border: []})',
 	\ 'endfunc',
 	\ ]
-  call writefile(lines, 'XtermPopup')
+  call writefile(lines, 'XtermPopup', 'D')
   let buf = RunVimInTerminal('-S XtermPopup', #{rows: 15})
   call TermWait(buf, 100)
   call term_sendkeys(buf, ":set noruler\<CR>")
@@ -175,47 +355,179 @@ func Test_terminal_in_popup_min_size()
   call term_sendkeys(buf, ":q\<CR>")
   call TermWait(buf, 50)  " wait for terminal to vanish
   call StopVimInTerminal(buf)
-  call delete('Xtext')
-  call delete('XtermPopup')
 endfunc
 
 " Check a terminal in popup window with different colors
-func Terminal_in_popup_colored(group_name, highlight_cmd, highlight_opt)
+func Terminal_in_popup_color(group_name, highlight_cmds, highlight_opt, popup_cmds, popup_opt)
+  CheckScreendump
   CheckRunVimInTerminal
   CheckUnix
 
   let lines = [
 	\ 'call setline(1, range(20))',
+    \ 'func NotifyParent(...)',
+    \ '  call echoraw("' .. TermNotifyParentCmd(v:true) .. '")',
+    \ 'endfunc',
 	\ 'func OpenTerm()',
-	\ "  let s:buf = term_start('cat', #{hidden: 1, "
+	\ "  let s:buf = term_start('cat', #{hidden: 1, term_finish: 'close', "
 	\ .. a:highlight_opt .. "})",
-	\ '  let g:winid = popup_create(s:buf, #{ border: []})',
+    \ '  let g:winid = popup_create(s:buf, #{border: [], '
+    \      .. 'callback: {->NotifyParent()}, '
+    \      .. a:popup_opt .. '})',
+    \ ] + a:popup_cmds + [
+    \ '  call NotifyParent()',
 	\ 'endfunc',
-	\ a:highlight_cmd,
-	\ ]
-  call writefile(lines, 'XtermPopup')
+	\ ] + a:highlight_cmds + [
+    \ 'call NotifyParent()',
+    \ ]
+  call writefile(lines, 'XtermPopup', 'D')
   let buf = RunVimInTerminal('-S XtermPopup', #{rows: 15})
-  call TermWait(buf, 100)
+  call WaitForChildNotification()
   call term_sendkeys(buf, ":set noruler\<CR>")
   call term_sendkeys(buf, ":call OpenTerm()\<CR>")
-  call TermWait(buf, 50)
+  call WaitForChildNotification()
   call term_sendkeys(buf, "hello\<CR>")
   call VerifyScreenDump(buf, 'Test_terminal_popup_' .. a:group_name, {})
 
   call term_sendkeys(buf, "\<C-D>")
-  call TermWait(buf, 50)
-  call term_sendkeys(buf, ":q\<CR>")
-  call TermWait(buf, 50)  " wait for terminal to vanish
+  call WaitForChildNotification()
   call StopVimInTerminal(buf)
-  call delete('XtermPopup')
 endfunc
 
-func Test_terminal_in_popup_colored_Terminal()
-  call Terminal_in_popup_colored("Terminal", "highlight Terminal ctermfg=blue ctermbg=yellow", "")
+func Test_terminal_in_popup_color_Terminal()
+  call Terminal_in_popup_color("Terminal", [
+  \ "highlight Terminal ctermfg=blue ctermbg=yellow",
+  \ ], "", [], "")
 endfunc
 
-func Test_terminal_in_popup_colored_group()
-  call Terminal_in_popup_colored("MyTermCol", "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue", "term_highlight: 'MyTermCol',")
+func Test_terminal_in_popup_color_group()
+  call Terminal_in_popup_color("MyTermCol", [
+  \ "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue",
+  \ ], "term_highlight: 'MyTermCol',", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_wincolor()
+  call Terminal_in_popup_color("MyWinCol", [
+  \ "highlight MyWinCol ctermfg=red ctermbg=darkyellow",
+  \ ], "", [
+  \ 'call setwinvar(g:winid, "&wincolor", "MyWinCol")',
+  \ ], "")
+endfunc
+
+func Test_terminal_in_popup_color_popup_highlight()
+  call Terminal_in_popup_color("MyPopupHlCol", [
+  \ "highlight MyPopupHlCol ctermfg=cyan ctermbg=green",
+  \ ], "", [], "highlight: 'MyPopupHlCol'")
+endfunc
+
+func Test_terminal_in_popup_color_group_over_Terminal()
+  call Terminal_in_popup_color("MyTermCol_over_Terminal", [
+  \ "highlight Terminal ctermfg=blue ctermbg=yellow",
+  \ "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue",
+  \ ], "term_highlight: 'MyTermCol',", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_wincolor_over_group()
+  call Terminal_in_popup_color("MyWinCol_over_group", [
+  \ "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue",
+  \ "highlight MyWinCol ctermfg=red ctermbg=darkyellow",
+  \ ], "term_highlight: 'MyTermCol',", [
+  \ 'call setwinvar(g:winid, "&wincolor", "MyWinCol")',
+  \ ], "")
+endfunc
+
+func Test_terminal_in_popup_color_transp_Terminal()
+  call Terminal_in_popup_color("transp_Terminal", [
+  \ "highlight Terminal ctermfg=blue",
+  \ ], "", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_transp_group()
+  call Terminal_in_popup_color("transp_MyTermCol", [
+  \ "highlight MyTermCol ctermfg=darkgreen",
+  \ ], "term_highlight: 'MyTermCol',", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_transp_wincolor()
+  call Terminal_in_popup_color("transp_MyWinCol", [
+  \ "highlight MyWinCol ctermfg=red",
+  \ ], "", [
+  \ 'call setwinvar(g:winid, "&wincolor", "MyWinCol")',
+  \ ], "")
+endfunc
+
+func Test_terminal_in_popup_color_transp_popup_highlight()
+  call Terminal_in_popup_color("transp_MyPopupHlCol", [
+  \ "highlight MyPopupHlCol ctermfg=cyan",
+  \ ], "", [], "highlight: 'MyPopupHlCol'")
+endfunc
+
+func Test_terminal_in_popup_color_gui_Terminal()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_Terminal", [
+  \ "set termguicolors",
+  \ "highlight Terminal guifg=#3344ff guibg=#b0a700",
+  \ ], "", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_gui_group()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_MyTermCol", [
+  \ "set termguicolors",
+  \ "highlight MyTermCol guifg=#007800 guibg=#6789ff",
+  \ ], "term_highlight: 'MyTermCol',", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_gui_wincolor()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_MyWinCol", [
+  \ "set termguicolors",
+  \ "highlight MyWinCol guifg=#fe1122 guibg=#818100",
+  \ ], "", [
+  \ 'call setwinvar(g:winid, "&wincolor", "MyWinCol")',
+  \ ], "")
+endfunc
+
+func Test_terminal_in_popup_color_gui_popup_highlight()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_MyPopupHlCol", [
+  \ "set termguicolors",
+  \ "highlight MyPopupHlCol guifg=#00e8f0 guibg=#126521",
+  \ ], "", [], "highlight: 'MyPopupHlCol'")
+endfunc
+
+func Test_terminal_in_popup_color_gui_transp_Terminal()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_transp_Terminal", [
+  \ "set termguicolors",
+  \ "highlight Terminal guifg=#3344ff",
+  \ ], "", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_gui_transp_group()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_transp_MyTermCol", [
+  \ "set termguicolors",
+  \ "highlight MyTermCol guifg=#007800",
+  \ ], "term_highlight: 'MyTermCol',", [], "")
+endfunc
+
+func Test_terminal_in_popup_color_gui_transp_wincolor()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_transp_MyWinCol", [
+  \ "set termguicolors",
+  \ "highlight MyWinCol guifg=#fe1122",
+  \ ], "", [
+  \ 'call setwinvar(g:winid, "&wincolor", "MyWinCol")',
+  \ ], "")
+endfunc
+
+func Test_terminal_in_popup_color_gui_transp_popup_highlight()
+  CheckFeature termguicolors
+  call Terminal_in_popup_color("gui_transp_MyPopupHlCol", [
+  \ "set termguicolors",
+  \ "highlight MyPopupHlCol guifg=#00e8f0",
+  \ ], "", [], "highlight: 'MyPopupHlCol'")
 endfunc
 
 func Test_double_popup_terminal()
@@ -226,6 +538,18 @@ func Test_double_popup_terminal()
   call popup_close(win1)
   exe buf1 .. 'bwipe!'
   exe buf2 .. 'bwipe!'
+endfunc
+
+func Test_escape_popup_terminal()
+  set hidden
+
+  " Cannot escape a terminal popup window using win_gotoid
+  let prev_win = win_getid()
+  eval term_start('sh', #{hidden: 1, term_finish: 'close'})->popup_create({})
+  call assert_fails("call win_gotoid(" .. prev_win .. ")", 'E863:')
+
+  call popup_clear(1)
+  set hidden&
 endfunc
 
 func Test_issue_5607()
@@ -270,7 +594,7 @@ func Test_term_and_startinsert()
      term
      startinsert
   EOL
-  call writefile(lines, 'XTest_startinsert')
+  call writefile(lines, 'XTest_startinsert', 'D')
   let buf = RunVimInTerminal('-S XTest_startinsert', {})
 
   call term_sendkeys(buf, "exit\r")
@@ -280,7 +604,6 @@ func Test_term_and_startinsert()
   call WaitForAssert({-> assert_equal("some text<", term_getline(buf, 1))})
 
   call StopVimInTerminal(buf)
-  call delete('XTest_startinsert')
 endfunc
 
 " Test for passing invalid arguments to terminal functions
@@ -371,7 +694,7 @@ func Test_term_mouse()
     red green yellow red blue
     vim emacs sublime nano
   END
-  call writefile(lines, 'Xtest_mouse')
+  call writefile(lines, 'Xtest_mouse', 'D')
 
   " Create a terminal window running Vim for the test with mouse enabled
   let prev_win = win_getid()
@@ -382,6 +705,11 @@ func Test_term_mouse()
   call term_sendkeys(buf, ":set mousemodel=extend\<CR>")
   call TermWait(buf)
   redraw!
+
+  " Funcref used in WaitFor() to check that the "Xbuf" file is readable and
+  " has some contents.  This avoids a "List index out of range" error when the
+  " file hasn't been written yet.
+  let XbufNotEmpty = {-> filereadable('Xbuf') && len(readfile('Xbuf')) > 0}
 
   " Use the mouse to enter the terminal window
   call win_gotoid(prev_win)
@@ -395,73 +723,76 @@ func Test_term_mouse()
   call test_setmouse(3, 8)
   call term_sendkeys(buf, "\<LeftMouse>\<LeftRelease>")
   call TermWait(buf, 50)
+  call delete('Xbuf')
   call term_sendkeys(buf, ":call writefile([json_encode(getpos('.'))], 'Xbuf')\<CR>")
   call TermWait(buf, 50)
+  call WaitFor(XbufNotEmpty)
   let pos = json_decode(readfile('Xbuf')[0])
   call assert_equal([3, 8], pos[1:2])
+  call delete('Xbuf')
 
   " Test for selecting text using mouse
-  call delete('Xbuf')
   call test_setmouse(2, 11)
   call term_sendkeys(buf, "\<LeftMouse>")
   call test_setmouse(2, 16)
   call term_sendkeys(buf, "\<LeftRelease>y")
   call TermWait(buf, 50)
   call term_sendkeys(buf, ":call writefile([@\"], 'Xbuf')\<CR>")
-  call TermWait(buf, 50)
-  call assert_equal('yellow', readfile('Xbuf')[0])
-
-  " Test for selecting text using doubleclick
+  call WaitFor(XbufNotEmpty)
+  call WaitForAssert({-> assert_equal('yellow', readfile('Xbuf')[0])})
   call delete('Xbuf')
+
+  " Test for selecting text using double click
   call test_setmouse(1, 11)
   call term_sendkeys(buf, "\<LeftMouse>\<LeftRelease>\<LeftMouse>")
   call test_setmouse(1, 17)
   call term_sendkeys(buf, "\<LeftRelease>y")
   call TermWait(buf, 50)
   call term_sendkeys(buf, ":call writefile([@\"], 'Xbuf')\<CR>")
-  call TermWait(buf, 50)
+  call WaitFor(XbufNotEmpty)
   call assert_equal('three four', readfile('Xbuf')[0])
+  call delete('Xbuf')
 
   " Test for selecting a line using triple click
-  call delete('Xbuf')
   call test_setmouse(3, 2)
   call term_sendkeys(buf, "\<LeftMouse>\<LeftRelease>\<LeftMouse>\<LeftRelease>\<LeftMouse>\<LeftRelease>y")
   call TermWait(buf, 50)
   call term_sendkeys(buf, ":call writefile([@\"], 'Xbuf')\<CR>")
-  call TermWait(buf, 50)
+  call WaitFor(XbufNotEmpty)
   call assert_equal("vim emacs sublime nano\n", readfile('Xbuf')[0])
-
-  " Test for selecting a block using qudraple click
   call delete('Xbuf')
+
+  " Test for selecting a block using quadruple click
   call test_setmouse(1, 11)
   call term_sendkeys(buf, "\<LeftMouse>\<LeftRelease>\<LeftMouse>\<LeftRelease>\<LeftMouse>\<LeftRelease>\<LeftMouse>")
   call test_setmouse(3, 13)
   call term_sendkeys(buf, "\<LeftRelease>y")
   call TermWait(buf, 50)
   call term_sendkeys(buf, ":call writefile([@\"], 'Xbuf')\<CR>")
-  call TermWait(buf, 50)
+  call WaitFor(XbufNotEmpty)
   call assert_equal("ree\nyel\nsub", readfile('Xbuf')[0])
+  call delete('Xbuf')
 
   " Test for extending a selection using right click
-  call delete('Xbuf')
   call test_setmouse(2, 9)
   call term_sendkeys(buf, "\<LeftMouse>\<LeftRelease>")
   call test_setmouse(2, 16)
   call term_sendkeys(buf, "\<RightMouse>\<RightRelease>y")
   call TermWait(buf, 50)
   call term_sendkeys(buf, ":call writefile([@\"], 'Xbuf')\<CR>")
-  call TermWait(buf, 50)
+  call WaitFor(XbufNotEmpty)
   call assert_equal("n yellow", readfile('Xbuf')[0])
+  call delete('Xbuf')
 
   " Test for pasting text using middle click
-  call delete('Xbuf')
   call term_sendkeys(buf, ":let @r='bright '\<CR>")
   call test_setmouse(2, 22)
   call term_sendkeys(buf, "\"r\<MiddleMouse>\<MiddleRelease>")
   call TermWait(buf, 50)
   call term_sendkeys(buf, ":call writefile([getline(2)], 'Xbuf')\<CR>")
-  call TermWait(buf, 50)
+  call WaitFor(XbufNotEmpty)
   call assert_equal("red bright blue", readfile('Xbuf')[0][-15:])
+  call delete('Xbuf')
 
   " cleanup
   call TermWait(buf)
@@ -471,15 +802,14 @@ func Test_term_mouse()
   let &ttymouse = save_ttymouse
   let &clipboard = save_clipboard
   set mousetime&
-  call delete('Xtest_mouse')
   call delete('Xbuf')
 endfunc
 
 " Test for sync buffer cwd with shell's pwd
 func Test_terminal_sync_shell_dir()
   CheckUnix
-  " The test always use sh (see src/testdir/unix.vim).
-  " However, BSD's sh doesn't seem to play well with OSC 7 escape sequence.
+  " The test always use sh (see src/testdir/util/unix.vim).
+  " BSD's sh doesn't seem to play well with the OSC 7 escape sequence.
   CheckNotBSD
 
   set asd
@@ -489,15 +819,15 @@ func Test_terminal_sync_shell_dir()
   let chars = ",a"
   " "," is url-encoded as '%2C'
   let chars_url = "%2Ca"
-  let tmpfolder = fnamemodify(tempname(),':h').'/'.chars
-  let tmpfolder_url = fnamemodify(tempname(),':h').'/'.chars_url
+  let tmpfolder = fnamemodify(tempname(),':h') .. '/' .. chars
+  let tmpfolder_url = fnamemodify(tempname(),':h') .. '/' .. chars_url
   call mkdir(tmpfolder, "p")
   let buf = Run_shell_in_terminal({})
-  call term_sendkeys(buf, "echo -ne $'\\e\]7;file://".tmpfolder_url."\\a'\<CR>")
-  "call term_sendkeys(buf, "cd ".tmpfolder."\<CR>")
+  call term_sendkeys(buf, "echo $'\\e\]7;file://" .. tmpfolder_url .. "\\a'\<CR>")
+  "call term_sendkeys(buf, "cd " .. tmpfolder .. "\<CR>")
   call TermWait(buf)
   if has("mac")
-    let expected = "/private".tmpfolder
+    let expected = "/private" .. tmpfolder
   else
     let expected = tmpfolder
   endif
@@ -524,7 +854,7 @@ func Test_term_modeless_selection()
     red green yellow red blue
     vim emacs sublime nano
   END
-  call writefile(lines, 'Xtest_modeless')
+  call writefile(lines, 'Xtest_modeless', 'D')
 
   " Create a terminal window running Vim for the test with mouse disabled
   let prev_win = win_getid()
@@ -557,7 +887,6 @@ func Test_term_modeless_selection()
   let &term = save_term
   let &ttymouse = save_ttymouse
   set mousetime& clipboard&
-  call delete('Xtest_modeless')
   new | only!
 endfunc
 
@@ -601,5 +930,669 @@ func Test_terminal_getwinpos()
   only!
 endfunc
 
+func Test_terminal_term_start_error()
+  func s:term_start_error() abort
+    try
+      return term_start([[]])
+    catch
+      return v:exception
+    finally
+      "
+    endtry
+  endfunc
+  autocmd WinEnter * call type(0)
+
+  " Must not crash in s:term_start_error, nor the exception thrown.
+  let result = s:term_start_error()
+  call assert_match('^Vim(return):E730:', result)
+
+  autocmd! WinEnter
+  delfunc s:term_start_error
+endfunc
+
+func Test_terminal_vt420()
+  CheckRunVimInTerminal
+  " For Termcap
+  CheckUnix
+  CheckExecutable infocmp
+  let a = system('infocmp vt420')
+  if v:shell_error
+     " reset v:shell_error
+     let a = system('true')
+     throw 'Skipped: vt420 terminfo not available'
+  endif
+  let rows = 15
+  call writefile([':set term=vt420'], 'Xterm420', 'D')
+
+  let buf = RunVimInTerminal('-S Xterm420', #{rows: rows})
+  call TermWait(buf, 100)
+  call term_sendkeys(buf, ":set t_xo?\<CR>")
+  call WaitForAssert({-> assert_match('t_xo=y', term_getline(buf, rows))})
+  call StopVimInTerminal(buf)
+
+  call writefile([''], 'Xterm420')
+  let buf = RunVimInTerminal('-S Xterm420', #{rows: rows})
+  call TermWait(buf, 100)
+  call term_sendkeys(buf, ":set t_xo?\<CR>")
+  call WaitForAssert({-> assert_match('t_xo=\s\+', term_getline(buf, rows))})
+  call StopVimInTerminal(buf)
+endfunc
+
+" Test for using 'vertical' with term_start(). If a following term_start(),
+" doesn't have the 'vertical' attribute, then it should be split horizontally.
+func Test_terminal_vertical()
+  let lines =<< trim END
+    call term_start("NONE", {'vertical': 1})
+    call term_start("NONE")
+    VAR layout = winlayout()
+    call assert_equal('row', layout[0], string(layout))
+    call assert_equal('col', layout[1][0][0], string(layout))
+    :%bw!
+  END
+  call v9.CheckLegacyAndVim9Success(lines)
+endfunc
+
+" Needs to come before Test_hidden_terminal(), why?
+func Test_autocmd_buffilepost_with_hidden_term()
+  CheckExecutable true
+  new XTestFile
+  defer delete('XTestFile')
+  call setline(1, ['one', 'two', 'three'])
+  call cursor(3, 10)
+  augroup TestCursor
+    au!
+    autocmd BufFilePost * call setbufvar(3, '&tabstop', 4)
+  augroup END
+
+  let buf = term_start(['true'], #{hidden: 1, term_finish: 'close'})
+  call term_wait(buf)
+  redraw!
+  call assert_equal('XTestFile', bufname('%'))
+  call assert_equal([0, 3, 5, 0], getpos('.'))
+
+  augroup TestCursor
+    au!
+  augroup END
+  augroup! TestCursor
+  bw! XTestFile
+endfunc
+
+func Test_terminal_visual_empty_listchars()
+  CheckScreendump
+  CheckRunVimInTerminal
+  CheckUnix
+
+  let lines = [
+  \ 'set listchars=',
+  \ ':term sh -c "printf ''hello\\n\\nhello''"'
+  \ ]
+  call writefile(lines, 'XtermStart1', 'D')
+  let buf = RunVimInTerminal('-S XtermStart1', #{rows: 15})
+  " Wait for the job to finish, otherwise the keys go to the shell.
+  call WaitForAssert({-> assert_match('\[finished\]', term_getline(buf, 7))})
+  call term_sendkeys(buf, "V2k")
+  call term_wait(buf)
+  call VerifyScreenDump(buf, 'Test_terminal_empty_listchars', {})
+  call term_sendkeys(buf, "\<esc>")
+  call term_sendkeys(buf, ":set nu\<cr>")
+  call term_wait(buf)
+  call term_sendkeys(buf, "ggV2j")
+  call term_wait(buf)
+  call VerifyScreenDump(buf, 'Test_terminal_empty_listchars2', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_normal_mode_colored_empty_line()
+  CheckScreendump
+  CheckRunVimInTerminal
+  CheckUnix
+
+  " Erase lines with a gray background (CSI 100m) using CSI K.  The empty lines
+  " around "old" must stay gray in Terminal-Normal mode too, not only while the
+  " job is running.
+  call writefile(["printf '\\033[100m\\033[K\\nold\\033[K\\n\\033[K\\033[0m\\n'"],
+	\ 'Xterm_colored.sh', 'D')
+  call writefile([':term sh ./Xterm_colored.sh'], 'XtermColored', 'D')
+  let buf = RunVimInTerminal('-S XtermColored', #{rows: 10})
+  call WaitForAssert({-> assert_match('\[finished\]', term_getline(buf, 5))})
+  call VerifyScreenDump(buf, 'Test_terminal_colored_empty_1', {})
+
+  " Enter Terminal-Normal mode: the empty lines must still be gray.
+  call term_sendkeys(buf, "\<C-W>N")
+  call term_wait(buf)
+  call VerifyScreenDump(buf, 'Test_terminal_colored_empty_2', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_visual_colored_empty_line()
+  CheckScreendump
+  CheckRunVimInTerminal
+  CheckUnix
+
+  " Empty lines erased with a gray background (CSI 100m, CSI K).  When such a
+  " line is selected in Terminal-Normal mode the Visual highlight must show on
+  " its first cell, while the rest of the line keeps the background color.
+  call writefile(["printf '\\033[100m\\033[K\\nold\\033[K\\n\\033[K\\033[0m\\n'"],
+	\ 'Xterm_colored.sh', 'D')
+  call writefile([':set listchars=', ':term sh ./Xterm_colored.sh'],
+	\ 'XtermColored', 'D')
+  let buf = RunVimInTerminal('-S XtermColored', #{rows: 10})
+  call WaitForAssert({-> assert_match('\[finished\]', term_getline(buf, 5))})
+
+  call term_sendkeys(buf, "\<C-W>NggVG")
+  call term_wait(buf)
+  call VerifyScreenDump(buf, 'Test_terminal_visual_colored_empty', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_hl_terminal_empty_line()
+  CheckScreendump
+  CheckRunVimInTerminal
+  CheckUnix
+
+  " When a background color is set with hl-terminal the empty lines must use
+  " it as well, both while the job runs and in Terminal-Normal mode.
+  let lines = [
+  \ 'highlight Terminal ctermbg=darkred',
+  \ 'set listchars=',
+  \ ':term sh -c "printf ''one\\n\\ntwo\\n\\n''"'
+  \ ]
+  call writefile(lines, 'XtermHlTerm', 'D')
+  let buf = RunVimInTerminal('-S XtermHlTerm', #{rows: 10})
+  call WaitForAssert({-> assert_match('\[finished\]', term_getline(buf, 5))})
+  call VerifyScreenDump(buf, 'Test_terminal_hl_empty_1', {})
+
+  call term_sendkeys(buf, "\<C-W>N")
+  call term_wait(buf)
+  call VerifyScreenDump(buf, 'Test_terminal_hl_empty_2', {})
+
+  " The Visual selection must still show on the first cell of an empty line.
+  call term_sendkeys(buf, "ggVG")
+  call term_wait(buf)
+  call VerifyScreenDump(buf, 'Test_terminal_hl_empty_3', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_ansi_color_windows_cui()
+  if !has('win32') || has('gui_running')
+    throw 'Skipped: only for the Windows CUI'
+  endif
+  if exists('$APPVEYOR')
+    throw 'Skipped: this test cannot be performed because AppVeyor does not support ANSI escape sequences'
+  endif
+
+  call assert_equal('dark', &background)
+
+  " Outputs 16 ANSI colors as background colors
+  let ansi = ''
+  for i in range(16)
+    let ansi ..= printf("\e[%dm%X", i + (i < 8 ? 40 : 92), i)
+  endfor
+  let ansi ..= "\e[40m\n"
+  call writefile([ansi], 'XANSIcolor', 'D')
+
+  let expected_chars = '0123456789ABCDEF'
+  let expected_colors = [
+        \ '#000000', '#e00000', '#00e000', '#e0e000',
+        \ '#0000e0', '#e000e0', '#00e0e0', '#e0e0e0',
+        \ '#808080', '#ff4040', '#40ff40', '#ffff40',
+        \ '#4040ff', '#ff40ff', '#40ffff', '#ffffff',
+        \ ]
+
+  " Ideally, 16 colors should be checked. However, in the current CI
+  " environment, the 16th color is something other than white, and we don't
+  " know the cause nor solution. After discussion, we decided to check only 15
+  " colors for the time being.
+  " FIXME: Check all 16 colors in the future.
+  let len_to_check = 15
+  let expected_colors = expected_colors[:len_to_check-1]
+
+  " First, make sure vim can display correct ANSI color text in terminal.
+  let buf = term_start("cmd /C type XANSIcolor")
+  call WaitForAssert({-> assert_equal(expected_chars, term_scrape(buf, 1)[:15]->map({_, v -> v['chars']})->join(''))})
+  call assert_equal(expected_colors, term_scrape(buf, 1)[:len_to_check-1]->map({_, v -> v['bg']}))
+  bwipeout!
+
+  " Next, check if vim can do the same thing in the vim terminal in terminal.
+  let lines = [
+        \ 'call term_start("cmd /C type XANSIcolor")'
+        \ ]
+  call writefile(lines, 'XloadANSI', 'D')
+  let cmd = GetVimCommandCleanTerm()
+  let buf = term_start(cmd .. '-S XloadANSI')
+  call WaitForAssert({-> assert_equal(expected_chars, term_scrape(buf, 1)[:15]->map({_, v -> v['chars']})->join(''))})
+  call assert_equal(expected_colors, term_scrape(buf, 1)[:len_to_check-1]->map({_, v -> v['bg']}))
+endfunc
+
+func Test_terminal_backspace_on_windows()
+  if !has('win32')
+    throw 'Skipped: only for the Windows CUI'
+  endif
+  " Specify a simple prompt for easy comparison
+  let save_prompt = $PROMPT
+  let $PROMPT = '>'
+
+  " Return the prompt line before the cursor
+  func s:get_cmd_prompt(buf)
+    let cur = term_getcursor(a:buf)
+    return term_getline(a:buf, cur[0])[:cur[1]-2]
+  endfunc
+
+  let buf = term_start('cmd.exe')
+  call WaitForAssert({-> assert_equal('>', s:get_cmd_prompt(buf))}, 100)
+
+  " Verify sent characters are echoed back
+  call term_sendkeys(buf, 'foo bar')
+  call WaitForAssert({-> assert_equal('>foo bar', s:get_cmd_prompt(buf))}, 100)
+  " Backspace should delete a character in front of the cursor
+  call term_sendkeys(buf, "\<BS>")
+  call WaitForAssert({-> assert_equal('>foo ba', s:get_cmd_prompt(buf))}, 100)
+  " Ctrl+H behaves like Backspace
+  call term_sendkeys(buf, "\<C-H>")
+  call WaitForAssert({-> assert_equal('>foo b', s:get_cmd_prompt(buf))}, 100)
+  " Send a total of four BS and Ctrl+H to erase four characters.
+  call term_sendkeys(buf, "\<BS>\<BS>\<C-H>\<C-H>")
+  call WaitForAssert({-> assert_equal('>f', s:get_cmd_prompt(buf))}, 100)
+
+  delfunc s:get_cmd_prompt
+  let $PROMPT = save_prompt
+endfunc
+
+func Test_terminal_split_utf8()
+  CheckUnix
+
+  let buf = term_start('cat', {})
+  let chan = buf->term_getjob()->job_getchannel()
+  call ch_sendraw(chan, "1: \xc3")
+  call WaitForAssert({-> assert_equal('1: ', term_getline(buf, 1))})
+  call ch_sendraw(chan, "\xa5\xcc\xb2\n")
+  call WaitForAssert({-> assert_equal('1: å̲', term_getline(buf, 1))})
+  call WaitForAssert({-> assert_equal('1: å̲', term_getline(buf, 2))})
+  call ch_sendraw(chan, "2: \xc3\xa5")
+  call WaitForAssert({-> assert_equal('2: å', term_getline(buf, 3))})
+  call ch_sendraw(chan, "\xcc\xb2\n")
+  call WaitForAssert({-> assert_equal('2: å̲', term_getline(buf, 3))})
+  call WaitForAssert({-> assert_equal('2: å̲', term_getline(buf, 4))})
+  call ch_sendraw(chan, "3: \xc3\xa5\xcc")
+  call WaitForAssert({-> assert_equal('3: å', term_getline(buf, 5))})
+  call ch_sendraw(chan, "\xb2\n")
+  call WaitForAssert({-> assert_equal('3: å̲', term_getline(buf, 5))})
+  call WaitForAssert({-> assert_equal('3: å̲', term_getline(buf, 6))})
+
+  exe buf .. "bwipe!"
+endfunc
+
+func Test_terminal_max_combining_chars()
+  " somehow doesn't work on MS-Windows
+  CheckUnix
+  let cmd = "cat samples/terminal_max_combining_chars.txt\<CR>"
+  let buf = Run_shell_in_terminal({'term_rows': 15, 'term_cols': 35, 'env': {'HOME': '/nonexisting', 'PS1':''}})
+  call TermWait(buf)
+  call term_sendkeys(buf, cmd)
+  " last char is a space with many combining chars
+  call WaitForAssert({-> assert_match("AAAAAAAAAAAAAAAAAAAAAAAAAAAA.", term_getline(buf, 14))})
+
+  call term_sendkeys(buf, "exit\r")
+  exe buf . "bwipe!"
+endfunc
+
+func Test_term_getpos()
+  CheckRunVimInTerminal
+  CheckUnix
+  CheckExecutable seq
+  defer delete('XTest_getpos_result')
+
+  let lines =<< trim EOL
+     let $PS1=''
+     let $HOME='/nonexisting'
+     term ++curwin sh
+  EOL
+  call writefile(lines, 'XTest_getpos', 'D')
+  let buf = RunVimInTerminal('-S XTest_getpos', {'rows': 15})
+  call term_sendkeys(buf, "for i in `seq 1 30`; do echo line$i; done\<cr>")
+
+  call WaitForAssert({-> assert_match("line18", term_getline(buf, 1))})
+  call WaitForAssert({-> assert_match("line30", term_getline(buf, 13))})
+
+  call term_sendkeys(buf, "\<c-w>:let g:job_w0 = line('w0')\<cr>")
+  call term_sendkeys(buf, "\<c-w>:let g:job_wdollar = line('w$')\<cr>")
+  call term_sendkeys(buf, "\<c-w>:call writefile([string(g:job_w0), string(g:job_wdollar)], 'XTest_getpos_result')\<cr>")
+  call WaitForAssert({-> assert_true(filereadable('XTest_getpos_result'))})
+  call WaitForAssert({-> assert_equal(2, len(readfile('XTest_getpos_result')))})
+  let job_result = readfile('XTest_getpos_result')
+  " 15 - 1: statusline - 1: prompt line
+  call assert_equal(13, str2nr(job_result[1]) - str2nr(job_result[0]))
+  call assert_true(str2nr(job_result[0]) > 1)
+  call delete('XTest_getpos_result')
+
+  " switch to Terminal-Normal mode and record w0/w$
+  call term_sendkeys(buf, "\<c-w>N")
+  call term_sendkeys(buf, ":let g:w0 = line('w0')\<cr>")
+  call term_sendkeys(buf, ":let g:wdollar = line('w$')\<cr>")
+  call term_sendkeys(buf, ":call writefile([string(g:w0), string(g:wdollar)], 'XTest_getpos_result')\<cr>")
+
+  call WaitForAssert({-> assert_true(filereadable('XTest_getpos_result'))})
+  call WaitForAssert({-> assert_equal(2, len(readfile('XTest_getpos_result')))})
+  let result = readfile('XTest_getpos_result')
+  " 15 - 1: statusline - 1: for prompt line, w$-w0 = 12
+  call assert_equal(12, str2nr(result[1]) - str2nr(result[0]))
+  call assert_true(str2nr(result[0]) > 1)
+
+  " Regression: line('w0') and line('w$') must not move cursor position
+  call term_sendkeys(buf, "gg")
+  call term_sendkeys(buf, ":call line('w0')\<cr>")
+  call term_sendkeys(buf, ":call line('w$')\<cr>")
+  call term_wait(buf)
+  call WaitForAssert({-> assert_match("for i in", term_getline(buf, 1))})
+  call WaitForAssert({-> assert_match("line12", term_getline(buf, 13))})
+
+  call StopVimInTerminal(buf)
+  " this crashed
+  new
+  setl buftype=terminal
+  call assert_equal(2, line('w0') + line('w$'))
+  bw
+endfunc
+
+func Test_term_autowrite()
+  set autowrite
+  new termautowritetestfile
+  call setline(1, 'test content')
+  term echo "test"
+  call assert_equal(['test content'], readfile('termautowritetestfile'))
+  call delete('termautowritetestfile')
+  bwipe!
+  set noautowrite
+endfunc
+
+" Test that CSI sequences with more than CSI_ARGS_MAX arguments do not crash
+func Test_terminal_csi_args_overflow()
+  CheckExecutable printf
+  let seq = "\033[" .. repeat('1;', 49) .. '1m'
+  let seq ..= "\033[1111111111111111111m"
+  let buf = term_start([&shell, &shellcmdflag, 'printf "' .. seq .. '"'])
+
+  " If we get here without a crash, the fix works
+  call assert_equal('running', term_getstatus(buf))
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_terminal_output_combining_chars()
+  CheckUnix
+  new
+  let cmd = "cat samples/combining_chars.txt"
+  let buf = term_start(cmd, {'curwin': 1, 'term_finish': 'open', 'term_rows': 10, 'term_cols': 30})
+  call WaitForAssert({-> assert_match('finished', term_getstatus(buf))})
+  call TermWait(buf)
+  let lines = getbufline(buf, 1, '$')
+  " get byte lengths to confirm combining chars present
+  let lens = map(copy(lines), 'len(v:val)')
+  let expected = repeat([11], 190) + repeat([14], 10)
+  call assert_equal(expected, lens)
+  bw!
+endfunc
+
+" This caused a Crash
+func Test_terminal_csi_resize_oob()
+  CheckUnix
+  CheckExecutable printf
+
+  " CSI 8 ; rows ; cols t with missing, zero or negative dimensions reached
+  " on_resize()/resize_buffer() unvalidated, causing a negative-size memmove()
+  " and out-of-bounds set_lineinfo()/DECALN accesses in libvterm.  Rendering
+  " these must not crash Vim.
+
+  " Sequences:
+  " 1 resize_buffer negative-size memmove
+  " 2 set_lineinfo OOB after corrupt resize
+  " 3 DECALN putglyph OOB after corrupt resize
+  let seqs = ["\<ESC>[8;0;t",
+        \ "\<ESC>[8;;t\<ESC>[J",
+        \ "\<ESC>[8;;0t\<ESC>#8"]
+
+  for seq in seqs
+    let buf = term_start([&shell, &shellcmdflag, 'printf "%s" ' .. shellescape(seq)],
+          \ #{term_rows: 10, term_cols: 40})
+    call TermWait(buf)
+    " Getting here without a crash (and no ASAN report) is the test.
+    call assert_true(bufexists(buf))
+    exe 'bwipe! ' .. buf
+  endfor
+endfunc
+
+" This caused a Crash, but Vim builds libvterm using -DWCWIDTH_FUNCTION=utf_uint2cells
+" which wouldn't return -1 and therefore does not reproduce here
+func Test_terminal_negative_col_oob()
+  CheckUnix
+  CheckExecutable printf
+
+  " A wcwidth() == -1 codepoint (U+0087, \302\207 in UTF-8) drove
+  " state->pos.col negative, then used as an array index in the tabstop
+  " helpers and moverect_internal().  These are single-byte / single-bit
+  " out-of-bounds accesses that do not crash a normal build, so this test
+  " is only meaningful under a sanitizer build; otherwise it just confirms
+  " Vim does not crash.
+
+  " Sequences:
+  " 1. clear_col_tabstop OOB read
+  " 2. is_col_tabstop OOB read
+  " 3. set_col_tabstop OOB write (HTS)
+  " 4. moverect_internal memmove (insert mode)
+
+  let seqs = ["\302\207\<ESC>[g",
+        \ "\302\207\302\207\t",
+        \ "\302\207\<ESC>H",
+        \ "\<ESC>[4h\302\2070"]
+  for seq in seqs
+    let buf = term_start([&shell, &shellcmdflag, 'printf "%s" ' .. shellescape(seq)],
+          \ #{term_rows: 10, term_cols: 40})
+    call TermWait(buf)
+    call assert_true(bufexists(buf))
+    exe 'bwipe! ' .. buf
+  endfor
+endfunc
+
+" This caused a hang
+func Test_terminal_rep_no_preceding_char()
+  CheckUnix
+  CheckExecutable printf
+
+  " REP repeats the preceding graphic character.  When none was printed yet
+  " the repeat width in libvterm is zero, so the cursor never reached the end
+  " column and Vim looped forever while rendering the sequence.
+  let buf = term_start([&shell, &shellcmdflag, 'printf "%s" ' .. shellescape("\<ESC>[9b")],
+        \ #{term_rows: 10, term_cols: 40})
+  call TermWait(buf)
+  " Getting here without a hang is the test.
+  call assert_true(bufexists(buf))
+  exe 'bwipe! ' .. buf
+
+  " REP after a graphic character still repeats it.
+  let buf = term_start([&shell, &shellcmdflag, 'printf "%s" ' .. shellescape("X\<ESC>[4b")],
+        \ #{term_rows: 10, term_cols: 40})
+  call TermWait(buf)
+  call WaitForAssert({-> assert_equal('XXXXX', term_getline(buf, 1))})
+  exe 'bwipe! ' .. buf
+endfunc
+
+" This caused a Crash
+func Test_terminal_scrollregion_resize_oob()
+  CheckUnix
+  CheckExecutable printf
+
+  " A scroll region set before the terminal was made smaller kept its old top
+  " row, since on_resize() only clamped the bottom row.  Every scroll after
+  " that used a rectangle that ends before it starts, which made libvterm pass
+  " a negative size to memmove().
+
+  " Sequences: set the scroll region to rows 5-9, shrink the terminal to three
+  " rows with CSI 8 ; rows ; cols t, then
+  " 1 SU, 2 SD, 3 a line feed at the bottom of the stale region
+  let seqs = ["\<ESC>[5;9r\<ESC>[8;3;40t\<ESC>[5S",
+        \ "\<ESC>[5;9r\<ESC>[8;3;40t\<ESC>[5T",
+        \ "\<ESC>[5;9r\<ESC>[8;3;40t\n\n\n"]
+
+  for seq in seqs
+    let buf = term_start([&shell, &shellcmdflag, 'printf "%s" ' .. shellescape(seq)],
+          \ #{term_rows: 10, term_cols: 40})
+    call TermWait(buf)
+    " Getting here without a crash (and no ASAN report) is the test.
+    call assert_true(bufexists(buf))
+    exe 'bwipe! ' .. buf
+  endfor
+endfunc
+
+" This caused a Crash
+func Test_terminal_csi_resize()
+  CheckUnix
+  CheckExecutable cat
+
+  " The escape sequence and the output must arrive in one burst
+  call writefile(["\<Esc>[8;50000;200t"] + repeat(['x'], 3000), 'Xtermsize', 'D')
+
+  let buf = term_start(['cat', 'Xtermsize'], #{term_rows: 20})
+  call WaitForAssert({-> assert_equal('finished', term_getstatus(buf))})
+  call TermWait(buf)
+
+  " clamped to VTERM_MAX_ROWS instead of 50,000
+  call assert_equal([1000, 1], term_getcursor(buf)[0:1])
+  call assert_true(bufexists(buf))
+
+  exe 'bwipe! ' .. buf
+endfunc
+
+" Run Vim in a terminal, where the outer terminal ("host") uses a key protocol
+" and a job in a terminal window also enables a key protocol.  A terminal-mode
+" mapping must still work and unmapped keys must be passed to the job.
+" The job enables the key protocol only after receiving a character, thus
+" while Vim is waiting for the next key.
+func s:Run_tmap_with_key_protocol(host_resp, job_enable, keys, expected)
+  CheckRunVimInTerminal
+  CheckUnix
+  CheckExecutable sh
+  CheckExecutable stty
+  CheckExecutable dd
+  CheckExecutable printf
+
+  let job_lines =<< trim eval END
+    # pass the typed bytes as-is
+    stty raw -echo
+    printf 'start'
+    # wait for a character before enabling the key protocol
+    dd bs=1 count=1 >/dev/null 2>&1
+    printf '{a:job_enable}ready'
+    # write the received bytes to a file
+    dd bs=1 count={len(a:expected)} 2>/dev/null >XtmapOut
+  END
+  call writefile(job_lines, 'XtmapJob.sh', 'D')
+
+  let lines =<< trim END
+    set nocompatible
+    tnoremap <C-E> <Cmd>call writefile(['hit'], 'XtmapHit', 'a')<CR>
+    call term_start(['sh', 'XtmapJob.sh'], #{curwin: 1})
+  END
+  call writefile(lines, 'XtmapKeyProtocol', 'D')
+  call delete('XtmapHit')
+  call delete('XtmapOut')
+  let buf = RunVimInTerminal('-S XtmapKeyProtocol', #{rows: 10})
+  call WaitForAssert({-> assert_match('start', term_getline(buf, 1))})
+
+  " simulate the response of the host terminal enabling the key protocol
+  call term_sendkeys(buf, a:host_resp)
+  call TermWait(buf)
+
+  " let the job enable the key protocol while Vim is waiting for a key
+  call term_sendkeys(buf, 'x')
+  call WaitForAssert({-> assert_match('ready', term_getline(buf, 1))})
+
+  for key in a:keys
+    call term_sendkeys(buf, key)
+    call TermWait(buf)
+  endfor
+
+  call WaitForAssert({-> assert_equal(['hit'],
+        \ filereadable('XtmapHit') ? readfile('XtmapHit') : [])})
+  call WaitForAssert({-> assert_equal(a:expected,
+        \ filereadable('XtmapOut') ? readfile('XtmapOut', 'b')->join("\n") : '')})
+
+  call StopVimInTerminal(buf)
+  call delete('XtmapHit')
+  call delete('XtmapOut')
+endfunc
+
+func Test_terminal_tmap_with_kitty_keyboard()
+  " response to the kitty keyboard protocol status request: enabled
+  let host_kitty_enabled = "\<Esc>[?1u"
+  " printf format to enable the kitty keyboard protocol
+  let job_enable_kitty = '\033[>1u'
+  " keys in the kitty keyboard protocol: CSI {key} ; {modifiers + 1} u
+  let ctrl_e = "\<Esc>[101;5u"
+  let ctrl_f = "\<Esc>[102;5u"
+  let ctrl_shift_f = "\<Esc>[102;6u"
+
+  " CTRL-E is mapped, CTRL-F and CTRL-SHIFT-F are passed to the job.
+  " The first key after enabling the protocol is not mapped.
+  call s:Run_tmap_with_key_protocol(host_kitty_enabled, job_enable_kitty,
+        \ [ctrl_f, ctrl_e, ctrl_shift_f, 'a'],
+        \ ctrl_f .. ctrl_shift_f .. 'a')
+endfunc
+
+func Test_terminal_tmap_with_modify_other_keys()
+  " response to the XTQMODKEYS request: modifyOtherKeys level 2
+  let host_mok_enabled = "\<Esc>[>4;2m"
+  " printf format to enable modifyOtherKeys level 2
+  let job_enable_mok = '\033[>4;2m'
+  " keys in modifyOtherKeys: CSI 27 ; {modifiers + 1} ; {key} ~
+  let ctrl_e = "\<Esc>[27;5;101~"
+  let ctrl_f = "\<Esc>[27;5;102~"
+  " xterm uses "F" instead of "f" with Shift
+  let ctrl_shift_f = "\<Esc>[27;6;70~"
+
+  " CTRL-E is mapped, CTRL-F and CTRL-SHIFT-F are passed to the job.
+  " The first key after enabling the protocol is not mapped.
+  call s:Run_tmap_with_key_protocol(host_mok_enabled, job_enable_mok,
+        \ [ctrl_f, ctrl_e, ctrl_shift_f, 'a'],
+        \ ctrl_f .. ctrl_shift_f .. 'a')
+endfunc
+
+" In the MS-Windows console with 'termguicolors' an SGR sequence set by the
+" user, such as "t_Cs" for undercurl, must reach the terminal and must not
+" drop the text that follows it.  Uses a plain underline, the console behind
+" ConPTY may not understand "\e[4:3m".
+func Test_terminal_mswin_vtp_sgr_passthrough()
+  " disabled because it fails on CI
+  return
+  " TODO: re-enable
+  CheckMSWindows
+  CheckFeature termguicolors
+
+  let lines =<< trim END
+    set termguicolors
+    let &t_Cs = "\e[4m"
+    let &t_Ce = "\e[24m"
+    hi Curl cterm=undercurl gui=undercurl
+    call setline(1, 'foo bar')
+    call matchadd('Curl', 'foo')
+  END
+  call writefile(lines, 'XsgrScript', 'D')
+  let buf = term_start(GetVimCommandCleanTerm() .. '-S XsgrScript',
+        \ #{term_rows: 5, term_cols: 40})
+  call WaitForAssert({-> assert_equal('foo bar', trim(term_getline(buf, 1)))})
+
+  " "foo" is underlined, "bar" is not
+  call WaitForAssert({-> assert_equal(1,
+        \ term_getattr(term_scrape(buf, 1)[0].attr, 'underline'))})
+  let cells = term_scrape(buf, 1)
+  call assert_equal(1, term_getattr(cells[2].attr, 'underline'))
+  call assert_equal(0, term_getattr(cells[4].attr, 'underline'))
+
+  call term_sendkeys(buf, ":qa!\<CR>")
+  call WaitForAssert({-> assert_equal('dead', job_status(term_getjob(buf)))})
+  exe buf .. 'bwipe!'
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

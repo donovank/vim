@@ -91,7 +91,7 @@ gettext_lang(char_u *name)
 }
 #endif
 
-#if defined(FEAT_MULTI_LANG) || defined(PROTO)
+#if defined(FEAT_MULTI_LANG)
 /*
  * Return TRUE when "lang" starts with a valid language name.
  * Rejects NULL, empty string, "C", "C.UTF-8" and others.
@@ -116,10 +116,12 @@ get_mess_lang(void)
     p = get_locale_val(LC_MESSAGES);
 #  else
     // This is necessary for Win32, where LC_MESSAGES is not defined and $LANG
-    // may be set to the LCID number.  LC_COLLATE is the best guess, LC_TIME
-    // and LC_MONETARY may be set differently for a Japanese working in the
-    // US.
-    p = get_locale_val(LC_COLLATE);
+    // may be set to the LCID number.  $LANG holds the display language, see
+    // set_init_lang_env().  Otherwise LC_COLLATE is the best guess, LC_TIME
+    // and LC_MONETARY may be set differently for a Japanese working in the US.
+    p = mch_getenv((char_u *)"LANG");
+    if (!is_valid_mess_lang(p))
+	p = get_locale_val(LC_COLLATE);
 #  endif
 # else
     p = mch_getenv((char_u *)"LC_ALL");
@@ -151,25 +153,25 @@ get_mess_env(void)
     char_u	*p;
 
     p = mch_getenv((char_u *)"LC_ALL");
-    if (p == NULL || *p == NUL)
-    {
-	p = mch_getenv((char_u *)"LC_MESSAGES");
-	if (p == NULL || *p == NUL)
-	{
-	    p = mch_getenv((char_u *)"LANG");
-	    if (p != NULL && VIM_ISDIGIT(*p))
-		p = NULL;		// ignore something like "1043"
+    if (p != NULL && *p != NUL)
+	return p;
+
+    p = mch_getenv((char_u *)"LC_MESSAGES");
+    if (p != NULL && *p != NUL)
+	return p;
+
+    p = mch_getenv((char_u *)"LANG");
+    if (p != NULL && VIM_ISDIGIT(*p))
+	p = NULL;		// ignore something like "1043"
 # ifdef HAVE_GET_LOCALE_VAL
-	    if (p == NULL || *p == NUL)
-		p = get_locale_val(LC_CTYPE);
+    if (p == NULL || *p == NUL)
+	p = get_locale_val(LC_CTYPE);
 # endif
-	}
-    }
     return p;
 }
 #endif
 
-#if defined(FEAT_EVAL) || defined(PROTO)
+#if defined(FEAT_EVAL)
 
 /*
  * Set the "v:lang" variable according to the current locale setting.
@@ -225,7 +227,7 @@ init_locale(void)
     // Tell Gtk not to change our locale settings.
     gtk_disable_setlocale();
 # endif
-# if defined(FEAT_FLOAT) && defined(LC_NUMERIC)
+# if defined(LC_NUMERIC)
     // Make sure strtod() uses a decimal point, not a comma.
     setlocale(LC_NUMERIC, "C");
 # endif
@@ -333,13 +335,13 @@ ex_language(exarg_T *eap)
 # endif
 	{
 	    loc = setlocale(what, (char *)name);
-# if defined(FEAT_FLOAT) && defined(LC_NUMERIC)
+# if defined(LC_NUMERIC)
 	    // Make sure strtod() uses a decimal point, not a comma.
 	    setlocale(LC_NUMERIC, "C");
 # endif
 	}
 	if (loc == NULL)
-	    semsg(_("E197: Cannot set language to \"%s\""), name);
+	    semsg(_(e_cannot_set_language_to_str), name);
 	else
 	{
 # ifdef HAVE_NL_MSG_CAT_CNTR
@@ -348,6 +350,10 @@ ex_language(exarg_T *eap)
 	    extern int _nl_msg_cat_cntr;
 
 	    ++_nl_msg_cat_cntr;
+# elif defined(DYNAMIC_GETTEXT)
+	    // Same thing when gettext is loaded at runtime.
+	    if (dyn_libintl_nl_msg_cat_cntr != NULL)
+		++*dyn_libintl_nl_msg_cat_cntr;
 # endif
 	    // Reset $LC_ALL, otherwise it would overrule everything.
 	    vim_setenv((char_u *)"LC_ALL", (char_u *)"");
@@ -361,9 +367,6 @@ ex_language(exarg_T *eap)
 		if (what == LC_ALL)
 		{
 		    vim_setenv((char_u *)"LANG", name);
-
-		    // Clear $LANGUAGE because GNU gettext uses it.
-		    vim_setenv((char_u *)"LANGUAGE", (char_u *)"");
 # ifdef MSWIN
 		    // Apparently MS-Windows printf() may cause a crash when
 		    // we give it 8-bit text while it's expecting text in the
@@ -379,6 +382,8 @@ ex_language(exarg_T *eap)
 # else
 		    mname = name;
 # endif
+		    // Clear $LANGUAGE because GNU gettext uses it.
+		    vim_setenv((char_u *)"LANGUAGE", (char_u *)"");
 		    vim_setenv((char_u *)"LC_MESSAGES", mname);
 # ifdef FEAT_MULTI_LANG
 		    set_helplang_default(mname);
@@ -390,9 +395,7 @@ ex_language(exarg_T *eap)
 	    // Set v:lang, v:lc_time, v:collate and v:ctype to the final result.
 	    set_lang_var();
 # endif
-# ifdef FEAT_TITLE
 	    maketitle();
-# endif
 	}
     }
 }
@@ -506,24 +509,25 @@ find_locales(void)
     static void
 init_locales(void)
 {
-    if (!did_init_locales)
-    {
-	did_init_locales = TRUE;
-	locales = find_locales();
-    }
+    if (did_init_locales)
+	return;
+
+    did_init_locales = TRUE;
+    locales = find_locales();
 }
 
-# if defined(EXITFREE) || defined(PROTO)
+# if defined(EXITFREE)
     void
 free_locales(void)
 {
     int			i;
-    if (locales != NULL)
-    {
-	for (i = 0; locales[i] != NULL; i++)
-	    vim_free(locales[i]);
-	VIM_CLEAR(locales);
-    }
+
+    if (locales == NULL)
+	return;
+
+    for (i = 0; locales[i] != NULL; i++)
+	vim_free(locales[i]);
+    VIM_CLEAR(locales);
 }
 # endif
 

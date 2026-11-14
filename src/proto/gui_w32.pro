@@ -1,10 +1,11 @@
-/* gui_w32.c */
+// gui_w32.c
 int gui_mch_set_rendering_options(char_u *s);
 int gui_mch_is_blinking(void);
 int gui_mch_is_blink_off(void);
 void gui_mch_set_blinking(long wait, long on, long off);
 void gui_mch_stop_blink(int may_call_gui_update_cursor);
 void gui_mch_start_blink(void);
+void gui_mch_set_titlebar_colors(void);
 void gui_mch_new_colors(void);
 void gui_mch_def_colors(void);
 int gui_mch_open(void);
@@ -29,7 +30,8 @@ void gui_mch_iconify(void);
 void gui_mch_draw_hollow_cursor(guicolor_T color);
 void gui_mch_draw_part_cursor(int w, int h, guicolor_T color);
 void gui_mch_update(void);
-int gui_mch_wait_for_chars(int wtime);
+void server_add_input(char_u *str);
+int gui_mch_wait_for_chars(long wtime);
 void gui_mch_clear_block(int row1, int col1, int row2, int col2);
 void gui_mch_clear_all(void);
 void gui_mch_enable_menu(int flag);
@@ -42,6 +44,8 @@ void gui_mch_show_tabline(int showit);
 int gui_mch_showing_tabline(void);
 void gui_mch_update_tabline(void);
 void gui_mch_set_curtab(int nr);
+void gui_mch_set_dark_theme(int dark);
+void gui_mch_set_fullscreen(int flag);
 void ex_simalt(exarg_T *eap);
 void gui_mch_find_dialog(exarg_T *eap);
 void gui_mch_replace_dialog(exarg_T *eap);
@@ -90,11 +94,17 @@ void gui_mch_set_foreground(void);
 void gui_mch_drawsign(int row, int col, int typenr);
 void *gui_mch_register_sign(char_u *signfile);
 void gui_mch_destroy_sign(void *sign);
-int multiline_balloon_available(void);
 void gui_mch_disable_beval_area(BalloonEval *beval);
 void gui_mch_enable_beval_area(BalloonEval *beval);
 void gui_mch_post_balloon(BalloonEval *beval, char_u *mesg);
 BalloonEval *gui_mch_create_beval_area(void *target, char_u *mesg, void (*mesgCB)(BalloonEval *, int), void *clientData);
 void gui_mch_destroy_beval_area(BalloonEval *beval);
 void netbeans_draw_multisign_indicator(int row);
-/* vim: set ft=c : */
+int test_gui_w32_sendevent(char_u *event, dict_T *args);
+int image_gui_init(image_T *img);
+void image_gui_uninit(image_T *img);
+int image_placement_gui_init(image_placement_T *place);
+void image_placement_gui_uninit(image_placement_T *place);
+void image_placement_gui_draw(image_placement_T *place);
+void image_placement_gui_clear(image_placement_T *place);
+// vim: ft=c

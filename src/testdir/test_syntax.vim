@@ -1,10 +1,8 @@
 " Test for syntax and syntax iskeyword option
 
-source check.vim
 CheckFeature syntax
 
-source view_util.vim
-source screendump.vim
+source util/screendump.vim
 
 func GetSyntaxItem(pat)
   let c = ''
@@ -73,6 +71,13 @@ func Test_syn_iskeyword()
   redir END
   call assert_equal("\nsyntax iskeyword @,48-57,_,192-255", @c)
 
+  call assert_fails("syntax iskeyword invalid_value", "E474:")
+  redir @c
+  syn iskeyword
+  redir END
+  " did not change
+  call assert_equal("\nsyntax iskeyword @,48-57,_,192-255", @c)
+
   setlocal isk-=_
   call assert_equal('DLTD_BY', GetSyntaxItem('DLTD'))
   /\<D\k\+\>/:norm! ygn
@@ -101,6 +106,13 @@ func Test_syntax_after_reload()
   call assert_equal('hello', &filetype)
   call assert_true(exists('g:gotit'))
   call delete('Xsomefile')
+endfunc
+
+func Test_syntax_filetype_syntax()
+  set filetype=syntax
+  syntax on
+  syntax off
+  set filetype= syntax=
 endfunc
 
 func Test_syntime()
@@ -193,19 +205,23 @@ func Test_syntax_completion()
   " Check that clearing "Aap" avoids it showing up before Boolean.
   hi Aap ctermfg=blue
   call feedkeys(":syn list \<C-A>\<C-B>\"\<CR>", 'tx')
-  call assert_match('^"syn list Aap Boolean Character ', @:)
+  call assert_match('^"syn list Aap Added Bold BoldItalic Boolean Changed Character ', @:)
   hi clear Aap
 
   call feedkeys(":syn list \<C-A>\<C-B>\"\<CR>", 'tx')
-  call assert_match('^"syn list Boolean Character ', @:)
+  call assert_match('^"syn list Added Bold BoldItalic Boolean Changed Character ', @:)
 
   call feedkeys(":syn match \<C-A>\<C-B>\"\<CR>", 'tx')
-  call assert_match('^"syn match Boolean Character ', @:)
+  call assert_match('^"syn match Added Bold BoldItalic Boolean Changed Character ', @:)
+
+  syn cluster Aax contains=Aap
+  call feedkeys(":syn list @A\<C-A>\<C-B>\"\<CR>", 'tx')
+  call assert_match('^"syn list @Aax', @:)
 endfunc
 
 func Test_echohl_completion()
   call feedkeys(":echohl no\<C-A>\<C-B>\"\<CR>", 'tx')
-  call assert_equal('"echohl NonText Normal none', @:)
+  call assert_equal('"echohl NONE NonText Normal', @:)
 endfunc
 
 func Test_syntax_arg_skipped()
@@ -417,6 +433,25 @@ func Test_syn_sync()
   call assert_match('SyncHere', execute('syntax sync'))
   syn sync clear
   call assert_notmatch('SyncHere', execute('syntax sync'))
+
+  syn sync minlines=10
+  syntax cluster xmlStuff contains=xmlGroup1,xmlGroup2
+  syntax region xmlComment start=/<!--/ end=/-->/ keepend contains=@Spell
+  syntax sync match xmlSync1 grouphere xmlComment /<!--/
+  syntax sync match xmlSync2 groupthere NONE /-->/
+  syntax cluster xmlAll contains=ALL
+  let out = execute('syntax sync')
+  call assert_match('xmlSync1', out)
+  call assert_match('xmlSync2', out)
+  call assert_match('grouphere xmlComment', out)
+  call assert_match('groupthere NONE', out)
+  call assert_notmatch('xmlStuff', out)
+  call assert_notmatch('xmlAll', out)
+  call assert_notmatch('cluster', out)
+  call assert_notmatch('keepend', out)
+  " should output 4 lines: 1 header + 3 syn sync lines
+  call assert_equal(4, len(split(out, '\n')))
+
   syn clear
 endfunc
 
@@ -451,7 +486,7 @@ func Test_invalid_name()
 endfunc
 
 func Test_ownsyntax()
-  new Xfoo
+  new XfooOwnSyntax
   call setline(1, '#define FOO')
   syntax on
   set filetype=c
@@ -478,6 +513,18 @@ func Test_ownsyntax()
   %bw!
 endfunc
 
+func Test_ownsyntax_edit_hidden()
+  " this used to leak memory, needs ASAN or valgrind to confirm
+  call writefile(['one'], 'Xownsyntax1', 'D')
+  call writefile(['two'], 'Xownsyntax2', 'D')
+  set hidden
+  edit Xownsyntax1
+  ownsyntax c
+  edit Xownsyntax2
+  set hidden&
+  %bwipe!
+endfunc
+
 func Test_ownsyntax_completion()
   call feedkeys(":ownsyntax java\<C-A>\<C-B>\"\<CR>", 'tx')
   call assert_equal('"ownsyntax java javacc javascript javascriptreact', @:)
@@ -502,8 +549,7 @@ endfunc
 func Test_bg_detection()
   CheckNotGui
 
-  " auto-detection of &bg, make sure sure it isn't set anywhere before
-  " this test
+  " auto-detection of &bg, make sure it isn't set anywhere before this test
   hi Normal ctermbg=0
   call assert_equal('dark', &bg)
   hi Normal ctermbg=4
@@ -528,6 +574,15 @@ func Test_syntax_hangs()
   CheckFunction reltimefloat
   CheckFeature syntax
 
+  " So, it turns out the Windows 7 implements TimerQueue timers differently
+  " and they can expire *before* the requested time has elapsed. So allow for
+  " the timeout occurring after 80 ms (5 * 16 (the typical clock tick)).
+  if has("win32")
+    let min_timeout = 0.08
+  else
+    let min_timeout = 0.1
+  endif
+
   " This pattern takes a long time to match, it should timeout.
   new
   call setline(1, ['aaa', repeat('abc ', 1000), 'ccc'])
@@ -536,22 +591,20 @@ func Test_syntax_hangs()
   syn match Error /\%#=1a*.*X\@<=b*/
   redraw
   let elapsed = reltimefloat(reltime(start))
-  call assert_true(elapsed > 0.1)
-  call assert_true(elapsed < 1.0)
+  call assert_inrange(min_timeout, 1.0, elapsed)
 
   " second time syntax HL is disabled
   let start = reltime()
   redraw
   let elapsed = reltimefloat(reltime(start))
-  call assert_true(elapsed < 0.1)
+  call assert_inrange(0, 0.1, elapsed)
 
   " after CTRL-L the timeout flag is reset
   let start = reltime()
   exe "normal \<C-L>"
   redraw
   let elapsed = reltimefloat(reltime(start))
-  call assert_true(elapsed > 0.1)
-  call assert_true(elapsed < 1.0)
+  call assert_inrange(min_timeout, 1.0, elapsed)
 
   set redrawtime&
   bwipe!
@@ -621,6 +674,7 @@ endfunc
 
 " Check highlighting for a small piece of C code with a screen dump.
 func Test_syntax_c()
+  CheckScreendump
   CheckRunVimInTerminal
   call writefile([
 	\ '/* comment line at the top */',
@@ -642,8 +696,8 @@ func Test_syntax_c()
 	\ "\t}",
 	\ "\tNote: asdf",
 	\ '}',
-	\ ], 'Xtest.c')
- 
+	\ ], 'Xtest.c', 'D')
+
   " This makes the default for 'background' use "dark", check that the
   " response to t_RB corrects it to "light".
   let $COLORFGBG = '15;0'
@@ -660,8 +714,62 @@ func Test_syntax_c()
   call StopVimInTerminal(buf)
 
   let $COLORFGBG = ''
-  call delete('Xtest.c')
 endfun
+
+" Test \z(...) along with \z1
+func Test_syn_zsub()
+  new
+  syntax on
+  call setline(1,  'xxx start foo xxx not end foo xxx end foo xxx')
+  let l:expected = '    ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ    '
+
+  for l:re in [0, 1, 2]
+    " Example taken from :help :syn-ext-match
+    syntax region Z start="start \z(\I\i*\)" skip="not end \z1" end="end \z1"
+    eval AssertHighlightGroups(1, 1, l:expected, 1, 'regexp=' .. l:re)
+    syntax clear Z
+  endfor
+
+  set re&
+  bw!
+endfunc
+
+func s:SynDumpBuffer(ft, lines)
+  new
+  syntax on
+  execute 'setfiletype ' .. a:ft
+  call setline(1, a:lines)
+  let result = []
+  for lnum in range(1, line('$'))
+    for col in range(1, max([1, len(getline(lnum))]))
+      call add(result, synIDattr(synID(lnum, col, 1), 'name'))
+    endfor
+  endfor
+  bwipe!
+  return result
+endfunc
+
+" The in_id_list() cache is a speed optimization only: highlighting must be
+" identical with the cache on (default) and off.  Compare full-buffer synID()
+" output both ways across filetypes that use "contains"/cluster lists.
+func Test_syntax_idlist_cache_unchanged()
+  let samples = {
+        \ 'c': ['#define M 0x1F', "char c = '\\n';",
+        \       'int f(int a) { return a + 0xAB; }'],
+        \ 'vim': ['func <SID>Foo() abort', '  let x = [1, 2] + {"k": 0z1f}',
+        \         'endfunc'],
+        \ 'python': ['class C:', '    def m(self): return {1: "s", 2: r"\d"}'],
+        \ 'sh': ['case $x in', '  a) echo "${y:-0xAB}";;', 'esac'],
+        \ }
+  for ft in sort(keys(samples))
+    call test_override('syn_idlist_cache', 0)
+    let l:on = s:SynDumpBuffer(ft, samples[ft])
+    call test_override('syn_idlist_cache', 1)
+    let l:off = s:SynDumpBuffer(ft, samples[ft])
+    call test_override('ALL', 0)
+    call assert_equal(l:off, l:on, 'filetype ' .. ft)
+  endfor
+endfunc
 
 " Using \z() in a region with NFA failing should not crash.
 func Test_syn_wrong_z_one()
@@ -676,10 +784,10 @@ func Test_syn_wrong_z_one()
 endfunc
 
 func Test_syntax_after_bufdo()
-  call writefile(['/* aaa comment */'], 'Xaaa.c')
-  call writefile(['/* bbb comment */'], 'Xbbb.c')
-  call writefile(['/* ccc comment */'], 'Xccc.c')
-  call writefile(['/* ddd comment */'], 'Xddd.c')
+  call writefile(['/* aaa comment */'], 'Xaaa.c', 'D')
+  call writefile(['/* bbb comment */'], 'Xbbb.c', 'D')
+  call writefile(['/* ccc comment */'], 'Xccc.c', 'D')
+  call writefile(['/* ddd comment */'], 'Xddd.c', 'D')
 
   let bnr = bufnr('%')
   new Xaaa.c
@@ -707,10 +815,6 @@ func Test_syntax_after_bufdo()
   bwipe! Xccc.c
   bwipe! Xddd.c
   syntax off
-  call delete('Xaaa.c')
-  call delete('Xbbb.c')
-  call delete('Xccc.c')
-  call delete('Xddd.c')
 endfunc
 
 func Test_syntax_foldlevel()
@@ -814,8 +918,9 @@ func Test_search_syntax_skip()
   1
   call search('VIM', 'w', '', 0, 'synIDattr(synID(line("."), col("."), 1), "name") =~? "comment"')
   call assert_equal('Another Text for VIM', getline('.'))
+
   1
-  call search('VIM', 'w', '', 0, 'synIDattr(synID(line("."), col("."), 1), "name") !~? "string"')
+  call search('VIM', 'cw', '', 0, 'synIDattr(synID(line("."), col("."), 1), "name") !~? "string"')
   call assert_equal(' let a = "VIM"', getline('.'))
 
   " Skip argument using Lambda.
@@ -824,26 +929,27 @@ func Test_search_syntax_skip()
   call assert_equal('Another Text for VIM', getline('.'))
 
   1
-  call search('VIM', 'w', '', 0, { -> synIDattr(synID(line("."), col("."), 1), "name") !~? "string"})
+  call search('VIM', 'cw', '', 0, { -> synIDattr(synID(line("."), col("."), 1), "name") !~? "string"})
   call assert_equal(' let a = "VIM"', getline('.'))
 
   " Skip argument using funcref.
   func InComment()
     return synIDattr(synID(line("."), col("."), 1), "name") =~? "comment"
   endfunc
-  func InString()
+  func NotInString()
     return synIDattr(synID(line("."), col("."), 1), "name") !~? "string"
   endfunc
+
   1
   call search('VIM', 'w', '', 0, function('InComment'))
   call assert_equal('Another Text for VIM', getline('.'))
 
   1
-  call search('VIM', 'w', '', 0, function('InString'))
+  call search('VIM', 'cw', '', 0, function('NotInString'))
   call assert_equal(' let a = "VIM"', getline('.'))
 
   delfunc InComment
-  delfunc InString
+  delfunc NotInString
   bwipe!
 endfunc
 
@@ -924,7 +1030,7 @@ func Test_syn_contained_transparent()
 endfunc
 
 func Test_syn_include_contains_TOP()
-  let l:case = "TOP in included syntax means its group list name"
+  let l:case = "TOP in included syntax refers to top level of that included syntax"
   new
   syntax include @INCLUDED syntax/c.vim
   syntax region FencedCodeBlockC start=/```c/ end=/```/ contains=@INCLUDED
@@ -939,5 +1045,55 @@ func Test_syn_include_contains_TOP()
   bw!
 endfunc
 
+func Test_syn_include_contains_TOP_excluding()
+  new
+  syntax include @INCLUDED syntax/c.vim
+  syntax region FencedCodeBlockC start=/```c/ end=/```/ contains=@INCLUDED
+
+  call setline(1,  ['```c', '#if 0', 'int', '#else', 'int', '#if', '#endif', '```' ])
+  let l:expected = ["cCppOutElse", "cConditional"]
+  eval AssertHighlightGroups(6, 1, l:expected, 1)
+  syntax clear
+  bw!
+endfunc
+
+" This was using freed memory
+func Test_WinEnter_synstack_synID()
+  autocmd WinEnter * call synstack(line("."), col("."))
+  autocmd WinEnter * call synID(line('.'), col('.') - 1, 1)
+  call setline(1, 'aaaaa')
+  normal! $
+  new
+  close
+
+  au! WinEnter
+  bw!
+endfunc
+
+" This was going beyond the end of the "foo" line
+func Test_syn_sync_grouphere_shorter_next_line()
+  let lines =<< trim END
+    if [[ "$var1" == 1 ]]; then
+      foo
+    else
+      bar
+    fi
+  END
+  let lines = ['a']->repeat(50) + lines + ['a']->repeat(48)
+
+  20new
+  call setline(1, lines)
+  syn region shIf transparent
+        \ start="\<if\_s" skip=+-fi\>+ end="\<;\_s*then\>" end="\<fi\>"
+  syn sync minlines=20 maxlines=40
+  syn sync match shIfSync grouphere shIf "\<if\>"
+  redraw!
+
+  normal! G
+  " Should not go beyond end of line
+  redraw!
+
+  bw!
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

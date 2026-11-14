@@ -1,6 +1,7 @@
 " Vim script to download a missing spell file
-" Maintainer:	Bram Moolenaar <Bram@vim.org>
-" Last Change:	2020 Jul 10
+" Maintainer:	The Vim Project <https://github.com/vim/vim>
+" Last Change:	2026 Jul 22
+" Former Maintainer:	Bram Moolenaar <Bram@vim.org>
 
 if !exists('g:spellfile_URL')
   " Always use https:// because it's secure.  The certificate is for nluug.nl,
@@ -193,10 +194,6 @@ function! spellfile#GetDirChoices()
 endfunc
 
 function! spellfile#WritableSpellDir()
-  if has("unix")
-    " For Unix always use the $HOME/.vim directory
-    return $HOME . "/.vim/spell"
-  endif
   for dir in split(&rtp, ',')
     if filewritable(dir) == 2
       return dir . "/spell"

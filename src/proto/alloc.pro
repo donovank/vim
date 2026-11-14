@@ -1,4 +1,4 @@
-/* alloc.c */
+// alloc.c
 void vim_mem_profile_dump(void);
 int alloc_does_fail(size_t size);
 void *alloc(size_t size);
@@ -17,13 +17,17 @@ void ga_clear(garray_T *gap);
 void ga_clear_strings(garray_T *gap);
 int ga_copy_strings(garray_T *from, garray_T *to);
 void ga_init(garray_T *gap);
-void ga_init2(garray_T *gap, int itemsize, int growsize);
+void ga_init2(garray_T *gap, size_t itemsize, int growsize);
 int ga_grow(garray_T *gap, int n);
+int ga_grow_id(garray_T *gap, int n, alloc_id_T id);
 int ga_grow_inner(garray_T *gap, int n);
 char_u *ga_concat_strings(garray_T *gap, char *sep);
+int ga_copy_string(garray_T *gap, char_u *p);
 int ga_add_string(garray_T *gap, char_u *p);
 void ga_concat(garray_T *gap, char_u *s);
 void ga_concat_len(garray_T *gap, char_u *s, size_t len);
-void ga_append(garray_T *gap, int c);
+int ga_append(garray_T *gap, int c);
 void append_ga_line(garray_T *gap);
-/* vim: set ft=c : */
+int ga_concat_bytes(garray_T *gap, const char *s, int len);
+int ga_concat_int(garray_T *gap, int n);
+// vim: ft=c

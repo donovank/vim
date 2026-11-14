@@ -2,8 +2,8 @@
 " Language:		Ruby
 " Maintainer:		Mark Guzman <segfault@hasno.info>
 " URL:			https://github.com/vim-ruby/vim-ruby
-" Release Coordinator:	Doug Kearns <dougkearns@gmail.com>
-" Last Change:		2020 Apr 12
+" Last Change:		2023 Dec 31
+" 2026 Oct 12 by Vim project: prevent code injection
 " ----------------------------------------------------------------------------
 "
 " Ruby IRB/Complete author: Keiju ISHITSUKA(keiju@ishitsuka.com)
@@ -200,7 +200,7 @@ function! s:GetRubyVarType(v)
             return 'Proc'
         elseif strlen(str) > 4
             let l = stridx(str,'.')
-            return str[0:l-1]
+            return str[0:l-1] =~# '^\%(::\)\=\u\w*\%(::\u\w*\)*$' ? cand : ''
         end
         return ''
     endif
@@ -490,7 +490,7 @@ class VimRubyCompletion
         trail = "%s%s" % [ dir, sub ]
         tcfg = "%sconfig" % trail
 
-        if File.exists?( tcfg )
+        if File.exist?( tcfg )
           rails_base = trail
           break
         end
@@ -503,7 +503,7 @@ class VimRubyCompletion
 
     bootfile = rails_base + "config/boot.rb"
     envfile = rails_base + "config/environment.rb"
-    if File.exists?( bootfile ) && File.exists?( envfile )
+    if File.exist?( bootfile ) && File.exist?( envfile )
       begin
         require bootfile
         require envfile
@@ -751,8 +751,10 @@ class VimRubyCompletion
           load_buffer_class( vartype )
 
           begin
-            methods = eval("#{vartype}.instance_methods")
-            variables = eval("#{vartype}.instance_variables")
+          # look up the constant, do not evaluate buffer text
+            klass = vartype.sub(/\A::/, "").split("::").inject(Object) { |m, n| m.const_get(n) }
+            methods = klass.instance_methods
+            variables = klass.instance_variables
           rescue Exception
             dprint "load_buffer_class err: %s" % $!
           end

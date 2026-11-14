@@ -63,7 +63,7 @@ ui_write(char_u *s, int len, int console UNUSED)
 #endif
 }
 
-#if defined(UNIX) || defined(VMS) || defined(PROTO) || defined(MSWIN)
+#if defined(UNIX) || defined(VMS) || defined(MSWIN)
 /*
  * When executing an external program, there may be some typed characters that
  * are not consumed by it.  Give them back to ui_inchar() and they are stored
@@ -83,20 +83,20 @@ ui_inchar_undo(char_u *s, int len)
     if (ta_str != NULL)
 	newlen += ta_len - ta_off;
     new = alloc(newlen);
-    if (new != NULL)
+    if (new == NULL)
+	return;
+
+    if (ta_str != NULL)
     {
-	if (ta_str != NULL)
-	{
-	    mch_memmove(new, ta_str + ta_off, (size_t)(ta_len - ta_off));
-	    mch_memmove(new + ta_len - ta_off, s, (size_t)len);
-	    vim_free(ta_str);
-	}
-	else
-	    mch_memmove(new, s, (size_t)len);
-	ta_str = new;
-	ta_len = newlen;
-	ta_off = 0;
+	mch_memmove(new, ta_str + ta_off, (size_t)(ta_len - ta_off));
+	mch_memmove(new + ta_len - ta_off, s, (size_t)len);
+	vim_free(ta_str);
     }
+    else
+	mch_memmove(new, s, (size_t)len);
+    ta_str = new;
+    ta_len = newlen;
+    ta_off = 0;
 }
 #endif
 
@@ -199,10 +199,10 @@ ui_inchar(
      * while (not timed out)
      * {
      *     if (any-timer-triggered)
-     *        invoke-timer-callback;
+     *	      invoke-timer-callback;
      *     wait-for-character();
      *     if (character available)
-     *        break;
+     *	      break;
      * }
      *
      * wait-for-character() does:
@@ -210,13 +210,13 @@ ui_inchar(
      * {
      *     Wait for event;
      *     if (something on channel)
-     *        read/write channel;
-     *     else if (resized)
-     *        handle_resize();
-     *     else if (system event)
-     *        deal-with-system-event;
-     *     else if (character available)
-     *        break;
+     *	      read/write channel;
+     *	   else if (resized)
+     *	      handle_resize();
+     *	   else if (system event)
+     *	      deal-with-system-event;
+     *	   else if (character available)
+     *	      break;
      * }
      *
      */
@@ -248,7 +248,7 @@ theend:
     return retval;
 }
 
-#if defined(UNIX) || defined(VMS) || defined(FEAT_GUI) || defined(PROTO)
+#if defined(UNIX) || defined(VMS) || defined(FEAT_GUI)
 /*
  * Common code for mch_inchar() and gui_inchar(): Wait for a while or
  * indefinitely until characters are available, dealing with timers and
@@ -277,11 +277,11 @@ inchar_loop(
     int		did_start_blocking = FALSE;
     long	wait_time;
     long	elapsed_time = 0;
-#ifdef ELAPSED_FUNC
+# ifdef ELAPSED_FUNC
     elapsed_T	start_tv;
 
     ELAPSED_INIT(start_tv);
-#endif
+# endif
 
     // repeat until we got a character or waited long enough
     for (;;)
@@ -291,7 +291,7 @@ inchar_loop(
 	if (resize_func != NULL)
 	    resize_func(FALSE);
 
-#ifdef MESSAGE_QUEUE
+# ifdef MESSAGE_QUEUE
 	// Only process messages when waiting.
 	if (wtime != 0)
 	{
@@ -300,21 +300,44 @@ inchar_loop(
 	    if (typebuf_changed(tb_change_cnt))
 		return 0;
 	}
-#endif
-	if (wtime < 0 && did_start_blocking)
+# endif
+	// When an autocomplete is pending, wake at the sooner of
+	// 'autocompletedelay' and 'updatetime' so the delay does not postpone
+	// CursorHold.  Once CursorHold has fired, only the delay is left.
+	// Gate the injection like trigger_cursorhold() so the deferred key
+	// cannot fire while outside Insert mode, but do still fire the key
+	// when recording a register (gotchars_add_byte() will ignore it).
+	bool delay_pending = ins_compl_autocomplete_pending() && p_acl > 0
+		&& typebuf.tb_len == 0
+		&& !ins_compl_active()
+		&& (get_real_state() & MODE_INSERT) != 0;
+	// Measure the delay from when it was armed (the keystroke), so a
+	// CursorHold returning in between does not push the popup back.
+	long acl_elapsed = delay_pending ? ins_compl_autocomplete_elapsed() : 0;
+
+	if (wtime < 0 && did_start_blocking && !delay_pending)
 	    // blocking and already waited for p_ut
 	    wait_time = -1;
 	else
 	{
+# ifdef ELAPSED_FUNC
+	    elapsed_time = ELAPSED_FUNC(start_tv);
+# endif
 	    if (wtime >= 0)
-		wait_time = wtime;
+		wait_time = wtime - elapsed_time;
+	    else if (delay_pending)
+	    {
+		long delay_left = p_acl - acl_elapsed;
+		long ut_left = p_ut - elapsed_time;
+
+		if (did_start_blocking)
+		    wait_time = delay_left;
+		else
+		    wait_time = MIN(delay_left, ut_left);
+	    }
 	    else
 		// going to block after p_ut
-		wait_time = p_ut;
-#ifdef ELAPSED_FUNC
-	    elapsed_time = ELAPSED_FUNC(start_tv);
-#endif
-	    wait_time -= elapsed_time;
+		wait_time = p_ut - elapsed_time;
 
 	    // If the waiting time is now zero or less, we timed out.  However,
 	    // loop at least once to check for characters and events.  Matters
@@ -324,6 +347,29 @@ inchar_loop(
 		if (wtime >= 0)
 		    // no character available within "wtime"
 		    return 0;
+
+		// The 'autocompletedelay' expired: trigger the popup.  When
+		// 'updatetime' is shorter, fall through to CursorHold instead.
+		if (delay_pending && acl_elapsed >= p_acl && maxlen >= 3
+					    && !typebuf_changed(tb_change_cnt))
+		{
+		    if (buf == NULL)
+		    {
+			char_u	ibuf[3];
+
+			ibuf[0] = CSI;
+			ibuf[1] = KS_EXTRA;
+			ibuf[2] = (int)KE_COMPLETE_DELAY;
+			add_to_input_buf(ibuf, 3);
+		    }
+		    else
+		    {
+			buf[0] = K_SPECIAL;
+			buf[1] = KS_EXTRA;
+			buf[2] = (int)KE_COMPLETE_DELAY;
+		    }
+		    return 3;
+		}
 
 		// No character available within 'updatetime'.
 		did_start_blocking = TRUE;
@@ -357,7 +403,7 @@ inchar_loop(
 	    }
 	}
 
-#ifdef FEAT_JOB_CHANNEL
+# ifdef FEAT_JOB_CHANNEL
 	if (wait_time < 0 || wait_time > 100L)
 	{
 	    // Checking if a job ended requires polling.  Do this at least
@@ -370,13 +416,13 @@ inchar_loop(
 	    if (channel_any_readahead())
 		wait_time = 10L;
 	}
-#endif
-#ifdef FEAT_BEVAL_GUI
+# endif
+# ifdef FEAT_BEVAL_GUI
 	if (p_beval && wait_time > 100L)
 	    // The 'balloonexpr' may indirectly invoke a callback while waiting
 	    // for a character, need to check often.
 	    wait_time = 100L;
-#endif
+# endif
 
 	// Wait for a character to be typed or another event, such as the winch
 	// signal or an event on the monitored file descriptors.
@@ -400,18 +446,20 @@ inchar_loop(
 	}
 	// Timed out or interrupted with no character available.
 
-#ifndef ELAPSED_FUNC
+# ifndef ELAPSED_FUNC
 	// estimate the elapsed time
 	elapsed_time += wait_time;
-#endif
+# endif
 
 	if ((resize_func != NULL && resize_func(TRUE))
-#if defined(FEAT_CLIENTSERVER) && defined(UNIX)
-		|| server_waiting()
-#endif
-#ifdef MESSAGE_QUEUE
+# if defined(FEAT_CLIENTSERVER) && defined(FEAT_X11)
+		||
+		(clientserver_method == CLIENTSERVER_METHOD_X11 &&
+		 server_waiting())
+# endif
+# ifdef MESSAGE_QUEUE
 		|| interrupted
-#endif
+# endif
 		|| wait_time > 0
 		|| (wtime < 0 && !did_start_blocking))
 	    // no character available, but something to be done, keep going
@@ -424,7 +472,7 @@ inchar_loop(
 }
 #endif
 
-#if defined(FEAT_TIMERS) || defined(PROTO)
+#if defined(FEAT_TIMERS)
 /*
  * Wait for a timer to fire or "wait_func" to return non-zero.
  * Returns OK when something was read.
@@ -460,7 +508,7 @@ ui_wait_for_chars_or_timer(
 	}
 	if (due_time <= 0 || (wtime > 0 && due_time > remaining))
 	    due_time = remaining;
-# if defined(FEAT_JOB_CHANNEL) || defined(FEAT_SOUND_CANBERRA)
+# if defined(FEAT_JOB_CHANNEL) || defined(FEAT_SOUND_CANBERRA) || defined(FEAT_SOUND_MACOSX)
 	if ((due_time < 0 || due_time > 10L) && (
 #  if defined(FEAT_JOB_CHANNEL)
 		(
@@ -468,11 +516,11 @@ ui_wait_for_chars_or_timer(
 		!gui.in_use &&
 #   endif
 		(has_pending_job() || channel_any_readahead()))
-#   ifdef FEAT_SOUND_CANBERRA
+#   if defined(FEAT_SOUND_CANBERRA) || defined(FEAT_SOUND_MACOSX)
 		||
 #   endif
 #  endif
-#  ifdef FEAT_SOUND_CANBERRA
+#  if defined(FEAT_SOUND_CANBERRA) ||  defined(FEAT_SOUND_MACOSX)
 		    has_any_sound_callback()
 #  endif
 		    ))
@@ -538,8 +586,6 @@ ui_delay(long msec_arg, int ignoreinput)
 #ifdef FEAT_EVAL
     if (ui_delay_for_testing > 0)
 	msec = ui_delay_for_testing;
-#endif
-#ifdef FEAT_JOB_CHANNEL
     ch_log(NULL, "ui_delay(%ld)", msec);
 #endif
 #ifdef FEAT_GUI
@@ -568,7 +614,7 @@ ui_suspend(void)
     mch_suspend();
 }
 
-#if !defined(UNIX) || !defined(SIGTSTP) || defined(PROTO)
+#if !defined(UNIX) || !defined(SIGTSTP)
 /*
  * When the OS can't really suspend, call this function to start a shell.
  * This is never called in the GUI.
@@ -577,7 +623,7 @@ ui_suspend(void)
 suspend_shell(void)
 {
     if (*p_sh == NUL)
-	emsg(_(e_shellempty));
+	emsg(_(e_shell_option_is_empty));
     else
     {
 	msg_puts(_("new shell started\n"));
@@ -649,11 +695,10 @@ ui_new_shellsize(void)
     }
 }
 
-#if ((defined(FEAT_EVAL) || defined(FEAT_TERMINAL)) \
+#if (defined(FEAT_EVAL) || defined(FEAT_TERMINAL)) \
 	    && (defined(FEAT_GUI) \
 		|| defined(MSWIN) \
-		|| (defined(HAVE_TGETENT) && defined(FEAT_TERMRESPONSE)))) \
-	|| defined(PROTO)
+		|| (defined(HAVE_TGETENT) && defined(FEAT_TERMRESPONSE)))
 /*
  * Get the window position in pixels, if possible.
  * Return FAIL when not possible.
@@ -729,23 +774,23 @@ ui_breakcheck_force(int force)
 // For the client-server code in the console the received keys are put in the
 // input buffer.
 
-#if defined(USE_INPUT_BUF) || defined(PROTO)
+#if defined(USE_INPUT_BUF)
 
 /*
  * Internal typeahead buffer.  Includes extra space for long key code
  * descriptions which would otherwise overflow.  The buffer is considered full
  * when only this extra space (or part of it) remains.
  */
-#if defined(FEAT_JOB_CHANNEL) || defined(FEAT_CLIENTSERVER)
+# if defined(FEAT_JOB_CHANNEL) || defined(FEAT_CLIENTSERVER)
    /*
     * NetBeans stuffs debugger commands into the input buffer.
     * This requires a larger buffer...
     * (Madsen) Go with this for remote input as well ...
     */
-# define INBUFLEN 4096
-#else
-# define INBUFLEN 250
-#endif
+#  define INBUFLEN 4096
+# else
+#  define INBUFLEN 250
+# endif
 
 static char_u	inbuf[INBUFLEN + MAX_KEY_CODE_LEN];
 static int	inbufcount = 0;	    // number of chars in inbuf[]
@@ -768,21 +813,21 @@ vim_is_input_buf_empty(void)
     return (inbufcount == 0);
 }
 
-#if defined(FEAT_OLE) || defined(PROTO)
+# if defined(FEAT_OLE)
     int
 vim_free_in_input_buf(void)
 {
     return (INBUFLEN - inbufcount);
 }
-#endif
+# endif
 
-#if defined(FEAT_GUI_GTK) || defined(PROTO)
+# if defined(FEAT_GUI_GTK)
     int
 vim_used_in_input_buf(void)
 {
     return inbufcount;
 }
-#endif
+# endif
 
 /*
  * Return the current contents of the input buffer and make it empty.
@@ -817,25 +862,25 @@ set_input_buf(char_u *p, int overwrite)
 {
     garray_T	*gap = (garray_T *)p;
 
-    if (gap != NULL)
+    if (gap == NULL)
+	return;
+
+    if (gap->ga_data != NULL)
     {
-	if (gap->ga_data != NULL)
+	if (overwrite || inbufcount + gap->ga_len >= INBUFLEN)
 	{
-	    if (overwrite || inbufcount + gap->ga_len >= INBUFLEN)
-	    {
-		mch_memmove(inbuf, gap->ga_data, gap->ga_len);
-		inbufcount = gap->ga_len;
-	    }
-	    else
-	    {
-		mch_memmove(inbuf + gap->ga_len, inbuf, inbufcount);
-		mch_memmove(inbuf, gap->ga_data, gap->ga_len);
-		inbufcount += gap->ga_len;
-	    }
-	    vim_free(gap->ga_data);
+	    mch_memmove(inbuf, gap->ga_data, gap->ga_len);
+	    inbufcount = gap->ga_len;
 	}
-	vim_free(gap);
+	else
+	{
+	    mch_memmove(inbuf + gap->ga_len, inbuf, inbufcount);
+	    mch_memmove(inbuf, gap->ga_data, gap->ga_len);
+	    inbufcount += gap->ga_len;
+	}
+	vim_free(gap->ga_data);
     }
+    vim_free(gap);
 }
 
 /*
@@ -897,7 +942,8 @@ read_from_input_buf(char_u *buf, long maxlen)
 	maxlen = inbufcount;
     mch_memmove(buf, inbuf, (size_t)maxlen);
     inbufcount -= maxlen;
-    if (inbufcount)
+    // check "maxlen" to avoid clang warning
+    if (inbufcount > 0 && maxlen > 0)
 	mch_memmove(inbuf, inbuf + maxlen, (size_t)inbufcount);
     return (int)maxlen;
 }
@@ -905,29 +951,29 @@ read_from_input_buf(char_u *buf, long maxlen)
     void
 fill_input_buf(int exit_on_error UNUSED)
 {
-#if defined(UNIX) || defined(VMS) || defined(MACOS_X)
+# if defined(UNIX) || defined(VMS) || defined(MACOS_X)
     int		len;
     int		try;
     static int	did_read_something = FALSE;
     static char_u *rest = NULL;	    // unconverted rest of previous read
     static int	restlen = 0;
     int		unconverted;
-#endif
+# endif
 
-#ifdef FEAT_GUI
+# ifdef FEAT_GUI
     if (gui.in_use
-# ifdef NO_CONSOLE_INPUT
+#  ifdef NO_CONSOLE_INPUT
     // Don't use the GUI input when the window hasn't been opened yet.
     // We get here from ui_inchar() when we should try reading from stdin.
 	    && !no_console_input()
-# endif
+#  endif
        )
     {
 	gui_mch_update();
 	return;
     }
-#endif
-#if defined(UNIX) || defined(VMS) || defined(MACOS_X)
+# endif
+# if defined(UNIX) || defined(VMS) || defined(MACOS_X)
     if (vim_is_input_buf_full())
 	return;
     /*
@@ -967,7 +1013,7 @@ fill_input_buf(int exit_on_error UNUSED)
 #  else
 	len = read(read_cmd_fd, (char *)inbuf + inbufcount, readlen);
 #  endif
-#  ifdef FEAT_JOB_CHANNEL
+#  ifdef FEAT_EVAL
 	if (len > 0)
 	{
 	    inbuf[inbufcount + len] = NUL;
@@ -989,13 +1035,13 @@ fill_input_buf(int exit_on_error UNUSED)
 	    // back to cooked mode, use another descriptor and set the mode to
 	    // what it was.
 	    settmode(TMODE_COOK);
-#ifdef HAVE_DUP
+#  ifdef HAVE_DUP
 	    // Use stderr for stdin, also works for shell commands.
 	    close(0);
 	    vim_ignored = dup(2);
-#else
+#  else
 	    read_cmd_fd = 2;	// read from stderr instead of stdin
-#endif
+#  endif
 	    settmode(m);
 	}
 	if (!exit_on_error)
@@ -1028,26 +1074,35 @@ fill_input_buf(int exit_on_error UNUSED)
 				     len + unconverted, INBUFLEN - inbufcount,
 				       rest == NULL ? &rest : NULL, &restlen);
 	}
-	while (len-- > 0)
+	while (len > 0)
 	{
 	    // If a CTRL-C was typed, remove it from the buffer and set
-	    // got_int.  Also recognize CTRL-C with modifyOtherKeys set, in two
-	    // forms.
-	    if (ctrl_c_interrupts && (inbuf[inbufcount] == 3
+	    // got_int.  Also recognize CTRL-C with modifyOtherKeys set, lower
+	    // and upper case, in two forms.
+	    // If terminal key protocols are in use, we expect to receive
+	    // Ctrl_C as an escape sequence, ignore a raw Ctrl_C as this could
+	    // be paste data.
+	    if (ctrl_c_interrupts
+			&& ((inbuf[inbufcount] == Ctrl_C && !key_protocol_enabled())
 			|| (len >= 10 && STRNCMP(inbuf + inbufcount,
 						   "\033[27;5;99~", 10) == 0)
+			|| (len >= 10 && STRNCMP(inbuf + inbufcount,
+						   "\033[27;5;67~", 10) == 0)
 			|| (len >= 7 && STRNCMP(inbuf + inbufcount,
-						       "\033[99;5u", 7) == 0)))
+						       "\033[99;5u", 7) == 0)
+			|| (len >= 7 && STRNCMP(inbuf + inbufcount,
+						       "\033[67;5u", 7) == 0)))
 	    {
 		// remove everything typed before the CTRL-C
-		mch_memmove(inbuf, inbuf + inbufcount, (size_t)(len + 1));
+		mch_memmove(inbuf, inbuf + inbufcount, (size_t)(len));
 		inbufcount = 0;
 		got_int = TRUE;
 	    }
+	    --len;
 	    ++inbufcount;
 	}
     }
-#endif // UNIX || VMS || MACOS_X
+# endif // UNIX || VMS || MACOS_X
 }
 #endif // USE_INPUT_BUF
 
@@ -1063,7 +1118,7 @@ read_error_exit(void)
     preserve_exit();
 }
 
-#if defined(CURSOR_SHAPE) || defined(PROTO)
+#if defined(CURSOR_SHAPE)
 /*
  * May update the shape of the cursor.
  */
@@ -1101,8 +1156,8 @@ check_col(int col)
 {
     if (col < 0)
 	return 0;
-    if (col >= (int)screen_Columns)
-	return (int)screen_Columns - 1;
+    if (col >= screen_Columns)
+	return screen_Columns - 1;
     return col;
 }
 
@@ -1114,9 +1169,78 @@ check_row(int row)
 {
     if (row < 0)
 	return 0;
-    if (row >= (int)screen_Rows)
-	return (int)screen_Rows - 1;
+    if (row >= screen_Rows)
+	return screen_Rows - 1;
     return row;
+}
+
+/*
+ * Return length of line "lnum" in screen cells for horizontal scrolling.
+ */
+    long
+scroll_line_len(linenr_T lnum)
+{
+    char_u	*p = ml_get(lnum);
+    colnr_T	col = 0;
+
+    if (*p != NUL)
+	for (;;)
+	{
+	    int	    w = chartabsize(p, col);
+	    MB_PTR_ADV(p);
+	    if (*p == NUL)		// don't count the last character
+		break;
+	    col += w;
+	}
+    return col;
+}
+
+/*
+ * Find the longest visible line number.  This is used for horizontal
+ * scrolling.  If this is not possible (or not desired, by setting 'h' in
+ * "guioptions") then the current line number is returned.
+ */
+    linenr_T
+ui_find_longest_lnum(void)
+{
+    linenr_T ret = 0;
+
+    // Calculate maximum for horizontal scrollbar.  Check for reasonable
+    // line numbers, topline and botline can be invalid when displaying is
+    // postponed.
+    if (
+#ifdef FEAT_GUI
+	    (!gui.in_use || vim_strchr(p_go, GO_HORSCROLL) == NULL) &&
+#endif
+	    curwin->w_topline <= curwin->w_cursor.lnum
+	    && curwin->w_botline > curwin->w_cursor.lnum
+	    && curwin->w_botline <= curbuf->b_ml.ml_line_count + 1)
+    {
+	linenr_T    lnum;
+	long	    n;
+	long	    max = 0;
+
+	// Use maximum of all visible lines.  Remember the lnum of the
+	// longest line, closest to the cursor line.  Used when scrolling
+	// below.
+	for (lnum = curwin->w_topline; lnum < curwin->w_botline; ++lnum)
+	{
+	    n = scroll_line_len(lnum);
+	    if (n > max)
+	    {
+		max = n;
+		ret = lnum;
+	    }
+	    else if (n == max && abs((int)(lnum - curwin->w_cursor.lnum))
+				     < abs((int)(ret - curwin->w_cursor.lnum)))
+		ret = lnum;
+	}
+    }
+    else
+	// Use cursor line only.
+	ret = curwin->w_cursor.lnum;
+
+    return ret;
 }
 
 /*
@@ -1136,14 +1260,18 @@ ui_focus_change(
     if (in_focus && last_time + 2 < time(NULL))
     {
 	need_redraw = check_timestamps(
-# ifdef FEAT_GUI
+#ifdef FEAT_GUI
 		gui.in_use
-# else
+#else
 		FALSE
-# endif
+#endif
 		);
 	last_time = time(NULL);
     }
+
+#ifdef FEAT_TERMINAL
+    term_focus_change(in_focus);
+#endif
 
     /*
      * Fire the focus gained/lost autocommand.
@@ -1152,37 +1280,14 @@ ui_focus_change(
 				: EVENT_FOCUSLOST, NULL, NULL, FALSE, curbuf);
 
     if (need_redraw)
-    {
-	// Something was executed, make sure the cursor is put back where it
-	// belongs.
-	need_wait_return = FALSE;
+	redraw_after_callback(TRUE, TRUE);
 
-	if (State & CMDLINE)
-	    redrawcmdline();
-	else if (State == HITRETURN || State == SETWSIZE || State == ASKMORE
-		|| State == EXTERNCMD || State == CONFIRM || exmode_active)
-	    repeat_message();
-	else if ((State & NORMAL) || (State & INSERT))
-	{
-	    if (must_redraw != 0)
-		update_screen(0);
-	    setcursor();
-	}
-	cursor_on();	    // redrawing may have switched it off
-	out_flush_cursor(FALSE, TRUE);
-# ifdef FEAT_GUI
-	if (gui.in_use)
-	    gui_update_scrollbars(FALSE);
-# endif
-    }
-#ifdef FEAT_TITLE
     // File may have been changed from 'readonly' to 'noreadonly'
     if (need_maketitle)
 	maketitle();
-#endif
 }
 
-#if defined(HAVE_INPUT_METHOD) || defined(PROTO)
+#if defined(HAVE_INPUT_METHOD)
 /*
  * Save current Input Method status to specified place.
  */

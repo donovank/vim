@@ -1,13 +1,12 @@
 " Tests for popup windows for text properties
 
-source check.vim
 CheckFeature popupwin
 CheckFeature textprop
 
-source screendump.vim
-CheckScreendump
+source util/screendump.vim
 
 func Test_textprop_popup()
+  CheckScreendump
   let lines =<< trim END
 	call setline(1, range(1, 100))
 	call setline(50, 'some text to work with')
@@ -21,14 +20,14 @@ func Test_textprop_popup()
 		\ bufnr: bufnr('%'),
 		\ })
 	let winid = popup_create('the text', #{
-	      \ pos: 'botleft', 
+	      \ pos: 'botleft',
 	      \ textprop: 'popupMarker',
 	      \ border: [],
 	      \ padding: [0,1,0,1],
 	      \ close: 'click',
 	      \ })
   END
-  call writefile(lines, 'XtestTextpropPopup')
+  call writefile(lines, 'XtestTextpropPopup', 'D')
   let buf = RunVimInTerminal('-S XtestTextpropPopup', #{rows: 10})
   call VerifyScreenDump(buf, 'Test_popup_textprop_01', {})
 
@@ -52,10 +51,10 @@ func Test_textprop_popup()
 
   " clean up
   call StopVimInTerminal(buf)
-  call delete('XtestTextpropPopup')
 endfunc
 
 func Test_textprop_popup_corners()
+  CheckScreendump
   let lines =<< trim END
 	call setline(1, range(1, 100))
 	call setline(50, 'now working with some longer text here')
@@ -68,30 +67,30 @@ func Test_textprop_popup_corners()
 		\ type: 'popupMarker',
 		\ })
 	let winid = popup_create('bottom left', #{
-	      \ pos: 'botleft', 
+	      \ pos: 'botleft',
 	      \ textprop: 'popupMarker',
 	      \ textpropwin: win_getid(),
 	      \ padding: [0,1,0,1],
 	      \ })
 	let winid = popup_create('bottom right', #{
-	      \ pos: 'botright', 
+	      \ pos: 'botright',
 	      \ textprop: 'popupMarker',
 	      \ border: [],
 	      \ padding: [0,1,0,1],
 	      \ })
 	let winid = popup_create('top left', #{
-	      \ pos: 'topleft', 
+	      \ pos: 'topleft',
 	      \ textprop: 'popupMarker',
 	      \ border: [],
 	      \ padding: [0,1,0,1],
 	      \ })
 	let winid = popup_create('top right', #{
-	      \ pos: 'topright', 
+	      \ pos: 'topright',
 	      \ textprop: 'popupMarker',
 	      \ padding: [0,1,0,1],
 	      \ })
   END
-  call writefile(lines, 'XtestTextpropPopupCorners')
+  call writefile(lines, 'XtestTextpropPopupCorners', 'D')
   let buf = RunVimInTerminal('-S XtestTextpropPopupCorners', #{rows: 12})
   call VerifyScreenDump(buf, 'Test_popup_textprop_corn_1', {})
 
@@ -113,10 +112,10 @@ func Test_textprop_popup_corners()
 
   " clean up
   call StopVimInTerminal(buf)
-  call delete('XtestTextpropPopupCorners')
 endfunc
 
 func Test_textprop_popup_offsets()
+  CheckScreendump
   let lines =<< trim END
 	call setline(1, range(1, 100))
 	call setline(50, 'now working with some longer text here')
@@ -129,14 +128,14 @@ func Test_textprop_popup_offsets()
 		\ type: 'popupMarker',
 		\ })
 	let winid = popup_create('bottom left', #{
-	      \ pos: 'botleft', 
+	      \ pos: 'botleft',
 	      \ line: -1,
 	      \ col: 2,
 	      \ textprop: 'popupMarker',
 	      \ padding: [0,1,0,1],
 	      \ })
 	let winid = popup_create('bottom right', #{
-	      \ pos: 'botright', 
+	      \ pos: 'botright',
 	      \ line: -1,
 	      \ col: -2,
 	      \ textprop: 'popupMarker',
@@ -144,7 +143,7 @@ func Test_textprop_popup_offsets()
 	      \ padding: [0,1,0,1],
 	      \ })
 	let winid = popup_create('top left', #{
-	      \ pos: 'topleft', 
+	      \ pos: 'topleft',
 	      \ line: 1,
 	      \ col: 2,
 	      \ textprop: 'popupMarker',
@@ -152,14 +151,14 @@ func Test_textprop_popup_offsets()
 	      \ padding: [0,1,0,1],
 	      \ })
 	let winid = popup_create('top right', #{
-	      \ pos: 'topright', 
+	      \ pos: 'topright',
 	      \ line: 1,
 	      \ col: -2,
 	      \ textprop: 'popupMarker',
 	      \ padding: [0,1,0,1],
 	      \ })
   END
-  call writefile(lines, 'XtestTextpropPopupOffset')
+  call writefile(lines, 'XtestTextpropPopupOffset', 'D')
   let buf = RunVimInTerminal('-S XtestTextpropPopupOffset', #{rows: 12})
   call VerifyScreenDump(buf, 'Test_popup_textprop_off_1', {})
 
@@ -169,7 +168,29 @@ func Test_textprop_popup_offsets()
 
   " clean up
   call StopVimInTerminal(buf)
-  call delete('XtestTextpropPopupOffset')
+endfunc
+
+
+" A popup that follows a text property is hidden when prop_remove() or
+" prop_clear() removes the property.
+func Test_textprop_popup_hidden_when_removed()
+  new
+  call setline(1, range(1, 20))
+  call prop_type_add('popupMarker', {})
+  for Remove in [{-> prop_remove({'type': 'popupMarker'})}, {-> prop_clear(5)}]
+    call prop_add(5, 1, {'type': 'popupMarker', 'length': 1})
+    let winid = popup_create('follows', {'textprop': 'popupMarker',
+          \ 'line': -1, 'col': 1, 'pos': 'botleft'})
+    redraw
+    call assert_equal(1, popup_getpos(winid).visible)
+
+    call Remove()
+    redraw
+    call assert_equal(0, popup_getpos(winid).visible)
+    call popup_close(winid)
+  endfor
+  call prop_type_delete('popupMarker')
+  bwipe!
 endfunc
 
 

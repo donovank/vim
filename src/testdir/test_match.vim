@@ -1,8 +1,7 @@
 " Test for :match, :2match, :3match, clearmatches(), getmatches(), matchadd(),
 " matchaddpos(), matcharg(), matchdelete(), and setmatches().
 
-source screendump.vim
-source check.vim
+source util/screendump.vim
 
 function Test_match()
   highlight MyGroup1 term=bold ctermbg=red guibg=red
@@ -36,8 +35,8 @@ function Test_match()
   let m1 = matchadd("MyGroup1", "TODO")
   let m2 = matchadd("MyGroup2", "FIXME", 42)
   let m3 = matchadd("MyGroup3", "XXX", 60, 17)
-  let ans = [{'group': 'MyGroup1', 'pattern': 'TODO', 'priority': 10, 'id': 4},
-        \    {'group': 'MyGroup2', 'pattern': 'FIXME', 'priority': 42, 'id': 5},
+  let ans = [{'group': 'MyGroup1', 'pattern': 'TODO', 'priority': 10, 'id': 1000},
+        \    {'group': 'MyGroup2', 'pattern': 'FIXME', 'priority': 42, 'id': 1001},
         \    {'group': 'MyGroup3', 'pattern': 'XXX', 'priority': 60, 'id': 17}]
   call assert_equal(ans, getmatches())
 
@@ -95,7 +94,7 @@ function Test_match()
   call assert_equal(0, setmatches([]))
   call assert_equal(0, setmatches([{'group': 'MyGroup1', 'pattern': 'TODO', 'priority': 10, 'id': 1}]))
   call clearmatches()
-  call assert_fails('call setmatches(0)', 'E714:')
+  call assert_fails('call setmatches(0)', 'E1211:')
   call assert_fails('call setmatches([0])', 'E474:')
   call assert_fails("call setmatches([{'wrong key': 'wrong value'}])", 'E474:')
   call assert_equal(-1, setmatches([{'group' : 'Search', 'priority' : 10, 'id' : 5, 'pos1' : {}}]))
@@ -119,7 +118,7 @@ function Test_match()
   call clearmatches()
 
   call setline(1, 'abcdΣabcdef')
-  eval "MyGroup1"->matchaddpos([[1, 4, 2], [1, 9, 2]])
+  eval "MyGroup1"->matchaddpos([[1, 4, 2], [1, 9, 2]], 10, 42)
   1
   redraw!
   let v1 = screenattr(1, 1)
@@ -130,7 +129,7 @@ function Test_match()
   let v8 = screenattr(1, 8)
   let v9 = screenattr(1, 9)
   let v10 = screenattr(1, 10)
-  call assert_equal([{'group': 'MyGroup1', 'id': 11, 'priority': 10, 'pos1': [1, 4, 2], 'pos2': [1, 9, 2]}], getmatches())
+  call assert_equal([{'group': 'MyGroup1', 'id': 42, 'priority': 10, 'pos1': [1, 4, 2], 'pos2': [1, 9, 2]}], getmatches())
   call assert_notequal(v1, v4)
   call assert_equal(v5, v4)
   call assert_equal(v6, v1)
@@ -144,7 +143,7 @@ function Test_match()
   let m=getmatches()
   call clearmatches()
   call setmatches(m)
-  call assert_equal([{'group': 'MyGroup1', 'id': 11, 'priority': 10, 'pos1': [1, 4, 2], 'pos2': [1,9, 2]}, {'group': 'MyGroup1', 'pattern': '\%2lmatchadd', 'priority': 10, 'id': 12}], getmatches())
+  call assert_equal([{'group': 'MyGroup1', 'id': 42, 'priority': 10, 'pos1': [1, 4, 2], 'pos2': [1,9, 2]}, {'group': 'MyGroup1', 'pattern': '\%2lmatchadd', 'priority': 10, 'id': 1106}], getmatches())
 
   highlight MyGroup1 NONE
   highlight MyGroup2 NONE
@@ -219,6 +218,21 @@ func Test_matchaddpos()
   set hlsearch&
 endfunc
 
+" Add 12 match positions (previously the limit was 8 positions).
+func Test_matchaddpos_dump()
+  CheckScreendump
+
+  let lines =<< trim END
+      call setline(1, ['1234567890123']->repeat(14))
+      call matchaddpos('Search', range(1, 12)->map({i, v -> [v, v]}))
+  END
+  call writefile(lines, 'Xmatchaddpos', 'D')
+  let buf = RunVimInTerminal('-S Xmatchaddpos', #{rows: 14})
+  call VerifyScreenDump(buf, 'Test_matchaddpos_1', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
 func Test_matchaddpos_otherwin()
   syntax on
   new
@@ -237,8 +251,8 @@ func Test_matchaddpos_otherwin()
 
   let savematches = getmatches(winid)
   let expect = [
-        \ {'group': 'Search', 'pattern': '4', 'priority': 10, 'id': 4},
-        \ {'group': 'Error', 'id': 5, 'priority': 10, 'pos1': [1, 2, 1], 'pos2': [2, 2, 1]},
+        \ {'group': 'Search', 'pattern': '4', 'priority': 10, 'id': 1000},
+        \ {'group': 'Error', 'id': 1001, 'priority': 10, 'pos1': [1, 2, 1], 'pos2': [2, 2, 1]},
         \]
   call assert_equal(expect, savematches)
 
@@ -292,11 +306,44 @@ func Test_matchaddpos_error()
   " Why doesn't the following error have an error code E...?
   call assert_fails("call matchaddpos('Error', [{}])", 'E290:')
   call assert_equal(-1, matchaddpos('Error', test_null_list()))
+  call assert_equal(-1, matchaddpos('Error', []))
   call assert_fails("call matchaddpos('Error', [1], [], 1)", 'E745:')
   call assert_equal(-1, matchaddpos('Search', [[]]))
   call assert_fails("call matchaddpos('Search', [[{}]])", 'E728:')
   call assert_fails("call matchaddpos('Search', [[2, {}]])", 'E728:')
   call assert_fails("call matchaddpos('Search', [[3, 4, {}]])", 'E728:')
+endfunc
+
+" A position given as a range() List
+func Test_matchaddpos_range_position()
+  new
+  call setline(1, ['abcd', 'efgh'])
+  let id = matchaddpos('Search', [range(1, 2), range(2, 4)])
+  call assert_equal([1, 2, 1], getmatches()[0].pos1)
+  call assert_equal([2, 3, 4], getmatches()[0].pos2)
+  call matchdelete(id)
+  bwipe!
+endfunc
+
+" setmatches() with more than one "posN" entry used to keep a reference to
+" every position list, so they were not released until the next garbage
+" collection.  A "posN" value that is not a List made it bail out early
+" without releasing the list at all.
+func Test_setmatches_pos_refcount()
+  let p1 = [1, 1, 1]
+  let p2 = [2, 1, 1]
+  call assert_equal(1, test_refcount(p1))
+  call assert_equal(1, test_refcount(p2))
+
+  call setmatches([#{group: 'Search', priority: 10, id: 4, pos1: p1, pos2: p2}])
+  call clearmatches()
+  call assert_equal(1, test_refcount(p1))
+  call assert_equal(1, test_refcount(p2))
+
+  let p3 = [3, 1, 1]
+  call assert_equal(-1, setmatches([#{group: 'Search', priority: 10, id: 4, pos1: p3, pos2: {}}]))
+  call clearmatches()
+  call assert_equal(1, test_refcount(p3))
 endfunc
 
 func OtherWindowCommon()
@@ -329,6 +376,7 @@ func Test_matchdelete_error()
 endfunc
 
 func Test_matchclear_other_window()
+  CheckScreendump
   CheckRunVimInTerminal
   let buf = OtherWindowCommon()
   call term_sendkeys(buf, ":call clearmatches(winid)\<CR>")
@@ -339,6 +387,7 @@ func Test_matchclear_other_window()
 endfunc
 
 func Test_matchadd_other_window()
+  CheckScreendump
   CheckRunVimInTerminal
   let buf = OtherWindowCommon()
   call term_sendkeys(buf, ":call matchadd('Search', 'Hello', 1, -1, #{window: winid})\<CR>")
@@ -347,6 +396,42 @@ func Test_matchadd_other_window()
 
   call StopVimInTerminal(buf)
   call delete('XscriptMatchCommon')
+endfunc
+
+func Test_match_in_linebreak()
+  CheckScreendump
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+    set breakindent linebreak breakat+=]
+    call printf('%s]%s', repeat('x', 50), repeat('x', 70))->setline(1)
+    call matchaddpos('ErrorMsg', [[1, 51]])
+  END
+  call writefile(lines, 'XscriptMatchLinebreak', 'D')
+  let buf = RunVimInTerminal('-S XscriptMatchLinebreak', #{rows: 10})
+  call VerifyScreenDump(buf, 'Test_match_linebreak', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_match_with_incsearch()
+  CheckScreendump
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+    set incsearch
+    call setline(1, range(20))
+    call matchaddpos('ErrorMsg', [3])
+  END
+  call writefile(lines, 'XmatchWithIncsearch', 'D')
+  let buf = RunVimInTerminal('-S XmatchWithIncsearch', #{rows: 6})
+  call VerifyScreenDump(buf, 'Test_match_with_incsearch_1', {})
+
+  call term_sendkeys(buf, ":s/0")
+  call VerifyScreenDump(buf, 'Test_match_with_incsearch_2', {})
+
+  call term_sendkeys(buf, "\<CR>")
+  call StopVimInTerminal(buf)
 endfunc
 
 " Test for deleting matches outside of the screen redraw top/bottom lines
@@ -367,6 +452,22 @@ func Test_matchdelete_redraw()
   call matchdelete(m1)
   call assert_equal(1, len(getmatches()))
   bw!
+endfunc
+
+func Test_match_tab_with_linebreak()
+  CheckScreendump
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+    set linebreak
+    call setline(1, "\tix")
+    call matchadd('ErrorMsg', '\t')
+  END
+  call writefile(lines, 'XscriptMatchTabLinebreak', 'D')
+  let buf = RunVimInTerminal('-S XscriptMatchTabLinebreak', #{rows: 10})
+  call VerifyScreenDump(buf, 'Test_match_tab_linebreak', {})
+
+  call StopVimInTerminal(buf)
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

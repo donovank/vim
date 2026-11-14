@@ -4,15 +4,23 @@
 " Maintainer: Marshall Ward <marshall.ward@gmail.com>
 " Previous Maintainer: Nikolai Weibull <now@bitwi.se>
 " Latest Revision: 2020-03-31
+" 2023 Aug 28 by Vim Project (undo_indent)
+" 2025 Oct 13 by Vim project: preserve indentation #18566
 
 if exists("b:did_indent")
   finish
 endif
 let b:did_indent = 1
 
+" Save and modify cpoptions
+let s:save_cpo = &cpo
+set cpo&vim
+
 setlocal indentexpr=GetRSTIndent()
 setlocal indentkeys=!^F,o,O
 setlocal nosmartindent
+
+let b:undo_indent = "setlocal indentexpr< indentkeys< smartindent<"
 
 if exists("*GetRSTIndent")
   finish
@@ -24,7 +32,8 @@ let s:note_pattern = '^\.\. '
 
 function! s:get_paragraph_start()
     let paragraph_mark_start = getpos("'{")[1]
-    return getline(paragraph_mark_start) =~ '\S' ? paragraph_mark_start : paragraph_mark_start + 1
+    return getline(paragraph_mark_start) =~
+        \ '\S' ? paragraph_mark_start : paragraph_mark_start + 1
 endfunction
 
 function GetRSTIndent()
@@ -39,7 +48,7 @@ function GetRSTIndent()
   let psnum = s:get_paragraph_start()
   if psnum != 0
       if getline(psnum) =~ s:note_pattern
-          let ind = 3
+          let ind = max([3, ind])
       endif
   endif
 
@@ -72,3 +81,7 @@ function GetRSTIndent()
 
   return ind
 endfunction
+
+" Restore 'cpoptions'
+let &cpo = s:save_cpo
+unlet s:save_cpo
